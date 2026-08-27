@@ -1,0 +1,23 @@
+Settings for Track-ID 14 AbuDhabi;14
+Rotate;28
+Scale;17
+X_delta;638
+Y_delta;423
+PitDuration;29
+TrackInfo;0
+TrackLength;5547
+ShowTrackDescription;True
+!Comment: to add items to TrackDescription use the following format;
+track_position; description; allignment (L/R); x_offset; y_offset
+!Comment:Add items under TrackDescription
+TrackDescription;
+42589;(1);R;-20;10
+85068;(3);L;20;-40
+128836;(5);R;-20;10
+137615;(6);L;-14;-26
+150907;(7);R;14;-26
+274801;(8);R;-20;-30
+377612;(11);L;-10;0
+406279;(14);R;6;0
+460701;(17);R;6;-30
+514410;(20);R;6;0

@@ -1,0 +1,26 @@
+Settings for Track-ID 15 Texas;15
+Rotate;43
+Scale;16
+X_delta;670
+Y_delta;213
+PitDuration;22
+TrackInfo;0
+TrackLength;5514
+ShowTrackDescription;True
+!Comment: to add items to TrackDescription use the following format;
+track_position; description; allignment (L/R); x_offset; y_offset
+!Comment:Add items under TrackDescription
+TrackDescription;
+68494;(1);L;5;10
+90340;(2);R;0;-40
+114230;(3);R;-20;10
+128815;(4);R;-20;-40
+137804;(5);R;-20;10
+150705;(6);R;10;-36
+170247;(7);L;10;16
+185989;(8);R;6;-30
+200788;(9);L;6;10
+256828;(11);R;10;-10
+378421;(12);R;-10;-34
+428175;(15);R;-30;-34
+535041;(20);R;-30;-34

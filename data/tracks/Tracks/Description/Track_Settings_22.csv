@@ -1,0 +1,19 @@
+Settings for Track-ID 22 Silverstone Short;22
+Rotate;0
+Scale;14
+X_delta;940
+Y_delta;468
+PitDuration;21
+TrackInfo;0
+TrackLength;5301
+ShowTrackDescription;True
+!Comment: to add items to TrackDescription use the following format;
+track_position; description; allignment (L/R); x_offset; y_offset
+!Comment:Add items under TrackDescription
+TrackDescription;
+42629;(1) Copse;R;14;-10
+78151;(2) Maggotts;L;-36;-30
+91231;(3) Becketts;R;10;-10
+117639;(4) Chapel;R;12;-10
+216238;(5) Stowe;R;12;-20
+273239;(6) Club;L;-16;-10

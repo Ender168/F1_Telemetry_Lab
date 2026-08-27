@@ -1,0 +1,26 @@
+Settings for Track-ID 5 Monaco;5
+Rotate;59
+Scale;12
+X_delta;578
+Y_delta;402
+PitDuration;23
+TrackInfo;0
+TrackLength;3323
+ShowTrackDescription;True
+!Comment: to add items to TrackDescription use the following format;
+track_position; description; allignment (L/R); x_offset; y_offset
+!Comment:Add items under TrackDescription
+TrackDescription;
+22246;(1) Nouvelle Chicane;R;-50;-36
+50176;(2) Beau Rivage;R;20;-26
+77351;(3) Massenet;R;20;-10
+91703;(4) Casino;R;-40;-40
+111392;(5) Mirabeau;R;-30;-40
+127011;(6) Grand Hotel;L;10;6
+143787;(8) Portier;R;0;10
+173592;(9) Tunnel;R;0;10
+213110;(10) Novelle Chicane;L;0;10
+242846;(12) Tabac;L;50;30
+264587;(13-14) Louis Chiron;R;10;0
+293546;(17) La Rascasse;R;10;0
+302412;(19);L;-10;0

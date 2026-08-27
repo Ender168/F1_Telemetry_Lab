@@ -1,0 +1,13 @@
+Settings for Track-ID 20 Baku;20
+Rotate;0
+Scale;24
+X_delta;619
+Y_delta;463
+PitDuration;20
+TrackInfo;0
+TrackLength;5994
+ShowTrackDescription;False
+!Comment: to add items to TrackDescription use the following format;
+track_position; description; allignment (L/R); x_offset; y_offset
+!Comment:Add items under TrackDescription
+TrackDescription;

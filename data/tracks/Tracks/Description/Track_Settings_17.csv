@@ -1,0 +1,23 @@
+Settings for Track-ID 17 Austria;17
+Rotate;0
+Scale;12
+X_delta;522
+Y_delta;496
+PitDuration;18
+TrackInfo;0
+TrackLength;4323
+ShowTrackDescription;True
+!Comment: to add items to TrackDescription use the following format;
+track_position; description; allignment (L/R); x_offset; y_offset
+!Comment:Add items under TrackDescription
+TrackDescription;
+38397;Turn 1;R;-60;20
+136423;Turn 3;L;-30;-40
+222964;Turn 4;R;20;0
+271398;Turn 6;L;-30;0
+309404;Turn 7;R;0;10
+379148;Turn 9;R;10;-40
+401574;Turn 10;R;10;0
+
+
+

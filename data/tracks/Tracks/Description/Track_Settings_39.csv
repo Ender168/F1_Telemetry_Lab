@@ -1,0 +1,29 @@
+Settings for Track-ID 39 Silverstone R;39
+Rotate;0
+Scale;17
+X_delta;686
+Y_delta;440
+PitDuration;29
+TrackInfo;0
+TrackLength;5896
+ShowTrackDescription;True
+!Comment: to add items to TrackDescription use the following format;
+track_position; description; allignment (L/R); x_offset; y_offset
+!Comment:Add items under TrackDescription
+TrackDescription;
+15650;Hamilton Straight;R;30;-10
+44200;(1) Abbey;R;10;-10
+63340;(2) Farm;L;-20;-10
+91240;(3) Village;R;4;-30
+105700;(4) The Loop;L;-10;-10
+127190;(5) Aintree;R;16;-10
+156640;Wellington Straight;R;16;-10
+195410;(6) Brooklands;L;-16;-10
+220260;(7) Luffield;L;-16;-10
+235180;(8) Woodcote;R;16;-20
+310980;(9) Copse;R;16;-10
+402810;(10-12-14) Maggotts-Becketts-Chapel;R;-10;10
+461010;Hangar Straight;L;-26;-10
+507890;(15) Stowe;R;16;-10
+549980;(16) Vale;L;-16;-20
+576820;(18) Club;R;-30;-40

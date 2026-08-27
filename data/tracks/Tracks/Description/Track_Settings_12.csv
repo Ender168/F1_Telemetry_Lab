@@ -1,0 +1,35 @@
+Settings for Track-ID 12 Singapore;12
+Rotate;0
+Scale;16
+X_delta;552
+Y_delta;425
+PitDuration;26
+TrackInfo;0
+TrackLength;5063
+ShowTrackDescription;True
+!Comment: to add items to TrackDescription use the following format;
+track_position; description; allignment (L/R); x_offset; y_offset
+!Comment:Add items under TrackDescription
+TrackDescription;
+43620;(1) Sheares;R;0;-36
+50040;(2);R;-20;10
+58370;(3);R;-20;-36
+70090;(4) Republic Boulevard;L;-10;0
+98260;(5);R;10;0
+142870;(6) Raffles Boulevard;R;-10;15
+181560;(7) Memorial;R;-10;-40
+203250;(8) Nicoll Highway;R;0;-5
+222660;(9) Stamford Rd;R;-25;-32
+244690;St. Andrews Rd;L;-16;0
+265810;(10);L;-10;-18
+279900;(11);R;10;-5
+287180;(12);L;-10;0
+298520;Anderson Bridge;L;-4;6
+307930;(13);R;-12;10
+329810;Esplnade Drive;R;0;10
+361830;(14);R;-12;15
+387820;(15);R;-10;10
+435710;(16);L;50;-20
+442890;(17);L;0;0
+472490;(18);R;10;0
+482180;(19);R;14;-15

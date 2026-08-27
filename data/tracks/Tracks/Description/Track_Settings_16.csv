@@ -1,0 +1,22 @@
+Settings for Track-ID 16 Brazil;16
+Rotate;0
+Scale;11
+X_delta;741
+Y_delta;597
+PitDuration;23
+TrackInfo;0
+TrackLength;4294
+ShowTrackDescription;True
+!Comment: to add items to TrackDescription use the following format;
+track_position; description; allignment (L/R); x_offset; y_offset
+!Comment:Add items under TrackDescription
+TrackDescription;
+45465;(1-2) Senna S;R;44;10
+66391;(3) Curva do Sol;R;30;-30
+92259;Reta Oposta;L;50;20
+150642;(4-5) Descida do Lago;L;-20;-10
+206513;(6) Ferradura;L;-20;-10
+245011;(9) Pinheirinho;L;80;14
+292186;(11) Mergulho;R;16;20
+321401;(12) Juncao;L;60;10
+376126;(15) Arquibancadas;L;160;-36

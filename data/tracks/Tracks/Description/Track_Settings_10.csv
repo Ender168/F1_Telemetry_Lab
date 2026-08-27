@@ -1,0 +1,23 @@
+Settings for Track-ID 10 Spa;10
+Rotate;0
+Scale;20
+X_delta;705
+Y_delta;484
+PitDuration;23
+TrackInfo;0
+TrackLength;7003
+ShowTrackDescription;True
+!Comment: to add items to TrackDescription use the following format;
+track_position; description; allignment (L/R); x_offset; y_offset
+!Comment:Add items under TrackDescription
+TrackDescription;
+37820;(1) La Source;L;30;-36
+107090;(2) Au Rouge;R;0;16
+202780;Kemmel Straight;R;0;0
+247910;(5-6-7) Les Combes;R;-30;20
+307400;(8) Rivage;R;-20;-34
+393700;(10-11) Pouhon;R;5;-15
+466770;(13) Fagnes;L;-20;-10
+498210;(14) Stavelot;L;-10;-10
+619840;(17) Blanchimont;R;0;0
+681110;(18) Bus Stop;R;-25;15

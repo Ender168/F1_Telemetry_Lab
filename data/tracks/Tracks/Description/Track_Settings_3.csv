@@ -1,0 +1,28 @@
+Settings for Track-ID 3 Sakhir;3
+Rotate;0
+Scale;12
+X_delta;503
+Y_delta;442
+PitDuration;25
+TrackInfo;0
+TrackLength;5408
+ShowTrackDescription;True
+!Comment: to add items to TrackDescription use the following format;
+track_position; description; allignment (L/R); x_offset; y_offset
+!Comment:Add items under TrackDescription
+TrackDescription;
+75322;(1);L;-16;-10
+87824;(2);R;10;-20
+98395;(3);R;10;-20
+157322;(4);L;20;-40
+181598;(5);R;20;-20
+190279;(6);R;0;-40
+200626;(7);L;-20;-40
+230068;(8);L;-20;-20
+258455;(9);R;10;10
+274144;(10);R;10;-20
+351290;(11);L;-10;-20
+393251;(12);R;10;-20
+411638;(13);L;10;10
+489718;(14);R;10;-30
+495575;(15);R;20;-70

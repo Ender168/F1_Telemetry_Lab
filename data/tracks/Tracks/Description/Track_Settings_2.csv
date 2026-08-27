@@ -1,0 +1,28 @@
+Settings for Track-ID 2 Shanghai;2
+Rotate;0
+Scale;16
+X_delta;639
+Y_delta;380
+PitDuration;22
+TrackInfo;0
+TrackLength;5441
+ShowTrackDescription;True
+!Comment: to add items to TrackDescription use the following format;
+track_position; description; allignment (L/R); x_offset; y_offset
+!Comment:Add items under TrackDescription
+TrackDescription;
+67692;(1);L;-10;0
+75053;(2);R;-10;-36
+97975;(3);R;10;-20
+131460;(5);L;-20;-20
+159907;(6);L;20;-36
+203774;(7);L;20;-36
+236139;(8);L;20;-36
+258977;(9);R;20;-16
+313729;(11);L;10;-36
+332565;(12);L;-10;0
+341903;(13);R;-10;-36
+480944;(14);R;-10;10
+516830;(15);L;10;10
+
+

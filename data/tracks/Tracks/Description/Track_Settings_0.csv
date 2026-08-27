@@ -1,0 +1,28 @@
+Settings for Track-ID 0 Melbourne;0;;;
+Rotate;326;;;
+Scale;21;;;
+X_delta;597;;;
+Y_delta;391;;;
+PitDuration;20;;;
+TrackInfo;0;;;
+TrackLength;5301;;;
+ShowTrackDescription;True;;;
+!Comment: to add items to TrackDescription use the following format;;;;
+track_position; description; allignment (L/R); x_offset; y_offset
+!Comment:Add items under TrackDescription;;;;
+TrackDescription;;;;
+36540;(1) Jones;R;-44;10
+40130;(2) Brabham;R;12;-30
+96490;(3) Sports Centre;L;-8;0
+108000;(4) Hellas;R;12;-20
+119250;(5) Whiteford;R;10;-30
+145020;(6) Marina;L;-26;-10
+166180;(8) Lauda;R;-30;-36
+214480;Lakeside Drive;R;30;0
+266930;(9) Fosters Wall;L;80;40
+285060;(10) Waite;R;-10;-35
+385804;Hill;R;6;-30
+352920;(11) Ascari;L;-18;-10
+380940;(12) Stewart;R;0;10
+407320;(13) Senna;L;-14;-20
+414680;(14) Prost;R;-20;10

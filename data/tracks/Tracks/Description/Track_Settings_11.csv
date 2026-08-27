@@ -1,0 +1,19 @@
+Settings for Track-ID 11 Monza;11
+Rotate;170
+Scale;22
+X_delta;664
+Y_delta;289
+PitDuration;24
+TrackInfo;0
+TrackLength;5798
+ShowTrackDescription;True
+!Comment: to add items to TrackDescription use the following format;
+track_position; description; allignment (L/R); x_offset; y_offset
+!Comment:Add items under TrackDescription
+TrackDescription;
+99334;(1-2) Rettifilo;R;-24;40
+155166;(3) Curva Grande;L;-10;10
+212042;(4-5) Roggia;L;-10;10
+271920;(6-7) Lesmos;R;-32;20
+407895;(8-9-10) Ascari;L;80;-50
+525540;(11) Curva Parabolica;L;-20;0

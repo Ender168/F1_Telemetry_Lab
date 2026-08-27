@@ -1,0 +1,27 @@
+Settings for Track-ID 9 Hungaroring;9
+Rotate;0
+Scale;18
+X_delta;529
+Y_delta;436
+PitDuration;22
+TrackInfo;0
+TrackLength;4378
+ShowTrackDescription;True
+!Comment: to add items to TrackDescription use the following format;
+track_position; description; allignment (L/R); x_offset; y_offset
+!Comment:Add items under TrackDescription
+TrackDescription;
+63888;(1);L;-18;-10
+116901;(2);R;10;-10
+131918;(3);R;12;-14
+181070;(4);L;-18;-20
+203617;(5);L;-10;-30
+237069;(6);R;12;-14
+244877;(7);L;-10;-20
+259882;(8);L;-20;-10
+271656;(9);R;16;-16
+290985;(10);L;-16;-10
+310306;(11);R;16;-16
+351746;(12);R;16;0
+376445;(13);L;-16;-20
+408267;(14);R;10;0

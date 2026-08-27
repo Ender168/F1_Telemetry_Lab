@@ -1,0 +1,26 @@
+Settings for Track-ID 1 Paul Ricard;1
+Rotate;0
+Scale;21
+X_delta;618
+Y_delta;413
+PitDuration;29
+TrackInfo;0
+TrackLength;5815
+ShowTrackDescription;True
+!Comment: to add items to TrackDescription use the following format;
+track_position; description; allignment (L/R); x_offset; y_offset
+!Comment:Add items under TrackDescription
+TrackDescription;
+62020;(1-2) Verriere;R;-100;30
+164510;(3-6) Saint Beaurne;R;-70;-30
+186200;(7) L'Ecole;R;12;-20
+240710;Ligne Drot du Mistral;R;20;-26
+296000;(8);R;-20;06
+304900;(9);R;-20;-30
+339570;Mistral Straight;R;10;-26
+392450;(10) Signes;R;10;-26
+441100;(11) Droite De Beausset;L;100;10
+478930;(12);L;-10;0
+530730;(14) Virage du Lac;L;100;-30
+550610;(15) du Pont;R;-20;10
+

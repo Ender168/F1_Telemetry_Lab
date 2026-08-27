@@ -1,0 +1,26 @@
+Settings for Track-ID 4 Catalunya;4
+Rotate;0
+Scale;17
+X_delta;569
+Y_delta;388
+PitDuration;21
+TrackInfo;0
+TrackLength;4650
+ShowTrackDescription;True
+!Comment: to add items to TrackDescription use the following format;
+track_position; description; allignment (L/R); x_offset; y_offset
+!Comment:Add items under TrackDescription
+TrackDescription;
+8545;(1) Elf;R;14;0
+9262;(2);R;-20;10
+11155;(3) Renault;R;-40;10
+17577;(4) Repsol;R;-30;-30
+21521;(5) Seat;R;-20;5
+23543;(6);R;-10;10
+25497;(7);R;10;-20
+26295;(8);R;-40;-10
+29089;(9) Campsa;L;-10;-10
+35037;(10) La Caixa;L;40;-60
+37906;(11) Banco De Sabadell;R;-140;15
+40801;(12);L;10;-30
+43513;(13);R;5;-30

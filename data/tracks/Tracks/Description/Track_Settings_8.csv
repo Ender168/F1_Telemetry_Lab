@@ -1,0 +1,24 @@
+Settings for Track-ID 8 Hockenheim;8
+Rotate;0
+Scale;15
+X_delta;632
+Y_delta;429
+PitDuration;29
+TrackInfo;0
+TrackLength;5896
+ShowTrackDescription;True
+!Comment: to add items to TrackDescription use the following format;
+track_position; description; allignment (L/R); x_offset; y_offset
+!Comment:Add items under TrackDescription
+TrackDescription;
+25410;(1) NordKurve;R;30;-20
+84070;(2);R;-20;-40
+92200;(3);R;20;-10
+101050;(4);L;-24;-10
+152530;(5) Parabolika;R;-50;-40
+212470;(6) Hairpin;R;-10;16
+284400;(8) Mercedes;L;-14;-10
+302390;(10);R;14;-10
+344280;(11) Mobil 1;R;30;-10
+378440;(12) Sachs;R;-20;-34
+427130;(16) SudKurve;R;-20;10

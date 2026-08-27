@@ -1,0 +1,26 @@
+Settings for Track-ID 28 Portimão;28;;;
+Rotate;73;;;
+Scale;12;;;
+X_delta;525;;;
+Y_delta;350;;;
+PitDuration;21;;;
+TrackInfo;0;;;
+TrackLength;5301;;;
+ShowTrackDescription;True;;;
+!Comment: to add items to TrackDescription use the following format;;;;
+track_position; description; allignment (L/R); x_offset; y_offset
+!Comment:Add items under TrackDescription;;;;
+TrackDescription;;;;
+67020;(1) Primeira;R;10;-30
+83210;-2;R;10;-20
+100410;(3) Largos;R;16;-10
+116010;-4;R;0;-34
+171210;(5) Torre Vip;L;-14;-10
+220150;-7;R;0;-34
+235180;(8) Samsung;R;10;-14
+273380;(9) Craig Jones;R;14;-14
+301010;(10) Portimao;R;0;4
+325470;-12;R;24;-20
+367320;Sagres;L;-14;10
+347230;-13;R;16;-10
+423510;(15) Galp;R;14;-10

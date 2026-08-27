@@ -1,0 +1,32 @@
+Settings for Track-ID 30 Miami;30
+Rotate;0
+Scale;14
+X_delta;567
+Y_delta;444
+PitDuration;20
+TrackInfo;0
+TrackLength;5412
+ShowTrackDescription;True
+!Comment: to add items to TrackDescription use the following format;
+track_position; description; allignment (L/R); x_offset; y_offset
+!Comment:Add items under TrackDescription
+TrackDescription;
+47680;(1);R;10;-5
+54270;(2);L;-10;-5
+61610;(3);R;10;0
+121490;(4);R;-5;-30
+134150;(5);R;-5;5
+146200;(6);R;-15;-35
+158980;(7);R;10;-10
+167470;(8);R;0;0
+216140;(9);R;0;10
+243460;(10);R;0;10
+322630;(11);R;0;0
+329300;(12);L;-10;-20
+338430;(13);R;0;0
+344090;(14);R;10;0
+345400;(15);L;-10;-10
+350550;(16);R;5;-10
+478000;(17);L;-10;-10
+488470;(18);R;0;10
+499890;(19);R;-10;0

@@ -1,0 +1,22 @@
+Settings for Track-ID 13 Suzuka;13
+Rotate;0
+Scale;18
+X_delta;629
+Y_delta;412
+PitDuration;24
+TrackInfo;0
+TrackLength;5817
+ShowTrackDescription;True
+!Comment: to add items to TrackDescription use the following format;
+track_position; description; allignment (L/R); x_offset; y_offset
+!Comment:Add items under TrackDescription
+TrackDescription;
+85140;(1-2);R;-30;10
+125020;(3-6) S-Curves;L;-10;0
+179490;(7) Dunlop Curve;L;0;20
+230750;(8) Degner;R;10;0
+246890;(9);L;10;10
+292020;(10-11) Hairpin;R;-50;-40
+393700;(13-14) Spoon;R;-40;-40
+500130;(15);R;0;0
+545490;(16-18) Casio Triangle;L;100;-60

@@ -1,0 +1,26 @@
+Settings for Track-ID 27 Imola;27
+Rotate;172
+Scale;20
+X_delta;700
+Y_delta;454
+PitDuration;21
+TrackInfo;0
+TrackLength;4910
+ShowTrackDescription;True
+!Comment: to add items to TrackDescription use the following format;
+track_position; description; allignment (L/R); x_offset; y_offset
+!Comment:Add items under TrackDescription
+TrackDescription;
+54510;(1);L;0;20
+91830;(2) Traguardo;R;20;0
+112020;(4) Tamburello;R;20;0
+154200;(5) Villeneuve;R;20;-10
+163260;(6);L;-20;-15
+191960;(7) Tosa;R;20;-10
+254910;(8) Piratella;L;0;-30
+294960;(9) Acque Minerali;R;5;0
+308080;(10);R;0;5
+363010;(11-12) Variante Alta;R;-50;-40
+416190;(13);L;-30;-20
+436710;(14);L;-15;-10
+450250;(15);R;-10;10

@@ -1,0 +1,27 @@
+Settings for Track-ID 26 Zandvoort;26;;;
+Rotate;0;;;
+Scale;12;;;
+X_delta;604;;;
+Y_delta;413;;;
+PitDuration;14;;;
+TrackInfo;0;;;
+TrackLength;4257;;;
+ShowTrackDescription;True;;;
+!Comment: to add items to TrackDescription use the following format;;;;
+track_position; description; allignment (L/R); x_offset; y_offset
+!Comment:Add items under TrackDescription;;;;
+TrackDescription;;;;
+36950;(1) Tazanbocht;R;-30;-34
+69610;(2) Gerlachbocht;R;10;-14
+84370;-3;R;10;-20
+113500;-4;R;10;-30
+141550;-5;R;10;-40
+166120;(6) Sheivlak;R;20;-20
+204620;(7) Marlborobocht;R;10;6
+227360;(8) Renualtbocht;L;-10;10
+251850;(9) Vodafonebocht;L;-20;-10
+308860;(10) Audi 'S';R;20;0
+318940;-11;L;-20;-20
+350550;(12) Kumhobocht;R;20;-20
+375130;(13) Luvenoukbocht;L;-20;-10
+414990;Tunnel West;L;-20;-10
