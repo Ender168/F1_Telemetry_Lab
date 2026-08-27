@@ -4,10 +4,16 @@ namespace F1TelemetryLab;
 
 public sealed class TelemetryDatabase : IDisposable
 {
+    private const int MaxBatchOperations = 750;
+    private static readonly TimeSpan MaxBatchAge = TimeSpan.FromMilliseconds(200);
+
     private readonly SqliteConnection _connection;
     private readonly SqliteCommand _insertRaw;
     private readonly SqliteCommand _insertCar;
-    private int _pending;
+    private SqliteTransaction? _batchTransaction;
+    private DateTimeOffset _batchStartedAt;
+    private int _batchOperations;
+    private bool _disposed;
 
     public string Path { get; }
 
@@ -22,26 +28,55 @@ public sealed class TelemetryDatabase : IDisposable
 
         _insertRaw = _connection.CreateCommand();
         _insertRaw.CommandText = """
-            INSERT INTO raw_packets(received_at, packet_format, packet_id, session_uid, session_time, frame_identifier, player_car_index, packet_size, payload)
-            VALUES ($received_at, $packet_format, $packet_id, $session_uid, $session_time, $frame_identifier, $player_car_index, $packet_size, $payload);
+            INSERT INTO raw_packets(
+                received_at, packet_format, game_year, game_major_version, game_minor_version, packet_version,
+                packet_id, session_uid, session_time, frame_identifier, overall_frame_identifier,
+                player_car_index, secondary_player_car_index, packet_size, payload)
+            VALUES (
+                $received_at, $packet_format, $game_year, $game_major, $game_minor, $packet_version,
+                $packet_id, $session_uid, $session_time, $frame_identifier, $overall_frame_identifier,
+                $player_car_index, $secondary_player_car_index, $packet_size, $payload);
             """;
-        _insertRaw.Parameters.Add("$received_at", SqliteType.Text);
-        _insertRaw.Parameters.Add("$packet_format", SqliteType.Integer);
-        _insertRaw.Parameters.Add("$packet_id", SqliteType.Integer);
-        _insertRaw.Parameters.Add("$session_uid", SqliteType.Text);
-        _insertRaw.Parameters.Add("$session_time", SqliteType.Real);
-        _insertRaw.Parameters.Add("$frame_identifier", SqliteType.Integer);
-        _insertRaw.Parameters.Add("$player_car_index", SqliteType.Integer);
-        _insertRaw.Parameters.Add("$packet_size", SqliteType.Integer);
-        _insertRaw.Parameters.Add("$payload", SqliteType.Blob);
+        AddParameter(_insertRaw, "$received_at", SqliteType.Text);
+        AddParameter(_insertRaw, "$packet_format", SqliteType.Integer);
+        AddParameter(_insertRaw, "$game_year", SqliteType.Integer);
+        AddParameter(_insertRaw, "$game_major", SqliteType.Integer);
+        AddParameter(_insertRaw, "$game_minor", SqliteType.Integer);
+        AddParameter(_insertRaw, "$packet_version", SqliteType.Integer);
+        AddParameter(_insertRaw, "$packet_id", SqliteType.Integer);
+        AddParameter(_insertRaw, "$session_uid", SqliteType.Text);
+        AddParameter(_insertRaw, "$session_time", SqliteType.Real);
+        AddParameter(_insertRaw, "$frame_identifier", SqliteType.Integer);
+        AddParameter(_insertRaw, "$overall_frame_identifier", SqliteType.Integer);
+        AddParameter(_insertRaw, "$player_car_index", SqliteType.Integer);
+        AddParameter(_insertRaw, "$secondary_player_car_index", SqliteType.Integer);
+        AddParameter(_insertRaw, "$packet_size", SqliteType.Integer);
+        AddParameter(_insertRaw, "$payload", SqliteType.Blob);
 
         _insertCar = _connection.CreateCommand();
         _insertCar.CommandText = """
-            INSERT INTO car_telemetry(received_at, session_uid, session_time, frame_identifier, player_car_index, car_idx, is_player, speed, throttle, brake, steer, gear, engine_rpm, drs)
-            VALUES ($received_at, $session_uid, $session_time, $frame_identifier, $player_car_index, $car_idx, $is_player, $speed, $throttle, $brake, $steer, $gear, $engine_rpm, $drs);
+            INSERT OR REPLACE INTO car_telemetry(
+                received_at, session_uid, session_time, frame_identifier, overall_frame_identifier,
+                player_car_index, car_idx, is_player, speed, throttle, brake, steer, gear, engine_rpm, drs)
+            VALUES (
+                $received_at, $session_uid, $session_time, $frame_identifier, $overall_frame_identifier,
+                $player_car_index, $car_idx, $is_player, $speed, $throttle, $brake, $steer, $gear, $engine_rpm, $drs);
             """;
-        foreach (var name in new[] { "$received_at", "$session_uid", "$session_time", "$frame_identifier", "$player_car_index", "$car_idx", "$is_player", "$speed", "$throttle", "$brake", "$steer", "$gear", "$engine_rpm", "$drs" })
-            _insertCar.Parameters.Add(name, SqliteType.Text);
+        AddParameter(_insertCar, "$received_at", SqliteType.Text);
+        AddParameter(_insertCar, "$session_uid", SqliteType.Text);
+        AddParameter(_insertCar, "$session_time", SqliteType.Real);
+        AddParameter(_insertCar, "$frame_identifier", SqliteType.Integer);
+        AddParameter(_insertCar, "$overall_frame_identifier", SqliteType.Integer);
+        AddParameter(_insertCar, "$player_car_index", SqliteType.Integer);
+        AddParameter(_insertCar, "$car_idx", SqliteType.Integer);
+        AddParameter(_insertCar, "$is_player", SqliteType.Integer);
+        AddParameter(_insertCar, "$speed", SqliteType.Integer);
+        AddParameter(_insertCar, "$throttle", SqliteType.Real);
+        AddParameter(_insertCar, "$brake", SqliteType.Real);
+        AddParameter(_insertCar, "$steer", SqliteType.Real);
+        AddParameter(_insertCar, "$gear", SqliteType.Integer);
+        AddParameter(_insertCar, "$engine_rpm", SqliteType.Integer);
+        AddParameter(_insertCar, "$drs", SqliteType.Integer);
     }
 
     private void CreateSchema()
@@ -50,16 +85,25 @@ public sealed class TelemetryDatabase : IDisposable
         cmd.CommandText = """
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
+            PRAGMA temp_store=MEMORY;
+            PRAGMA foreign_keys=ON;
+            PRAGMA busy_timeout=5000;
 
             CREATE TABLE IF NOT EXISTS raw_packets(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 received_at TEXT NOT NULL,
                 packet_format INTEGER,
+                game_year INTEGER,
+                game_major_version INTEGER,
+                game_minor_version INTEGER,
+                packet_version INTEGER,
                 packet_id INTEGER,
                 session_uid TEXT,
                 session_time REAL,
                 frame_identifier INTEGER,
+                overall_frame_identifier INTEGER,
                 player_car_index INTEGER,
+                secondary_player_car_index INTEGER,
                 packet_size INTEGER NOT NULL,
                 payload BLOB NOT NULL
             );
@@ -67,9 +111,10 @@ public sealed class TelemetryDatabase : IDisposable
             CREATE TABLE IF NOT EXISTS car_telemetry(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 received_at TEXT NOT NULL,
-                session_uid TEXT,
+                session_uid TEXT NOT NULL DEFAULT '',
                 session_time REAL,
                 frame_identifier INTEGER,
+                overall_frame_identifier INTEGER NOT NULL DEFAULT 0,
                 player_car_index INTEGER,
                 car_idx INTEGER,
                 is_player INTEGER,
@@ -79,59 +124,145 @@ public sealed class TelemetryDatabase : IDisposable
                 steer REAL,
                 gear INTEGER,
                 engine_rpm INTEGER,
-                drs INTEGER
+                drs INTEGER,
+                UNIQUE(session_uid, overall_frame_identifier, car_idx)
             );
 
             CREATE TABLE IF NOT EXISTS session_metadata(
                 key TEXT PRIMARY KEY,
                 value TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS session_segments(
+                session_uid TEXT PRIMARY KEY,
+                first_received_at TEXT NOT NULL,
+                last_received_at TEXT NOT NULL,
+                first_overall_frame INTEGER,
+                last_overall_frame INTEGER,
+                packet_count INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS recording_quality(
+                id INTEGER PRIMARY KEY CHECK(id = 1),
+                packets_received INTEGER NOT NULL,
+                car_samples_written INTEGER NOT NULL,
+                invalid_headers INTEGER NOT NULL,
+                unsupported_packets INTEGER NOT NULL,
+                duplicate_frames INTEGER NOT NULL,
+                out_of_order_frames INTEGER NOT NULL,
+                estimated_missing_frames INTEGER NOT NULL,
+                queue_drops INTEGER NOT NULL,
+                queue_high_watermark INTEGER NOT NULL,
+                session_changes INTEGER NOT NULL,
+                rating TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_raw_packets_session_overall
+                ON raw_packets(session_uid, overall_frame_identifier, packet_id);
+            CREATE INDEX IF NOT EXISTS idx_raw_packets_packet_id
+                ON raw_packets(packet_format, packet_id, id);
+            CREATE INDEX IF NOT EXISTS idx_car_telemetry_session_overall_car
+                ON car_telemetry(session_uid, overall_frame_identifier, car_idx);
             """;
         cmd.ExecuteNonQuery();
+
+        EnsureColumn("raw_packets", "game_year", "INTEGER");
+        EnsureColumn("raw_packets", "game_major_version", "INTEGER");
+        EnsureColumn("raw_packets", "game_minor_version", "INTEGER");
+        EnsureColumn("raw_packets", "packet_version", "INTEGER");
+        EnsureColumn("raw_packets", "overall_frame_identifier", "INTEGER");
+        EnsureColumn("raw_packets", "secondary_player_car_index", "INTEGER");
+        EnsureColumn("car_telemetry", "overall_frame_identifier", "INTEGER NOT NULL DEFAULT 0");
     }
 
     public void SaveMetadata(SessionMetadata metadata)
     {
+        Flush();
+        SetMeta("schema_version", AppInfo.DatabaseSchemaVersion.ToString());
+        SetMeta("app_version", AppInfo.Version);
         SetMeta("session_name", metadata.SessionName);
         SetMeta("track_name", metadata.TrackName);
         SetMeta("track_id", metadata.TrackId.ToString());
         SetMeta("session_type", metadata.SessionType.ToString());
         SetMeta("total_laps", metadata.TotalLaps.ToString());
         SetMeta("track_length_m", metadata.TrackLengthMeters.ToString());
+        SetMeta("session_uid", metadata.SessionUid.ToString());
         SetMeta("started_at", metadata.StartedAt.ToString("O"));
         if (metadata.StoppedAt is not null) SetMeta("stopped_at", metadata.StoppedAt.Value.ToString("O"));
     }
 
-    private void SetMeta(string key, string value)
+    public void SaveQuality(RecordingQualitySnapshot quality)
     {
+        Flush();
         using var cmd = _connection.CreateCommand();
-        cmd.CommandText = "INSERT INTO session_metadata(key, value) VALUES ($key, $value) ON CONFLICT(key) DO UPDATE SET value = excluded.value;";
-        cmd.Parameters.AddWithValue("$key", key);
-        cmd.Parameters.AddWithValue("$value", value);
+        cmd.CommandText = """
+            INSERT INTO recording_quality(
+                id, packets_received, car_samples_written, invalid_headers, unsupported_packets,
+                duplicate_frames, out_of_order_frames, estimated_missing_frames, queue_drops,
+                queue_high_watermark, session_changes, rating, updated_at)
+            VALUES (1,$packets,$cars,$invalid,$unsupported,$duplicates,$out_of_order,$missing,$drops,$high,$changes,$rating,$updated)
+            ON CONFLICT(id) DO UPDATE SET
+                packets_received=excluded.packets_received,
+                car_samples_written=excluded.car_samples_written,
+                invalid_headers=excluded.invalid_headers,
+                unsupported_packets=excluded.unsupported_packets,
+                duplicate_frames=excluded.duplicate_frames,
+                out_of_order_frames=excluded.out_of_order_frames,
+                estimated_missing_frames=excluded.estimated_missing_frames,
+                queue_drops=excluded.queue_drops,
+                queue_high_watermark=excluded.queue_high_watermark,
+                session_changes=excluded.session_changes,
+                rating=excluded.rating,
+                updated_at=excluded.updated_at;
+            """;
+        cmd.Parameters.AddWithValue("$packets", quality.PacketsReceived);
+        cmd.Parameters.AddWithValue("$cars", quality.CarSamplesWritten);
+        cmd.Parameters.AddWithValue("$invalid", quality.InvalidHeaders);
+        cmd.Parameters.AddWithValue("$unsupported", quality.UnsupportedPackets);
+        cmd.Parameters.AddWithValue("$duplicates", quality.DuplicateFrames);
+        cmd.Parameters.AddWithValue("$out_of_order", quality.OutOfOrderFrames);
+        cmd.Parameters.AddWithValue("$missing", quality.EstimatedMissingFrames);
+        cmd.Parameters.AddWithValue("$drops", quality.QueueDrops);
+        cmd.Parameters.AddWithValue("$high", quality.QueueHighWatermark);
+        cmd.Parameters.AddWithValue("$changes", quality.SessionChanges);
+        cmd.Parameters.AddWithValue("$rating", quality.Rating);
+        cmd.Parameters.AddWithValue("$updated", DateTimeOffset.Now.ToString("O"));
         cmd.ExecuteNonQuery();
     }
 
     public void InsertRaw(DateTimeOffset receivedAt, PacketHeader? header, byte[] payload)
     {
+        EnsureBatch();
         _insertRaw.Parameters["$received_at"].Value = receivedAt.ToString("O");
         _insertRaw.Parameters["$packet_format"].Value = header?.PacketFormat ?? 0;
+        _insertRaw.Parameters["$game_year"].Value = header?.GameYear ?? 0;
+        _insertRaw.Parameters["$game_major"].Value = header?.GameMajorVersion ?? 0;
+        _insertRaw.Parameters["$game_minor"].Value = header?.GameMinorVersion ?? 0;
+        _insertRaw.Parameters["$packet_version"].Value = header?.PacketVersion ?? 0;
         _insertRaw.Parameters["$packet_id"].Value = header?.PacketId ?? 255;
         _insertRaw.Parameters["$session_uid"].Value = header?.SessionUid.ToString() ?? "";
         _insertRaw.Parameters["$session_time"].Value = CleanDbValue(header?.SessionTime ?? 0);
         _insertRaw.Parameters["$frame_identifier"].Value = header?.FrameIdentifier ?? 0;
+        _insertRaw.Parameters["$overall_frame_identifier"].Value = header?.OverallFrameIdentifier ?? 0;
         _insertRaw.Parameters["$player_car_index"].Value = header?.PlayerCarIndex ?? 255;
+        _insertRaw.Parameters["$secondary_player_car_index"].Value = header?.SecondaryPlayerCarIndex ?? 255;
         _insertRaw.Parameters["$packet_size"].Value = payload.Length;
         _insertRaw.Parameters["$payload"].Value = payload;
         _insertRaw.ExecuteNonQuery();
-        MaybeFlush();
+        CountOperation();
+
+        if (header is not null) UpsertSessionSegment(receivedAt, header);
     }
 
     public void InsertCarTelemetry(CarTelemetrySample s)
     {
+        EnsureBatch();
         _insertCar.Parameters["$received_at"].Value = s.ReceivedAt.ToString("O");
         _insertCar.Parameters["$session_uid"].Value = s.SessionUid.ToString();
         _insertCar.Parameters["$session_time"].Value = CleanDbValue(s.SessionTime);
         _insertCar.Parameters["$frame_identifier"].Value = s.FrameIdentifier;
+        _insertCar.Parameters["$overall_frame_identifier"].Value = s.OverallFrameIdentifier;
         _insertCar.Parameters["$player_car_index"].Value = s.PlayerCarIndex;
         _insertCar.Parameters["$car_idx"].Value = s.CarIndex;
         _insertCar.Parameters["$is_player"].Value = s.IsPlayer ? 1 : 0;
@@ -143,8 +274,82 @@ public sealed class TelemetryDatabase : IDisposable
         _insertCar.Parameters["$engine_rpm"].Value = s.EngineRpm;
         _insertCar.Parameters["$drs"].Value = s.Drs;
         _insertCar.ExecuteNonQuery();
-        MaybeFlush();
+        CountOperation();
     }
+
+    public void Flush()
+    {
+        if (_batchTransaction is null) return;
+        _batchTransaction.Commit();
+        _batchTransaction.Dispose();
+        _batchTransaction = null;
+        _insertRaw.Transaction = null;
+        _insertCar.Transaction = null;
+        _batchOperations = 0;
+    }
+
+    private void EnsureBatch()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_batchTransaction is not null) return;
+        _batchTransaction = _connection.BeginTransaction();
+        _insertRaw.Transaction = _batchTransaction;
+        _insertCar.Transaction = _batchTransaction;
+        _batchStartedAt = DateTimeOffset.UtcNow;
+        _batchOperations = 0;
+    }
+
+    private void CountOperation()
+    {
+        _batchOperations++;
+        if (_batchOperations >= MaxBatchOperations || DateTimeOffset.UtcNow - _batchStartedAt >= MaxBatchAge)
+            Flush();
+    }
+
+    private void UpsertSessionSegment(DateTimeOffset receivedAt, PacketHeader header)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.Transaction = _batchTransaction;
+        cmd.CommandText = """
+            INSERT INTO session_segments(session_uid, first_received_at, last_received_at, first_overall_frame, last_overall_frame, packet_count)
+            VALUES ($uid,$received,$received,$overall,$overall,1)
+            ON CONFLICT(session_uid) DO UPDATE SET
+                last_received_at=excluded.last_received_at,
+                last_overall_frame=excluded.last_overall_frame,
+                packet_count=session_segments.packet_count + 1;
+            """;
+        cmd.Parameters.AddWithValue("$uid", header.SessionUid.ToString());
+        cmd.Parameters.AddWithValue("$received", receivedAt.ToString("O"));
+        cmd.Parameters.AddWithValue("$overall", header.OverallFrameIdentifier);
+        cmd.ExecuteNonQuery();
+        CountOperation();
+    }
+
+    private void SetMeta(string key, string value)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = "INSERT INTO session_metadata(key, value) VALUES ($key, $value) ON CONFLICT(key) DO UPDATE SET value = excluded.value;";
+        cmd.Parameters.AddWithValue("$key", key);
+        cmd.Parameters.AddWithValue("$value", value);
+        cmd.ExecuteNonQuery();
+    }
+
+    private void EnsureColumn(string table, string column, string type)
+    {
+        using var info = _connection.CreateCommand();
+        info.CommandText = $"PRAGMA table_info({table})";
+        using var reader = info.ExecuteReader();
+        while (reader.Read())
+        {
+            if (string.Equals(reader.GetString(1), column, StringComparison.OrdinalIgnoreCase)) return;
+        }
+        reader.Close();
+        using var alter = _connection.CreateCommand();
+        alter.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {type}";
+        alter.ExecuteNonQuery();
+    }
+
+    private static void AddParameter(SqliteCommand command, string name, SqliteType type) => command.Parameters.Add(name, type);
 
     private static object CleanDbValue(object? value)
     {
@@ -154,18 +359,11 @@ public sealed class TelemetryDatabase : IDisposable
         return value;
     }
 
-    private void MaybeFlush()
-    {
-        _pending++;
-        if (_pending < 1000) return;
-        using var cmd = _connection.CreateCommand();
-        cmd.CommandText = "PRAGMA wal_checkpoint(PASSIVE);";
-        cmd.ExecuteNonQuery();
-        _pending = 0;
-    }
-
     public void Dispose()
     {
+        if (_disposed) return;
+        _disposed = true;
+        try { Flush(); } catch { }
         try
         {
             using var cmd = _connection.CreateCommand();

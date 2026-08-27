@@ -19,6 +19,7 @@ public sealed record CarTelemetrySample(
     ulong SessionUid,
     float SessionTime,
     uint FrameIdentifier,
+    uint OverallFrameIdentifier,
     byte PlayerCarIndex,
     int CarIndex,
     bool IsPlayer,
@@ -63,6 +64,7 @@ public sealed record MotionSample(
     ulong SessionUid,
     float SessionTime,
     uint FrameIdentifier,
+    uint OverallFrameIdentifier,
     byte PlayerCarIndex,
     int CarIndex,
     bool IsPlayer,
@@ -84,6 +86,7 @@ public sealed record CarStatusSample(
     ulong SessionUid,
     float SessionTime,
     uint FrameIdentifier,
+    uint OverallFrameIdentifier,
     byte PlayerCarIndex,
     int CarIndex,
     bool IsPlayer,
@@ -107,6 +110,7 @@ public sealed record CarDamageSample(
     ulong SessionUid,
     float SessionTime,
     uint FrameIdentifier,
+    uint OverallFrameIdentifier,
     byte PlayerCarIndex,
     int CarIndex,
     bool IsPlayer,
@@ -131,6 +135,7 @@ public sealed record EventSample(
     ulong SessionUid,
     float SessionTime,
     uint FrameIdentifier,
+    uint OverallFrameIdentifier,
     byte PlayerCarIndex,
     string EventCode,
     string EventName,
@@ -143,6 +148,7 @@ public sealed record ParticipantPacketDebug(
     ulong SessionUid,
     float SessionTime,
     uint FrameIdentifier,
+    uint OverallFrameIdentifier,
     int PacketSizeBytes,
     int NumActiveCars,
     int RowsIf58Bytes,
@@ -154,6 +160,7 @@ public sealed record ParticipantSample(
     ulong SessionUid,
     float SessionTime,
     uint FrameIdentifier,
+    uint OverallFrameIdentifier,
     int CarIndex,
     int AiControlled,
     int DriverId,
@@ -162,6 +169,86 @@ public sealed record ParticipantSample(
     string Name,
     int YourTelemetry,
     int ShowOnlineNames);
+
+public sealed record FinalClassificationSample(
+    DateTimeOffset ReceivedAt,
+    ulong SessionUid,
+    float SessionTime,
+    uint FrameIdentifier,
+    uint OverallFrameIdentifier,
+    int CarIndex,
+    bool IsPlayer,
+    int Position,
+    int NumLaps,
+    int GridPosition,
+    int Points,
+    int NumPitStops,
+    int ResultStatus,
+    uint BestLapTimeMs,
+    double TotalRaceTimeSeconds,
+    int PenaltiesTimeSeconds,
+    int NumPenalties,
+    int NumTyreStints,
+    int ResultReason);
+
+public enum LapState
+{
+    Complete,
+    PartialStart,
+    PartialEnd,
+    Invalid,
+    Rewound
+}
+
+public sealed record LapQualityResult(
+    ulong SessionUid,
+    int CarIndex,
+    int LapNum,
+    bool IsPlayer,
+    LapState State,
+    bool CleanLap,
+    int RewindCount,
+    int InvalidCount,
+    int SampleCount,
+    float MinDistance,
+    float MaxDistance,
+    uint LapTimeMs,
+    int Sector1TimeMs,
+    int Sector2TimeMs,
+    int Sector3TimeMs,
+    uint ActiveFromOverallFrame,
+    string CompletionEvidence);
+
+public sealed record RewindEventResult(
+    ulong SessionUid,
+    int CarIndex,
+    int LapNum,
+    DateTimeOffset ReceivedAt,
+    float SessionTime,
+    uint OverallFrameIdentifier,
+    float LapDistance,
+    uint CurrentLapTimeMs,
+    string Reason);
+
+public sealed record RecordingQualitySnapshot(
+    long PacketsReceived,
+    long CarSamplesWritten,
+    long InvalidHeaders,
+    long UnsupportedPackets,
+    long DuplicateFrames,
+    long OutOfOrderFrames,
+    long EstimatedMissingFrames,
+    long QueueDrops,
+    int QueueDepth,
+    int QueueHighWatermark,
+    int SessionChanges)
+{
+    public string Rating => QueueDrops > 0 || InvalidHeaders > 0 || EstimatedMissingFrames > 100
+        ? "Unreliable"
+        : EstimatedMissingFrames > 0 || DuplicateFrames > 0 || OutOfOrderFrames > 0 || SessionChanges > 0
+            ? "Usable with warnings"
+            : "Good";
+}
 
 public sealed class LiveCarRow
 {
@@ -187,6 +274,7 @@ public sealed class SessionMetadata
     public int SessionType { get; set; } = -1;
     public int TotalLaps { get; set; } = 0;
     public int TrackLengthMeters { get; set; } = 0;
+    public ulong SessionUid { get; set; }
     public DateTimeOffset StartedAt { get; set; } = DateTimeOffset.Now;
     public DateTimeOffset? StoppedAt { get; set; }
     public string DatabasePath { get; set; } = "";
@@ -198,12 +286,14 @@ public sealed record AnalysisResult(
     string SessionFolder,
     string ExportsFolder,
     int RawPacketsProcessed,
+    int TelemetryRows,
     int LapRows,
     int MotionRows,
     int StatusRows,
     int DamageRows,
     int EventsRows,
     int ParticipantsRows,
+    int FinalClassificationRows,
     int CleanLapCount,
     int DirtyLapCount,
     string Summary);

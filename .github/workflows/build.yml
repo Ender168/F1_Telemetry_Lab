@@ -1,0 +1,33 @@
+name: build
+
+on:
+  push:
+    branches: [main, codex/v0.6.0]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-self-test:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+          cache: true
+          cache-dependency-path: '**/*.csproj'
+
+      - name: Restore
+        run: dotnet restore F1TelemetryLab.sln
+
+      - name: Build Release
+        run: dotnet build F1TelemetryLab.sln --configuration Release --no-restore
+
+      - name: Run protocol and lap-quality self-tests
+        run: dotnet run --project tests/F1TelemetryLab.SelfTest/F1TelemetryLab.SelfTest.csproj --configuration Release --no-build

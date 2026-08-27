@@ -8,8 +8,6 @@ namespace F1TelemetryLab;
 public static class AnalysisEngine
 {
     private sealed record RawPacketRow(string ReceivedAt, int PacketId, byte[] Payload);
-    private sealed record RewindPoint(int CarIndex, int LapNum, string ReceivedAt, float SessionTime, float LapDistance, uint CurrentLapTimeMs, string Reason);
-    private sealed record LapQualityRow(int CarIndex, int LapNum, bool IsPlayer, bool CleanLap, int RewindCount, int InvalidCount, int SampleCount, float MinDistance, float MaxDistance, uint LapTimeMs);
     private sealed record BestLapRow(int CarIndex, int LapNum, bool IsPlayer, uint LapTimeMs);
     private sealed record TelemetryBin(int Bin, double TimeMs, double Speed, double Throttle, double Brake, double Steer, double Gear);
 
@@ -45,11 +43,11 @@ public static class AnalysisEngine
         log?.Invoke($"Raw packets for analysis: {packets.Count:N0}");
 
         var laps = new List<LapDataSample>(capacity: 500_000);
-        var rewindPoints = new List<RewindPoint>();
         var stats = ProcessRawPackets(con, packets, laps, log);
 
         log?.Invoke("Building lap quality...");
-        var qualities = BuildLapQuality(laps, rewindPoints);
+        var trackLength = ReadMetadataInt(con, "track_length_m");
+        var qualities = LapQualityAnalyzer.Analyze(laps, trackLength, out var rewindPoints);
         InsertLapQuality(con, qualities, rewindPoints);
 
         log?.Invoke("Building analysis samples and lap summaries...");
@@ -72,12 +70,14 @@ public static class AnalysisEngine
             sessionFolder,
             exports,
             packets.Count,
+            stats.TelemetryRows,
             stats.LapRows,
             stats.MotionRows,
             stats.StatusRows,
             stats.DamageRows,
             stats.EventsRows,
             stats.ParticipantsRows,
+            stats.FinalClassificationRows,
             cleanCount,
             dirtyCount,
             $"Processed {packets.Count:N0} packets. Clean laps: {cleanCount}, dirty laps: {dirtyCount}. Exports: {exports}");
@@ -90,41 +90,65 @@ public static class AnalysisEngine
     {
         using var cmd = con.CreateCommand();
         cmd.CommandText = """
-        CREATE TABLE IF NOT EXISTS lap_data(
+        DROP TABLE IF EXISTS car_telemetry;
+        DROP TABLE IF EXISTS lap_data;
+        DROP TABLE IF EXISTS motion_data;
+        DROP TABLE IF EXISTS car_status;
+        DROP TABLE IF EXISTS car_damage;
+        DROP TABLE IF EXISTS events;
+        DROP TABLE IF EXISTS participants;
+        DROP TABLE IF EXISTS participants_debug;
+        DROP TABLE IF EXISTS final_classification_packet;
+        DROP TABLE IF EXISTS lap_quality;
+        DROP TABLE IF EXISTS rewind_events;
+
+        CREATE TABLE car_telemetry(
+            received_at TEXT, session_uid TEXT, session_time REAL, frame_identifier INTEGER, overall_frame_identifier INTEGER,
+            player_car_index INTEGER, car_idx INTEGER, is_player INTEGER, speed INTEGER, throttle REAL, brake REAL, steer REAL,
+            gear INTEGER, engine_rpm INTEGER, drs INTEGER,
+            PRIMARY KEY(session_uid, overall_frame_identifier, car_idx)
+        ) WITHOUT ROWID;
+        CREATE TABLE lap_data(
             received_at TEXT, session_uid TEXT, session_time REAL, frame_identifier INTEGER, overall_frame_identifier INTEGER,
             player_car_index INTEGER, car_idx INTEGER, is_player INTEGER, last_lap_time_ms INTEGER, current_lap_time_ms INTEGER,
             sector1_time_ms INTEGER, sector2_time_ms INTEGER, delta_to_front_ms INTEGER, delta_to_leader_ms INTEGER,
             lap_distance REAL, total_distance REAL, position INTEGER, lap_num INTEGER, pit_status INTEGER, num_pit_stops INTEGER,
             sector INTEGER, lap_invalid INTEGER, penalties INTEGER, warnings INTEGER, driver_status INTEGER, result_status INTEGER
         );
-        CREATE TABLE IF NOT EXISTS motion_data(
-            received_at TEXT, session_uid TEXT, session_time REAL, frame_identifier INTEGER, player_car_index INTEGER, car_idx INTEGER, is_player INTEGER,
+        CREATE TABLE motion_data(
+            received_at TEXT, session_uid TEXT, session_time REAL, frame_identifier INTEGER, overall_frame_identifier INTEGER, player_car_index INTEGER, car_idx INTEGER, is_player INTEGER,
             world_position_x REAL, world_position_y REAL, world_position_z REAL, world_velocity_x REAL, world_velocity_y REAL, world_velocity_z REAL,
             g_force_lateral REAL, g_force_longitudinal REAL, g_force_vertical REAL, yaw REAL, pitch REAL, roll REAL
         );
-        CREATE TABLE IF NOT EXISTS car_status(
-            received_at TEXT, session_uid TEXT, session_time REAL, frame_identifier INTEGER, player_car_index INTEGER, car_idx INTEGER, is_player INTEGER,
+        CREATE TABLE car_status(
+            received_at TEXT, session_uid TEXT, session_time REAL, frame_identifier INTEGER, overall_frame_identifier INTEGER, player_car_index INTEGER, car_idx INTEGER, is_player INTEGER,
             front_brake_bias INTEGER, fuel_in_tank REAL, fuel_remaining_laps REAL, actual_tyre_compound INTEGER, visual_tyre_compound INTEGER,
             tyres_age_laps INTEGER, engine_power_ice REAL, engine_power_mguk REAL, ers_store_energy REAL, ers_deploy_mode INTEGER,
             ers_harvested_this_lap_mguk REAL, ers_harvested_this_lap_mguh REAL, ers_harvest_limit_per_lap REAL, ers_deployed_this_lap REAL
         );
-        CREATE TABLE IF NOT EXISTS car_damage(
-            received_at TEXT, session_uid TEXT, session_time REAL, frame_identifier INTEGER, player_car_index INTEGER, car_idx INTEGER, is_player INTEGER,
+        CREATE TABLE car_damage(
+            received_at TEXT, session_uid TEXT, session_time REAL, frame_identifier INTEGER, overall_frame_identifier INTEGER, player_car_index INTEGER, car_idx INTEGER, is_player INTEGER,
             tyre_wear_rl REAL, tyre_wear_rr REAL, tyre_wear_fl REAL, tyre_wear_fr REAL, tyre_wear_avg REAL,
             tyre_damage_rl INTEGER, tyre_damage_rr INTEGER, tyre_damage_fl INTEGER, tyre_damage_fr INTEGER,
             front_left_wing_damage INTEGER, front_right_wing_damage INTEGER, rear_wing_damage INTEGER, floor_damage INTEGER, diffuser_damage INTEGER, sidepod_damage INTEGER
         );
-        CREATE TABLE IF NOT EXISTS events(
-            received_at TEXT, session_uid TEXT, session_time REAL, frame_identifier INTEGER, player_car_index INTEGER,
+        CREATE TABLE events(
+            received_at TEXT, session_uid TEXT, session_time REAL, frame_identifier INTEGER, overall_frame_identifier INTEGER, player_car_index INTEGER,
             event_code TEXT, event_name TEXT, vehicle_idx INTEGER, other_vehicle_idx INTEGER, details_json TEXT
         );
-        CREATE TABLE IF NOT EXISTS participants(
-            received_at TEXT, session_uid TEXT, session_time REAL, frame_identifier INTEGER, car_idx INTEGER,
+        CREATE TABLE participants(
+            received_at TEXT, session_uid TEXT, session_time REAL, frame_identifier INTEGER, overall_frame_identifier INTEGER, car_idx INTEGER,
             ai_controlled INTEGER, driver_id INTEGER, team_id INTEGER, race_number INTEGER, name TEXT, your_telemetry INTEGER, show_online_names INTEGER
         );
-        CREATE TABLE IF NOT EXISTS participants_debug(
-            received_at TEXT, session_uid TEXT, session_time REAL, frame_identifier INTEGER,
+        CREATE TABLE participants_debug(
+            received_at TEXT, session_uid TEXT, session_time REAL, frame_identifier INTEGER, overall_frame_identifier INTEGER,
             packet_size_bytes INTEGER, num_active_cars INTEGER, rows_if_60_bytes INTEGER, rows_if_58_bytes INTEGER, first_names TEXT
+        );
+        CREATE TABLE final_classification_packet(
+            received_at TEXT, session_uid TEXT, session_time REAL, frame_identifier INTEGER, overall_frame_identifier INTEGER,
+            car_idx INTEGER, is_player INTEGER, position INTEGER, num_laps INTEGER, grid_position INTEGER, points INTEGER,
+            num_pit_stops INTEGER, result_status INTEGER, best_lap_time_ms INTEGER, total_race_time_seconds REAL,
+            penalties_time_seconds INTEGER, num_penalties INTEGER, num_tyre_stints INTEGER, result_reason INTEGER
         );
         CREATE TABLE IF NOT EXISTS driver_aliases(
             car_idx INTEGER PRIMARY KEY,
@@ -133,12 +157,16 @@ public static class AnalysisEngine
             short_name TEXT,
             updated_at TEXT
         );
-        CREATE TABLE IF NOT EXISTS lap_quality(
-            car_idx INTEGER, lap_num INTEGER, is_player INTEGER, clean_lap INTEGER, rewind_count INTEGER, invalid_count INTEGER,
-            sample_count INTEGER, min_distance REAL, max_distance REAL, lap_time_ms INTEGER
+        CREATE TABLE lap_quality(
+            session_uid TEXT, car_idx INTEGER, lap_num INTEGER, is_player INTEGER, lap_state TEXT, clean_lap INTEGER,
+            rewind_count INTEGER, invalid_count INTEGER, sample_count INTEGER, min_distance REAL, max_distance REAL,
+            lap_time_ms INTEGER, sector1_ms INTEGER, sector2_ms INTEGER, sector3_ms INTEGER,
+            active_from_overall_frame INTEGER, completion_evidence TEXT,
+            PRIMARY KEY(session_uid, car_idx, lap_num)
         );
-        CREATE TABLE IF NOT EXISTS rewind_events(
-            car_idx INTEGER, lap_num INTEGER, received_at TEXT, session_time REAL, lap_distance REAL, current_lap_time_ms INTEGER, reason TEXT
+        CREATE TABLE rewind_events(
+            session_uid TEXT, car_idx INTEGER, lap_num INTEGER, received_at TEXT, session_time REAL,
+            overall_frame_identifier INTEGER, lap_distance REAL, current_lap_time_ms INTEGER, reason TEXT
         );
         """;
         cmd.ExecuteNonQuery();
@@ -148,6 +176,7 @@ public static class AnalysisEngine
     {
         using var cmd = con.CreateCommand();
         cmd.CommandText = """
+        DELETE FROM car_telemetry;
         DELETE FROM lap_data;
         DELETE FROM motion_data;
         DELETE FROM car_status;
@@ -155,6 +184,7 @@ public static class AnalysisEngine
         DELETE FROM events;
         DELETE FROM participants;
         DELETE FROM participants_debug;
+        DELETE FROM final_classification_packet;
         DELETE FROM lap_quality;
         DELETE FROM rewind_events;
         DROP TABLE IF EXISTS analysis_samples;
@@ -173,7 +203,7 @@ public static class AnalysisEngine
         cmd.CommandText = """
             SELECT received_at, packet_id, payload
             FROM raw_packets
-            WHERE packet_format = 2026 AND packet_id IN (0,2,3,4,7,10)
+            WHERE packet_format = 2026 AND packet_id IN (0,2,3,4,6,7,8,10)
             ORDER BY id
             """;
         using var reader = cmd.ExecuteReader();
@@ -184,18 +214,21 @@ public static class AnalysisEngine
         return rows;
     }
 
-    private sealed record ParseStats(int LapRows, int MotionRows, int StatusRows, int DamageRows, int EventsRows, int ParticipantsRows);
+    private sealed record ParseStats(int TelemetryRows, int LapRows, int MotionRows, int StatusRows, int DamageRows, int EventsRows, int ParticipantsRows, int FinalClassificationRows);
 
     private static ParseStats ProcessRawPackets(SqliteConnection con, List<RawPacketRow> packets, List<LapDataSample> laps, Action<string>? log)
     {
+        var telemetryRows = 0;
         var lapRows = 0;
         var motionRows = 0;
         var statusRows = 0;
         var damageRows = 0;
         var eventRows = 0;
         var participantRows = 0;
+        var finalRows = 0;
 
         using var tx = con.BeginTransaction();
+        using var telemetryCmd = PrepareTelemetryInsert(con, tx);
         using var lapCmd = PrepareLapInsert(con, tx);
         using var motionCmd = PrepareMotionInsert(con, tx);
         using var statusCmd = PrepareStatusInsert(con, tx);
@@ -203,12 +236,20 @@ public static class AnalysisEngine
         using var eventCmd = PrepareEventInsert(con, tx);
         using var partCmd = PrepareParticipantInsert(con, tx);
         using var partDebugCmd = PrepareParticipantDebugInsert(con, tx);
+        using var finalCmd = PrepareFinalClassificationInsert(con, tx);
 
         foreach (var row in packets)
         {
             var receivedAt = ParseDate(row.ReceivedAt);
             switch (row.PacketId)
             {
+                case 6:
+                    foreach (var s in F12026Parser.ParseCarTelemetryPacket(row.Payload, receivedAt))
+                    {
+                        InsertTelemetry(telemetryCmd, s);
+                        telemetryRows++;
+                    }
+                    break;
                 case 2:
                     foreach (var s in F12026Parser.ParseLapDataPacket(row.Payload, receivedAt))
                     {
@@ -255,79 +296,35 @@ public static class AnalysisEngine
                         participantRows++;
                     }
                     break;
+                case 8:
+                    foreach (var s in F12026Parser.ParseFinalClassificationPacket(row.Payload, receivedAt))
+                    {
+                        InsertFinalClassification(finalCmd, s);
+                        finalRows++;
+                    }
+                    break;
             }
         }
 
         tx.Commit();
-        log?.Invoke($"Parsed rows: lap {lapRows:N0}, motion {motionRows:N0}, status {statusRows:N0}, damage {damageRows:N0}, events {eventRows:N0}, participants {participantRows:N0}");
-        return new ParseStats(lapRows, motionRows, statusRows, damageRows, eventRows, participantRows);
+        log?.Invoke($"Parsed rows: telemetry {telemetryRows:N0}, lap {lapRows:N0}, motion {motionRows:N0}, status {statusRows:N0}, damage {damageRows:N0}, events {eventRows:N0}, participants {participantRows:N0}, final {finalRows:N0}");
+        return new ParseStats(telemetryRows, lapRows, motionRows, statusRows, damageRows, eventRows, participantRows, finalRows);
     }
 
-    private static List<LapQualityRow> BuildLapQuality(List<LapDataSample> laps, List<RewindPoint> rewindPoints)
-    {
-        var dirty = new Dictionary<(int car, int lap), int>();
-        var invalid = new Dictionary<(int car, int lap), int>();
-        foreach (var carGroup in laps.OrderBy(x => x.ReceivedAt).GroupBy(x => x.CarIndex))
-        {
-            LapDataSample? prev = null;
-            foreach (var s in carGroup)
-            {
-                if (s.LapNum <= 0) { prev = s; continue; }
-                var key = (s.CarIndex, s.LapNum);
-                if (s.LapInvalid) invalid[key] = invalid.GetValueOrDefault(key) + 1;
-
-                if (prev is not null)
-                {
-                    var sameLap = prev.LapNum == s.LapNum;
-                    var reasons = new List<string>();
-                    if (s.SessionTime < prev.SessionTime - 0.25f) reasons.Add("session_time_backwards");
-                    if (s.LapNum < prev.LapNum) reasons.Add("lap_number_backwards");
-                    if (sameLap && s.LapDistance < prev.LapDistance - 50f) reasons.Add("lap_distance_backwards");
-                    if (sameLap && s.CurrentLapTimeMs + 750 < prev.CurrentLapTimeMs) reasons.Add("lap_time_backwards");
-
-                    // Session time can jump backwards globally around flashback/replay transitions.
-                    // Mark the lap dirty only when the car/lap itself rolled back, not when the
-                    // only symptom is global session_time. Otherwise one flashback can poison the
-                    // entire field like a spreadsheet with feelings.
-                    var lapActuallyRolledBack = reasons.Any(r => r != "session_time_backwards");
-                    if (lapActuallyRolledBack)
-                    {
-                        dirty[key] = dirty.GetValueOrDefault(key) + 1;
-                    }
-                    if (reasons.Count > 0)
-                    {
-                        rewindPoints.Add(new RewindPoint(s.CarIndex, s.LapNum, s.ReceivedAt.ToString("O"), s.SessionTime, s.LapDistance, s.CurrentLapTimeMs, string.Join(";", reasons)));
-                    }
-                }
-                prev = s;
-            }
-        }
-
-        var result = new List<LapQualityRow>();
-        foreach (var g in laps.Where(x => x.LapNum > 0).GroupBy(x => (x.CarIndex, x.LapNum)).OrderBy(x => x.Key.CarIndex).ThenBy(x => x.Key.LapNum))
-        {
-            var key = (g.Key.CarIndex, g.Key.LapNum);
-            var rewindCount = dirty.GetValueOrDefault(key);
-            var invalidCount = invalid.GetValueOrDefault(key);
-            var lapTime = g.Max(x => x.CurrentLapTimeMs);
-            var clean = rewindCount == 0 && invalidCount == 0 && lapTime > 0;
-            result.Add(new LapQualityRow(g.Key.CarIndex, g.Key.LapNum, g.Any(x => x.IsPlayer), clean, rewindCount, invalidCount, g.Count(), g.Min(x => x.LapDistance), g.Max(x => x.LapDistance), lapTime));
-        }
-        return result;
-    }
-
-    private static void InsertLapQuality(SqliteConnection con, List<LapQualityRow> qualities, List<RewindPoint> rewindPoints)
+    private static void InsertLapQuality(SqliteConnection con, IReadOnlyList<LapQualityResult> qualities, IReadOnlyList<RewindEventResult> rewindPoints)
     {
         using var tx = con.BeginTransaction();
         using var q = con.CreateCommand();
         q.Transaction = tx;
-        q.CommandText = "INSERT INTO lap_quality VALUES ($car,$lap,$me,$clean,$rew,$invalid,$samples,$min,$max,$time)";
-        foreach (var name in new[] { "$car", "$lap", "$me", "$clean", "$rew", "$invalid", "$samples", "$min", "$max", "$time" }) q.Parameters.AddWithValue(name, 0);
+        q.CommandText = "INSERT INTO lap_quality VALUES ($uid,$car,$lap,$me,$state,$clean,$rew,$invalid,$samples,$min,$max,$time,$s1,$s2,$s3,$active,$evidence)";
+        foreach (var name in new[] { "$uid", "$car", "$lap", "$me", "$state", "$clean", "$rew", "$invalid", "$samples", "$min", "$max", "$time", "$s1", "$s2", "$s3", "$active", "$evidence" }) q.Parameters.AddWithValue(name, 0);
         foreach (var row in qualities)
         {
+            q.Parameters["$uid"].Value = row.SessionUid.ToString();
             q.Parameters["$car"].Value = row.CarIndex;
             q.Parameters["$lap"].Value = row.LapNum;
             q.Parameters["$me"].Value = row.IsPlayer ? 1 : 0;
+            q.Parameters["$state"].Value = row.State.ToString();
             q.Parameters["$clean"].Value = row.CleanLap ? 1 : 0;
             q.Parameters["$rew"].Value = row.RewindCount;
             q.Parameters["$invalid"].Value = row.InvalidCount;
@@ -335,19 +332,26 @@ public static class AnalysisEngine
             q.Parameters["$min"].Value = row.MinDistance;
             q.Parameters["$max"].Value = row.MaxDistance;
             q.Parameters["$time"].Value = row.LapTimeMs;
+            q.Parameters["$s1"].Value = row.Sector1TimeMs;
+            q.Parameters["$s2"].Value = row.Sector2TimeMs;
+            q.Parameters["$s3"].Value = row.Sector3TimeMs;
+            q.Parameters["$active"].Value = row.ActiveFromOverallFrame;
+            q.Parameters["$evidence"].Value = row.CompletionEvidence;
             q.ExecuteNonQuery();
         }
 
         using var r = con.CreateCommand();
         r.Transaction = tx;
-        r.CommandText = "INSERT INTO rewind_events VALUES ($car,$lap,$received,$session,$distance,$lapTime,$reason)";
-        foreach (var name in new[] { "$car", "$lap", "$received", "$session", "$distance", "$lapTime", "$reason" }) r.Parameters.AddWithValue(name, 0);
+        r.CommandText = "INSERT INTO rewind_events VALUES ($uid,$car,$lap,$received,$session,$overall,$distance,$lapTime,$reason)";
+        foreach (var name in new[] { "$uid", "$car", "$lap", "$received", "$session", "$overall", "$distance", "$lapTime", "$reason" }) r.Parameters.AddWithValue(name, 0);
         foreach (var row in rewindPoints)
         {
+            r.Parameters["$uid"].Value = row.SessionUid.ToString();
             r.Parameters["$car"].Value = row.CarIndex;
             r.Parameters["$lap"].Value = row.LapNum;
-            r.Parameters["$received"].Value = row.ReceivedAt;
+            r.Parameters["$received"].Value = row.ReceivedAt.ToString("O");
             r.Parameters["$session"].Value = row.SessionTime;
+            r.Parameters["$overall"].Value = row.OverallFrameIdentifier;
             r.Parameters["$distance"].Value = row.LapDistance;
             r.Parameters["$lapTime"].Value = row.CurrentLapTimeMs;
             r.Parameters["$reason"].Value = row.Reason;
@@ -356,7 +360,11 @@ public static class AnalysisEngine
         tx.Commit();
     }
 
-    private static void BuildSqlDerivedTables(SqliteConnection con)
+    private static void BuildSqlDerivedTables(SqliteConnection con) => AnalysisDerivedTableBuilder.Build(con);
+
+    // Kept temporarily while the v0.6 projection is validated against existing session packs.
+    // It is not executed; the new builder above owns the normalized projection.
+    private static void BuildSqlDerivedTablesLegacy(SqliteConnection con)
     {
         TryAddColumn(con, "driver_aliases", "short_name", "TEXT");
         // Execute derived-table statements one by one. Some providers pretend
@@ -808,16 +816,19 @@ public static class AnalysisEngine
         var manifestPath = Path.Combine(sessionFolder, "analysis_manifest.json");
         var json = JsonSerializer.Serialize(new
         {
-            app = "F1 Telemetry Lab C# MVP",
-            version = "0.3.8",
+            app = AppInfo.Name,
+            version = AppInfo.Version,
+            schema_version = AppInfo.DatabaseSchemaVersion,
             analyzed_at = DateTimeOffset.Now.ToString("O"),
             raw_packets_processed = result.RawPacketsProcessed,
+            telemetry_rows = result.TelemetryRows,
             lap_rows = result.LapRows,
             motion_rows = result.MotionRows,
             status_rows = result.StatusRows,
             damage_rows = result.DamageRows,
             events_rows = result.EventsRows,
             participants_rows = result.ParticipantsRows,
+            final_classification_rows = result.FinalClassificationRows,
             clean_lap_count = result.CleanLapCount,
             dirty_lap_count = result.DirtyLapCount,
             exports = "exports"
@@ -826,6 +837,28 @@ public static class AnalysisEngine
     }
 
     private static DateTimeOffset ParseDate(string value) => DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var dt) ? dt : DateTimeOffset.Now;
+
+    private static int ReadMetadataInt(SqliteConnection con, string key)
+    {
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = "SELECT value FROM session_metadata WHERE key = $key LIMIT 1";
+        cmd.Parameters.AddWithValue("$key", key);
+        var value = Convert.ToString(cmd.ExecuteScalar(), CultureInfo.InvariantCulture);
+        return int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed : 0;
+    }
+
+    private static SqliteCommand PrepareTelemetryInsert(SqliteConnection con, SqliteTransaction tx)
+    {
+        var cmd = con.CreateCommand(); cmd.Transaction = tx;
+        cmd.CommandText = "INSERT OR REPLACE INTO car_telemetry VALUES ($received,$uid,$session,$frame,$overall,$player,$car,$me,$speed,$throttle,$brake,$steer,$gear,$rpm,$drs)";
+        AddParams(cmd, "$received", "$uid", "$session", "$frame", "$overall", "$player", "$car", "$me", "$speed", "$throttle", "$brake", "$steer", "$gear", "$rpm", "$drs");
+        return cmd;
+    }
+
+    private static void InsertTelemetry(SqliteCommand c, CarTelemetrySample s)
+    {
+        Set(c, "$received", s.ReceivedAt.ToString("O")); Set(c, "$uid", s.SessionUid.ToString()); Set(c, "$session", s.SessionTime); Set(c, "$frame", s.FrameIdentifier); Set(c, "$overall", s.OverallFrameIdentifier); Set(c, "$player", s.PlayerCarIndex); Set(c, "$car", s.CarIndex); Set(c, "$me", s.IsPlayer ? 1 : 0); Set(c, "$speed", s.Speed); Set(c, "$throttle", s.Throttle); Set(c, "$brake", s.Brake); Set(c, "$steer", s.Steer); Set(c, "$gear", s.Gear); Set(c, "$rpm", s.EngineRpm); Set(c, "$drs", s.Drs); c.ExecuteNonQuery();
+    }
 
     private static SqliteCommand PrepareLapInsert(SqliteConnection con, SqliteTransaction tx)
     {
@@ -842,74 +875,87 @@ public static class AnalysisEngine
     private static SqliteCommand PrepareMotionInsert(SqliteConnection con, SqliteTransaction tx)
     {
         var cmd = con.CreateCommand(); cmd.Transaction = tx;
-        cmd.CommandText = "INSERT INTO motion_data VALUES ($received,$uid,$session,$frame,$player,$car,$me,$x,$y,$z,$vx,$vy,$vz,$glat,$glong,$gvert,$yaw,$pitch,$roll)";
-        AddParams(cmd, "$received", "$uid", "$session", "$frame", "$player", "$car", "$me", "$x", "$y", "$z", "$vx", "$vy", "$vz", "$glat", "$glong", "$gvert", "$yaw", "$pitch", "$roll");
+        cmd.CommandText = "INSERT INTO motion_data VALUES ($received,$uid,$session,$frame,$overall,$player,$car,$me,$x,$y,$z,$vx,$vy,$vz,$glat,$glong,$gvert,$yaw,$pitch,$roll)";
+        AddParams(cmd, "$received", "$uid", "$session", "$frame", "$overall", "$player", "$car", "$me", "$x", "$y", "$z", "$vx", "$vy", "$vz", "$glat", "$glong", "$gvert", "$yaw", "$pitch", "$roll");
         return cmd;
     }
     private static void InsertMotion(SqliteCommand c, MotionSample s)
     {
-        Set(c, "$received", s.ReceivedAt.ToString("O")); Set(c, "$uid", s.SessionUid.ToString()); Set(c, "$session", s.SessionTime); Set(c, "$frame", s.FrameIdentifier); Set(c, "$player", s.PlayerCarIndex); Set(c, "$car", s.CarIndex); Set(c, "$me", s.IsPlayer ? 1 : 0); Set(c, "$x", s.WorldPositionX); Set(c, "$y", s.WorldPositionY); Set(c, "$z", s.WorldPositionZ); Set(c, "$vx", s.WorldVelocityX); Set(c, "$vy", s.WorldVelocityY); Set(c, "$vz", s.WorldVelocityZ); Set(c, "$glat", s.GForceLateral); Set(c, "$glong", s.GForceLongitudinal); Set(c, "$gvert", s.GForceVertical); Set(c, "$yaw", s.Yaw); Set(c, "$pitch", s.Pitch); Set(c, "$roll", s.Roll); c.ExecuteNonQuery();
+        Set(c, "$received", s.ReceivedAt.ToString("O")); Set(c, "$uid", s.SessionUid.ToString()); Set(c, "$session", s.SessionTime); Set(c, "$frame", s.FrameIdentifier); Set(c, "$overall", s.OverallFrameIdentifier); Set(c, "$player", s.PlayerCarIndex); Set(c, "$car", s.CarIndex); Set(c, "$me", s.IsPlayer ? 1 : 0); Set(c, "$x", s.WorldPositionX); Set(c, "$y", s.WorldPositionY); Set(c, "$z", s.WorldPositionZ); Set(c, "$vx", s.WorldVelocityX); Set(c, "$vy", s.WorldVelocityY); Set(c, "$vz", s.WorldVelocityZ); Set(c, "$glat", s.GForceLateral); Set(c, "$glong", s.GForceLongitudinal); Set(c, "$gvert", s.GForceVertical); Set(c, "$yaw", s.Yaw); Set(c, "$pitch", s.Pitch); Set(c, "$roll", s.Roll); c.ExecuteNonQuery();
     }
 
     private static SqliteCommand PrepareStatusInsert(SqliteConnection con, SqliteTransaction tx)
     {
         var cmd = con.CreateCommand(); cmd.Transaction = tx;
-        cmd.CommandText = "INSERT INTO car_status VALUES ($received,$uid,$session,$frame,$player,$car,$me,$bias,$fuel,$fuellaps,$actual,$visual,$age,$ice,$mguk,$ers,$mode,$hmgu,$hmgh,$limit,$deployed)";
-        AddParams(cmd, "$received", "$uid", "$session", "$frame", "$player", "$car", "$me", "$bias", "$fuel", "$fuellaps", "$actual", "$visual", "$age", "$ice", "$mguk", "$ers", "$mode", "$hmgu", "$hmgh", "$limit", "$deployed");
+        cmd.CommandText = "INSERT INTO car_status VALUES ($received,$uid,$session,$frame,$overall,$player,$car,$me,$bias,$fuel,$fuellaps,$actual,$visual,$age,$ice,$mguk,$ers,$mode,$hmgu,$hmgh,$limit,$deployed)";
+        AddParams(cmd, "$received", "$uid", "$session", "$frame", "$overall", "$player", "$car", "$me", "$bias", "$fuel", "$fuellaps", "$actual", "$visual", "$age", "$ice", "$mguk", "$ers", "$mode", "$hmgu", "$hmgh", "$limit", "$deployed");
         return cmd;
     }
     private static void InsertStatus(SqliteCommand c, CarStatusSample s)
     {
-        Set(c, "$received", s.ReceivedAt.ToString("O")); Set(c, "$uid", s.SessionUid.ToString()); Set(c, "$session", s.SessionTime); Set(c, "$frame", s.FrameIdentifier); Set(c, "$player", s.PlayerCarIndex); Set(c, "$car", s.CarIndex); Set(c, "$me", s.IsPlayer ? 1 : 0); Set(c, "$bias", s.FrontBrakeBias); Set(c, "$fuel", s.FuelInTank); Set(c, "$fuellaps", s.FuelRemainingLaps); Set(c, "$actual", s.ActualTyreCompound); Set(c, "$visual", s.VisualTyreCompound); Set(c, "$age", s.TyresAgeLaps); Set(c, "$ice", s.EnginePowerIce); Set(c, "$mguk", s.EnginePowerMguk); Set(c, "$ers", s.ErsStoreEnergy); Set(c, "$mode", s.ErsDeployMode); Set(c, "$hmgu", s.ErsHarvestedThisLapMguk); Set(c, "$hmgh", s.ErsHarvestedThisLapMguh); Set(c, "$limit", s.ErsHarvestLimitPerLap); Set(c, "$deployed", s.ErsDeployedThisLap); c.ExecuteNonQuery();
+        Set(c, "$received", s.ReceivedAt.ToString("O")); Set(c, "$uid", s.SessionUid.ToString()); Set(c, "$session", s.SessionTime); Set(c, "$frame", s.FrameIdentifier); Set(c, "$overall", s.OverallFrameIdentifier); Set(c, "$player", s.PlayerCarIndex); Set(c, "$car", s.CarIndex); Set(c, "$me", s.IsPlayer ? 1 : 0); Set(c, "$bias", s.FrontBrakeBias); Set(c, "$fuel", s.FuelInTank); Set(c, "$fuellaps", s.FuelRemainingLaps); Set(c, "$actual", s.ActualTyreCompound); Set(c, "$visual", s.VisualTyreCompound); Set(c, "$age", s.TyresAgeLaps); Set(c, "$ice", s.EnginePowerIce); Set(c, "$mguk", s.EnginePowerMguk); Set(c, "$ers", s.ErsStoreEnergy); Set(c, "$mode", s.ErsDeployMode); Set(c, "$hmgu", s.ErsHarvestedThisLapMguk); Set(c, "$hmgh", s.ErsHarvestedThisLapMguh); Set(c, "$limit", s.ErsHarvestLimitPerLap); Set(c, "$deployed", s.ErsDeployedThisLap); c.ExecuteNonQuery();
     }
 
     private static SqliteCommand PrepareDamageInsert(SqliteConnection con, SqliteTransaction tx)
     {
         var cmd = con.CreateCommand(); cmd.Transaction = tx;
-        cmd.CommandText = "INSERT INTO car_damage VALUES ($received,$uid,$session,$frame,$player,$car,$me,$wrl,$wrr,$wfl,$wfr,$wavg,$drl,$drr,$dfl,$dfr,$flwing,$frwing,$rear,$floor,$diff,$side)";
-        AddParams(cmd, "$received", "$uid", "$session", "$frame", "$player", "$car", "$me", "$wrl", "$wrr", "$wfl", "$wfr", "$wavg", "$drl", "$drr", "$dfl", "$dfr", "$flwing", "$frwing", "$rear", "$floor", "$diff", "$side");
+        cmd.CommandText = "INSERT INTO car_damage VALUES ($received,$uid,$session,$frame,$overall,$player,$car,$me,$wrl,$wrr,$wfl,$wfr,$wavg,$drl,$drr,$dfl,$dfr,$flwing,$frwing,$rear,$floor,$diff,$side)";
+        AddParams(cmd, "$received", "$uid", "$session", "$frame", "$overall", "$player", "$car", "$me", "$wrl", "$wrr", "$wfl", "$wfr", "$wavg", "$drl", "$drr", "$dfl", "$dfr", "$flwing", "$frwing", "$rear", "$floor", "$diff", "$side");
         return cmd;
     }
     private static void InsertDamage(SqliteCommand c, CarDamageSample s)
     {
-        Set(c, "$received", s.ReceivedAt.ToString("O")); Set(c, "$uid", s.SessionUid.ToString()); Set(c, "$session", s.SessionTime); Set(c, "$frame", s.FrameIdentifier); Set(c, "$player", s.PlayerCarIndex); Set(c, "$car", s.CarIndex); Set(c, "$me", s.IsPlayer ? 1 : 0); Set(c, "$wrl", s.TyreWearRl); Set(c, "$wrr", s.TyreWearRr); Set(c, "$wfl", s.TyreWearFl); Set(c, "$wfr", s.TyreWearFr); Set(c, "$wavg", s.TyreWearAvg); Set(c, "$drl", s.TyreDamageRl); Set(c, "$drr", s.TyreDamageRr); Set(c, "$dfl", s.TyreDamageFl); Set(c, "$dfr", s.TyreDamageFr); Set(c, "$flwing", s.FrontLeftWingDamage); Set(c, "$frwing", s.FrontRightWingDamage); Set(c, "$rear", s.RearWingDamage); Set(c, "$floor", s.FloorDamage); Set(c, "$diff", s.DiffuserDamage); Set(c, "$side", s.SidepodDamage); c.ExecuteNonQuery();
+        Set(c, "$received", s.ReceivedAt.ToString("O")); Set(c, "$uid", s.SessionUid.ToString()); Set(c, "$session", s.SessionTime); Set(c, "$frame", s.FrameIdentifier); Set(c, "$overall", s.OverallFrameIdentifier); Set(c, "$player", s.PlayerCarIndex); Set(c, "$car", s.CarIndex); Set(c, "$me", s.IsPlayer ? 1 : 0); Set(c, "$wrl", s.TyreWearRl); Set(c, "$wrr", s.TyreWearRr); Set(c, "$wfl", s.TyreWearFl); Set(c, "$wfr", s.TyreWearFr); Set(c, "$wavg", s.TyreWearAvg); Set(c, "$drl", s.TyreDamageRl); Set(c, "$drr", s.TyreDamageRr); Set(c, "$dfl", s.TyreDamageFl); Set(c, "$dfr", s.TyreDamageFr); Set(c, "$flwing", s.FrontLeftWingDamage); Set(c, "$frwing", s.FrontRightWingDamage); Set(c, "$rear", s.RearWingDamage); Set(c, "$floor", s.FloorDamage); Set(c, "$diff", s.DiffuserDamage); Set(c, "$side", s.SidepodDamage); c.ExecuteNonQuery();
     }
 
     private static SqliteCommand PrepareEventInsert(SqliteConnection con, SqliteTransaction tx)
     {
         var cmd = con.CreateCommand(); cmd.Transaction = tx;
-        cmd.CommandText = "INSERT INTO events VALUES ($received,$uid,$session,$frame,$player,$code,$name,$vehicle,$other,$details)";
-        AddParams(cmd, "$received", "$uid", "$session", "$frame", "$player", "$code", "$name", "$vehicle", "$other", "$details");
+        cmd.CommandText = "INSERT INTO events VALUES ($received,$uid,$session,$frame,$overall,$player,$code,$name,$vehicle,$other,$details)";
+        AddParams(cmd, "$received", "$uid", "$session", "$frame", "$overall", "$player", "$code", "$name", "$vehicle", "$other", "$details");
         return cmd;
     }
     private static void InsertEvent(SqliteCommand c, EventSample s)
     {
-        Set(c, "$received", s.ReceivedAt.ToString("O")); Set(c, "$uid", s.SessionUid.ToString()); Set(c, "$session", s.SessionTime); Set(c, "$frame", s.FrameIdentifier); Set(c, "$player", s.PlayerCarIndex); Set(c, "$code", s.EventCode); Set(c, "$name", s.EventName); Set(c, "$vehicle", s.VehicleIdx); Set(c, "$other", s.OtherVehicleIdx); Set(c, "$details", s.DetailsJson); c.ExecuteNonQuery();
+        Set(c, "$received", s.ReceivedAt.ToString("O")); Set(c, "$uid", s.SessionUid.ToString()); Set(c, "$session", s.SessionTime); Set(c, "$frame", s.FrameIdentifier); Set(c, "$overall", s.OverallFrameIdentifier); Set(c, "$player", s.PlayerCarIndex); Set(c, "$code", s.EventCode); Set(c, "$name", s.EventName); Set(c, "$vehicle", s.VehicleIdx); Set(c, "$other", s.OtherVehicleIdx); Set(c, "$details", s.DetailsJson); c.ExecuteNonQuery();
     }
 
 
     private static SqliteCommand PrepareParticipantDebugInsert(SqliteConnection con, SqliteTransaction tx)
     {
         var cmd = con.CreateCommand(); cmd.Transaction = tx;
-        cmd.CommandText = "INSERT INTO participants_debug VALUES ($received,$uid,$session,$frame,$size,$active,$rows58,$rows57,$names)";
-        AddParams(cmd, "$received", "$uid", "$session", "$frame", "$size", "$active", "$rows58", "$rows57", "$names");
+        cmd.CommandText = "INSERT INTO participants_debug VALUES ($received,$uid,$session,$frame,$overall,$size,$active,$rows58,$rows57,$names)";
+        AddParams(cmd, "$received", "$uid", "$session", "$frame", "$overall", "$size", "$active", "$rows58", "$rows57", "$names");
         return cmd;
     }
     private static void InsertParticipantDebug(SqliteCommand c, ParticipantPacketDebug s)
     {
-        Set(c, "$received", s.ReceivedAt.ToString("O")); Set(c, "$uid", s.SessionUid.ToString()); Set(c, "$session", s.SessionTime); Set(c, "$frame", s.FrameIdentifier); Set(c, "$size", s.PacketSizeBytes); Set(c, "$active", s.NumActiveCars); Set(c, "$rows58", s.RowsIf58Bytes); Set(c, "$rows57", s.RowsIf57Bytes); Set(c, "$names", s.FirstNames); c.ExecuteNonQuery();
+        Set(c, "$received", s.ReceivedAt.ToString("O")); Set(c, "$uid", s.SessionUid.ToString()); Set(c, "$session", s.SessionTime); Set(c, "$frame", s.FrameIdentifier); Set(c, "$overall", s.OverallFrameIdentifier); Set(c, "$size", s.PacketSizeBytes); Set(c, "$active", s.NumActiveCars); Set(c, "$rows58", s.RowsIf58Bytes); Set(c, "$rows57", s.RowsIf57Bytes); Set(c, "$names", s.FirstNames); c.ExecuteNonQuery();
     }
 
     private static SqliteCommand PrepareParticipantInsert(SqliteConnection con, SqliteTransaction tx)
     {
         var cmd = con.CreateCommand(); cmd.Transaction = tx;
-        cmd.CommandText = "INSERT INTO participants VALUES ($received,$uid,$session,$frame,$car,$ai,$driver,$team,$number,$name,$telemetry,$online)";
-        AddParams(cmd, "$received", "$uid", "$session", "$frame", "$car", "$ai", "$driver", "$team", "$number", "$name", "$telemetry", "$online");
+        cmd.CommandText = "INSERT INTO participants VALUES ($received,$uid,$session,$frame,$overall,$car,$ai,$driver,$team,$number,$name,$telemetry,$online)";
+        AddParams(cmd, "$received", "$uid", "$session", "$frame", "$overall", "$car", "$ai", "$driver", "$team", "$number", "$name", "$telemetry", "$online");
         return cmd;
     }
     private static void InsertParticipant(SqliteCommand c, ParticipantSample s)
     {
-        Set(c, "$received", s.ReceivedAt.ToString("O")); Set(c, "$uid", s.SessionUid.ToString()); Set(c, "$session", s.SessionTime); Set(c, "$frame", s.FrameIdentifier); Set(c, "$car", s.CarIndex); Set(c, "$ai", s.AiControlled); Set(c, "$driver", s.DriverId); Set(c, "$team", s.TeamId); Set(c, "$number", s.RaceNumber); Set(c, "$name", s.Name); Set(c, "$telemetry", s.YourTelemetry); Set(c, "$online", s.ShowOnlineNames); c.ExecuteNonQuery();
+        Set(c, "$received", s.ReceivedAt.ToString("O")); Set(c, "$uid", s.SessionUid.ToString()); Set(c, "$session", s.SessionTime); Set(c, "$frame", s.FrameIdentifier); Set(c, "$overall", s.OverallFrameIdentifier); Set(c, "$car", s.CarIndex); Set(c, "$ai", s.AiControlled); Set(c, "$driver", s.DriverId); Set(c, "$team", s.TeamId); Set(c, "$number", s.RaceNumber); Set(c, "$name", s.Name); Set(c, "$telemetry", s.YourTelemetry); Set(c, "$online", s.ShowOnlineNames); c.ExecuteNonQuery();
+    }
+
+    private static SqliteCommand PrepareFinalClassificationInsert(SqliteConnection con, SqliteTransaction tx)
+    {
+        var cmd = con.CreateCommand(); cmd.Transaction = tx;
+        cmd.CommandText = "INSERT INTO final_classification_packet VALUES ($received,$uid,$session,$frame,$overall,$car,$me,$position,$laps,$grid,$points,$pits,$status,$best,$total,$penaltySeconds,$penalties,$stints,$reason)";
+        AddParams(cmd, "$received", "$uid", "$session", "$frame", "$overall", "$car", "$me", "$position", "$laps", "$grid", "$points", "$pits", "$status", "$best", "$total", "$penaltySeconds", "$penalties", "$stints", "$reason");
+        return cmd;
+    }
+
+    private static void InsertFinalClassification(SqliteCommand c, FinalClassificationSample s)
+    {
+        Set(c, "$received", s.ReceivedAt.ToString("O")); Set(c, "$uid", s.SessionUid.ToString()); Set(c, "$session", s.SessionTime); Set(c, "$frame", s.FrameIdentifier); Set(c, "$overall", s.OverallFrameIdentifier); Set(c, "$car", s.CarIndex); Set(c, "$me", s.IsPlayer ? 1 : 0); Set(c, "$position", s.Position); Set(c, "$laps", s.NumLaps); Set(c, "$grid", s.GridPosition); Set(c, "$points", s.Points); Set(c, "$pits", s.NumPitStops); Set(c, "$status", s.ResultStatus); Set(c, "$best", s.BestLapTimeMs); Set(c, "$total", s.TotalRaceTimeSeconds); Set(c, "$penaltySeconds", s.PenaltiesTimeSeconds); Set(c, "$penalties", s.NumPenalties); Set(c, "$stints", s.NumTyreStints); Set(c, "$reason", s.ResultReason); c.ExecuteNonQuery();
     }
 
     private static void AddParams(SqliteCommand cmd, params string[] names)

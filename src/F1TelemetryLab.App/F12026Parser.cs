@@ -15,6 +15,7 @@ public static class F12026Parser
     private const int CarStatusSize2026 = 59;
     private const int CarDamageSize2026 = 46;
     private const int ParticipantSize2026 = 60;
+    private const int FinalClassificationSize2026 = 46;
 
     public static bool TryParseHeader(ReadOnlySpan<byte> data, out PacketHeader header)
     {
@@ -65,7 +66,7 @@ public static class F12026Parser
 
             if (speed <= 450 && throttle >= -0.01f && throttle <= 1.01f && brake >= -0.01f && brake <= 1.01f && steer >= -1.1f && steer <= 1.1f)
             {
-                samples.Add(new CarTelemetrySample(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.PlayerCarIndex, i,
+                samples.Add(new CarTelemetrySample(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.OverallFrameIdentifier, h.PlayerCarIndex, i,
                     h.PlayerCarIndex == i, speed, throttle, brake, steer, gear, rpm, drs));
             }
             offset += CarTelemetrySize2026;
@@ -139,7 +140,7 @@ public static class F12026Parser
             var gLong = I16(c, 38) / 1000f;
             var gVert = I16(c, 40) / 1000f;
             var yaw = F32(c, 42); var pitch = F32(c, 46); var roll = F32(c, 50);
-            samples.Add(new MotionSample(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.PlayerCarIndex, i, h.PlayerCarIndex == i,
+            samples.Add(new MotionSample(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.OverallFrameIdentifier, h.PlayerCarIndex, i, h.PlayerCarIndex == i,
                 x, y, z, vx, vy, vz, gLat, gLong, gVert, yaw, pitch, roll));
             offset += MotionSize2026;
         }
@@ -173,7 +174,7 @@ public static class F12026Parser
             var harvestMguh = F32(c, 46);
             var harvestLimit = F32(c, 50);
             var deployed = F32(c, 54);
-            samples.Add(new CarStatusSample(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.PlayerCarIndex, i, h.PlayerCarIndex == i,
+            samples.Add(new CarStatusSample(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.OverallFrameIdentifier, h.PlayerCarIndex, i, h.PlayerCarIndex == i,
                 frontBrakeBias, fuelInTank, fuelRemainingLaps, actualTyreCompound, visualTyreCompound, tyreAge, ice, mguk, ers, ersMode, harvestMguk, harvestMguh, harvestLimit, deployed));
             offset += CarStatusSize2026;
         }
@@ -195,7 +196,7 @@ public static class F12026Parser
             var avg = (rl + rr + fl + fr) / 4f;
             var tyreDmgRl = c[16]; var tyreDmgRr = c[17]; var tyreDmgFl = c[18]; var tyreDmgFr = c[19];
             var wingFl = c[28]; var wingFr = c[29]; var rearWing = c[30]; var floor = c[31]; var diffuser = c[32]; var sidepod = c[33];
-            samples.Add(new CarDamageSample(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.PlayerCarIndex, i, h.PlayerCarIndex == i,
+            samples.Add(new CarDamageSample(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.OverallFrameIdentifier, h.PlayerCarIndex, i, h.PlayerCarIndex == i,
                 rl, rr, fl, fr, avg, tyreDmgRl, tyreDmgRr, tyreDmgFl, tyreDmgFr, wingFl, wingFr, rearWing, floor, diffuser, sidepod));
             offset += CarDamageSize2026;
         }
@@ -265,7 +266,7 @@ public static class F12026Parser
         }
 
         var json = JsonSerializer.Serialize(details);
-        return new EventSample(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.PlayerCarIndex, code, name, vehicle, other, json);
+        return new EventSample(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.OverallFrameIdentifier, h.PlayerCarIndex, code, name, vehicle, other, json);
     }
 
     public static List<ParticipantSample> ParseParticipantsPacket(ReadOnlySpan<byte> data, DateTimeOffset receivedAt)
@@ -296,7 +297,7 @@ public static class F12026Parser
             // The displayed driver name starts at byte 10 and uses 48 bytes.
             // A previous 58-byte layout read shifted bytes and turned HULKENBERG/PIASTRI/etc into F1 Generic,
             // which is exactly the sort of tiny offset error that makes humans blame the game.
-            samples.Add(new ParticipantSample(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, i, c[0], driverId, c[3], c[5], name, c[58], c[59]));
+            samples.Add(new ParticipantSample(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.OverallFrameIdentifier, i, c[0], driverId, c[3], c[5], name, c[58], c[59]));
             offset += ParticipantSize2026;
         }
         return samples;
@@ -320,7 +321,46 @@ public static class F12026Parser
             firstNames.Add(DecodeName(raw));
             offset += 60;
         }
-        return new ParticipantPacketDebug(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, data.Length, active, rows58, rows57, string.Join(" | ", firstNames));
+        return new ParticipantPacketDebug(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.OverallFrameIdentifier, data.Length, active, rows58, rows57, string.Join(" | ", firstNames));
+    }
+
+    public static List<FinalClassificationSample> ParseFinalClassificationPacket(ReadOnlySpan<byte> data, DateTimeOffset receivedAt)
+    {
+        var samples = new List<FinalClassificationSample>(MaxCars2026);
+        if (!TryParseHeader(data, out var h)) return samples;
+        if (h.PacketFormat != AppInfo.SupportedPacketFormat || h.PacketId != 8) return samples;
+        if (data.Length <= HeaderSize) return samples;
+
+        var numCars = Math.Min(data[HeaderSize], (byte)MaxCars2026);
+        var offset = HeaderSize + 1;
+        for (var i = 0; i < numCars; i++)
+        {
+            if (offset + FinalClassificationSize2026 > data.Length) break;
+            var c = data.Slice(offset, FinalClassificationSize2026);
+            samples.Add(new FinalClassificationSample(
+                receivedAt,
+                h.SessionUid,
+                h.SessionTime,
+                h.FrameIdentifier,
+                h.OverallFrameIdentifier,
+                i,
+                h.PlayerCarIndex == i,
+                c[0],
+                c[1],
+                c[2],
+                c[3],
+                c[4],
+                c[5],
+                U32(c, 6),
+                F64(c, 10),
+                c[18],
+                c[19],
+                c[20],
+                c[45]));
+            offset += FinalClassificationSize2026;
+        }
+
+        return samples;
     }
 
     public static SessionMetadata? TryParseSessionMetadata(ReadOnlySpan<byte> data, DateTimeOffset startedAt)
@@ -354,6 +394,7 @@ public static class F12026Parser
     private static uint U32(ReadOnlySpan<byte> s, int o) => BinaryPrimitives.ReadUInt32LittleEndian(s.Slice(o, 4));
     private static ulong U64(ReadOnlySpan<byte> s, int o) => BinaryPrimitives.ReadUInt64LittleEndian(s.Slice(o, 8));
     private static float F32(ReadOnlySpan<byte> s, int o) => BitConverter.ToSingle(s.Slice(o, 4));
+    private static double F64(ReadOnlySpan<byte> s, int o) => BitConverter.ToDouble(s.Slice(o, 8));
 
     private static string DecodeName(ReadOnlySpan<byte> raw)
     {
