@@ -65,7 +65,6 @@ public sealed class MainWindow : Window
     private TextBlock _raceReportSummary = null!;
     private Button _raceReportLegendToggle = null!;
     private StackPanel _raceReportTablePanel = null!;
-    private ListBox _raceReportList = null!;
     private List<RaceReportDriverOption> _raceReportDrivers = new();
     private readonly ComboBox[] _compareDriverBoxes = new ComboBox[6];
     private readonly ComboBox[] _compareLapBoxes = new ComboBox[6];
@@ -1295,7 +1294,7 @@ public sealed class MainWindow : Window
                 new TextBlock { Text = "Settings", FontSize = 28, FontWeight = FontWeight.Bold, Foreground = Brushes.White },
                 new TextBlock { Text = "Game UDP settings:", Foreground = Brushes.White, FontWeight = FontWeight.Bold },
                 new TextBlock { Text = "UDP Telemetry: On\nUDP Format: 2026\nUDP IP Address: 127.0.0.1\nUDP Port: 20777\nUDP Send Rate: 60Hz", Foreground = Brushes.LightGray, FontFamily = FontFamily.Parse("Consolas") },
-                new TextBlock { Text = "Build scripts intentionally use D:\\Program Files\\dotnet or D:\\dotnet directly, so Windows PATH can continue being Windows PATH.", Foreground = Brushes.LightGray, TextWrapping = TextWrapping.Wrap }
+                new TextBlock { Text = $"F1 Telemetry Lab v{AppInfo.Version} stores raw packets locally, drains pending writes on Stop, then builds reports and an optional compact ZIP.", Foreground = Brushes.LightGray, TextWrapping = TextWrapping.Wrap }
             }
         };
     }

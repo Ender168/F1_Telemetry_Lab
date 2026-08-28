@@ -348,7 +348,7 @@ public static class TrackMapDataService
             // Team Telemetry track CSV uses centimeters for distance and for X/Z coordinates.
             // Telemetry world positions are in meters, so keep the profile in meters too.
             // Otherwise detail zoom gets one tiny track segment and one lonely telemetry dot,
-            // which is exactly the kind of UI comedy nobody asked for.
+            // Avoid multiple estimated labels collapsing onto the same distance.
             points.Add(new TrackPoint(cm / 100.0, x / 100.0, z / 100.0));
         }
         return points.OrderBy(p => p.DistanceM).ToList();

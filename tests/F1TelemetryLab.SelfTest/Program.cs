@@ -355,7 +355,7 @@ static void ShortTelemetryGapsAreInterpolated()
     var points = new[] { (Distance: 0.0, Value: 100.0), (Distance: 80.0, Value: 180.0) };
     var value = DistanceSeriesInterpolator.Linear(points, 40, p => p.Distance, p => p.Value);
     Check(value is not null, "short gap was rejected");
-    Near(140, value.Value, 0.0001, "interpolated value");
+    Near(140, value ?? double.NaN, 0.0001, "interpolated value");
 }
 
 static void LongTelemetryGapsAreRejected()
@@ -415,7 +415,15 @@ static void AnalysisIsolatesLatestLogicalSession()
     }
     finally
     {
-        if (Directory.Exists(folder)) Directory.Delete(folder, recursive: true);
+        SqliteConnection.ClearAllPools();
+        try
+        {
+            if (Directory.Exists(folder)) Directory.Delete(folder, recursive: true);
+        }
+        catch (IOException)
+        {
+            // Windows may retain a native SQLite handle briefly after a successful test.
+        }
     }
 }
 

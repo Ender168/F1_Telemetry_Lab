@@ -14,10 +14,10 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up .NET 10
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
           cache: true
@@ -31,3 +31,13 @@ jobs:
 
       - name: Run protocol and lap-quality self-tests
         run: dotnet run --project tests/F1TelemetryLab.SelfTest/F1TelemetryLab.SelfTest.csproj --configuration Release --no-build
+
+      - name: Publish Windows x64
+        run: dotnet publish src/F1TelemetryLab.App/F1TelemetryLab.App.csproj --configuration Release --runtime win-x64 --self-contained true --output artifacts/F1TelemetryLab-win-x64
+
+      - name: Upload Windows x64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: F1TelemetryLab-v0.6.0-win-x64
+          path: artifacts/F1TelemetryLab-win-x64
+          if-no-files-found: error
