@@ -138,6 +138,7 @@ public sealed class MainWindow : Window
                 new TabItem { Header = "Drivers", Content = BuildDriversTab() },
                 new TabItem { Header = "Lap Compare", Content = BuildCompareTab() },
                 new TabItem { Header = "Track Map", Content = BuildTrackMapTab() },
+                new TabItem { Header = "Track Detail", Content = BuildTrackDetailTab() },
                 new TabItem { Header = "Race Report", Content = BuildRaceReportTab() },
                 new TabItem { Header = "Driver Compare", Content = BuildDriverCompareTab() },
                 new TabItem { Header = "Stint Report", Content = BuildStintReportTab() },
@@ -900,7 +901,7 @@ public sealed class MainWindow : Window
         controls.Children.Add(load);
         controls.Children.Add(build);
         grid.Children.Add(controls);
-        var status = new TextBlock { Text = "Pit stop and compound-change analysis. It is approximate, because games enjoy ambiguity too.", Foreground = Brushes.LightGray, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 8) };
+        var status = new TextBlock { Text = "Pit stop and compound-change analysis. Detection combines pit status, stop count, compound changes and tyre-age resets.", Foreground = Brushes.LightGray, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 8) };
         Grid.SetRow(status, 2);
         grid.Children.Add(status);
         var legend = new TextBlock { Text = "", Foreground = Hex(0xA8B3C7), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 8) };
@@ -1045,7 +1046,7 @@ public sealed class MainWindow : Window
 
         _trackDetailStatus = new TextBlock
         {
-            Text = "Построй Track Map, потом выбери top-zone. Тут будет крупный zoom по проблемному месту, потому что пиксели наконец-то начали работать на нас.",
+            Text = "Построй Track Map и выбери top-zone. Здесь появится увеличенный фрагмент с траекториями и границами трассы.",
             Foreground = Brushes.LightGray,
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 0, 0, 12)
@@ -1067,7 +1068,7 @@ public sealed class MainWindow : Window
         left.Children.Add(_trackDetailZoneList);
         left.Children.Add(new TextBlock
         {
-            Text = "Выбор зоны синхронизирован с Track Map. Список теперь навигатор, а не математическая пытка по метрам.",
+            Text = "Выбор зоны синхронизирован с Track Map; список служит навигацией по найденным потерям и выигрышам.",
             Foreground = Brushes.LightGray,
             TextWrapping = TextWrapping.Wrap
         });

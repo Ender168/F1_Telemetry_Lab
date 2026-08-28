@@ -51,14 +51,14 @@ public sealed class TrackDetailControl : Control
         var dimBrush = new SolidColorBrush(Color.FromRgb(150, 160, 170));
         if (_data?.Profile is null || _data.Profile.Points.Count < 2)
         {
-            DrawText(context, "Detail data not loaded. Построй Track Map или Best vs YOU, потом выбирай top-zone.", 16, textBrush, new Point(24, 24));
+            DrawText(context, "Detail data not loaded. Build Track Map or Best vs YOU, then select a top zone.", 16, textBrush, new Point(24, 24));
             return;
         }
 
         var insight = _selectedInsight ?? _data.Insights.FirstOrDefault();
         if (insight is null)
         {
-            DrawText(context, "No top-zones found. Тут нечего приближать, трагедия без кульминации.", 16, textBrush, new Point(24, 24));
+            DrawText(context, "No meaningful gain or loss zones were found for this comparison.", 16, textBrush, new Point(24, 24));
             return;
         }
 
@@ -401,20 +401,30 @@ public sealed class TrackDetailControl : Control
         List<TrackMapTracePoint> cmpTrace,
         Func<double, double, Point> mapRaw)
     {
-        var refByBin = refTrace.GroupBy(p => RoundTo10(p.DistanceM)).ToDictionary(g => g.Key, g => g.Last());
-        var cmpByBin = cmpTrace.GroupBy(p => RoundTo10(p.DistanceM)).ToDictionary(g => g.Key, g => g.Last());
+        var referenceTrace = refTrace
+            .GroupBy(p => RoundTo10(p.DistanceM))
+            .Select(g => g.Last())
+            .OrderBy(p => p.DistanceM)
+            .ToList();
+        var compareTrace = cmpTrace
+            .GroupBy(p => RoundTo10(p.DistanceM))
+            .Select(g => g.Last())
+            .OrderBy(p => p.DistanceM)
+            .ToList();
         var result = new List<ScreenDeviationPoint>();
-        foreach (var bin in refByBin.Keys.Intersect(cmpByBin.Keys).OrderBy(x => x))
+        foreach (var r in referenceTrace)
         {
-            var r = refByBin[bin];
-            var c = cmpByBin[bin];
-            var reference = mapRaw(r.X, r.Z);
-            var compare = mapRaw(c.X, c.Z);
-            var dx = compare.X - reference.X;
-            var dy = compare.Y - reference.Y;
-            var offsetMeters = Math.Sqrt(Math.Pow(c.X - r.X, 2) + Math.Pow(c.Z - r.Z, 2));
+            var compareX = DistanceSeriesInterpolator.Linear(compareTrace, r.DistanceM, p => p.DistanceM, p => p.X);
+            var compareZ = DistanceSeriesInterpolator.Linear(compareTrace, r.DistanceM, p => p.DistanceM, p => p.Z);
+            if (compareX is null || compareZ is null) continue;
+            var bin = RoundTo10(r.DistanceM);
+            var referencePoint = mapRaw(r.X, r.Z);
+            var comparePoint = mapRaw(compareX.Value, compareZ.Value);
+            var dx = comparePoint.X - referencePoint.X;
+            var dy = comparePoint.Y - referencePoint.Y;
+            var offsetMeters = Math.Sqrt(Math.Pow(compareX.Value - r.X, 2) + Math.Pow(compareZ.Value - r.Z, 2));
             var offsetPixels = Math.Sqrt(dx * dx + dy * dy);
-            result.Add(new ScreenDeviationPoint(bin, reference, compare, offsetMeters, offsetPixels));
+            result.Add(new ScreenDeviationPoint(bin, referencePoint, comparePoint, offsetMeters, offsetPixels));
         }
         return result;
     }
