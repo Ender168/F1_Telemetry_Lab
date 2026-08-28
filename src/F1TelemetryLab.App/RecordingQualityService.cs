@@ -19,9 +19,10 @@ public sealed record RecordingQualityReport(
 {
     public string Summary =>
         $"{Rating}: packets {PacketsReceived:N0}, samples {CarSamplesWritten:N0}, " +
-        $"queue drops {QueueDrops:N0}, invalid headers {InvalidHeaders:N0}, " +
+        $"queue drops {QueueDrops:N0}, invalid/unsupported {InvalidHeaders:N0}/{UnsupportedPackets:N0}, " +
         $"duplicate/out-of-order {DuplicateFrames:N0}/{OutOfOrderFrames:N0}, " +
-        $"queue high-water {QueueHighWatermark:N0}, session changes {SessionChanges:N0}.";
+        $"estimated missing {EstimatedMissingFrames:N0}, queue high-water {QueueHighWatermark:N0}, " +
+        $"session changes {SessionChanges:N0}.";
 }
 
 public static class RecordingQualityService
@@ -31,6 +32,22 @@ public static class RecordingQualityService
         var database = Path.Combine(sessionFolder, "session.sqlite");
         if (!File.Exists(database)) return null;
 
+        try
+        {
+            return LoadDatabase(database);
+        }
+        catch (SqliteException)
+        {
+            return null;
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    private static RecordingQualityReport? LoadDatabase(string database)
+    {
         using var con = new SqliteConnection($"Data Source={database};Mode=ReadOnly;Cache=Shared");
         con.Open();
         using (var exists = con.CreateCommand())

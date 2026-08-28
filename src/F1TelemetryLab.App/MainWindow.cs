@@ -1389,14 +1389,25 @@ public sealed class MainWindow : Window
 
     private async void OnWindowClosing(object? sender, WindowClosingEventArgs e)
     {
-        if (_closingAfterStop || !_recorder.IsRecording)
+        if (_closingAfterStop)
+        {
+            _timer.Stop();
+            return;
+        }
+
+        if (_closeStopInProgress)
+        {
+            e.Cancel = true;
+            return;
+        }
+
+        if (!_recorder.IsActive)
         {
             _timer.Stop();
             return;
         }
 
         e.Cancel = true;
-        if (_closeStopInProgress) return;
         _closeStopInProgress = true;
         _startButton.IsEnabled = false;
         _stopButton.IsEnabled = false;

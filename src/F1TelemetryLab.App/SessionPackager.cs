@@ -42,7 +42,7 @@ public static class SessionPackager
 
                 var relative = Path.GetRelativePath(sessionFolder, file);
 
-                // Keep the raw database local. It is useful for re-analysis, but hilariously bad as an upload format.
+                // Keep the large raw database local for lossless re-analysis; the archive uses the compact projection.
                 if (relative.Equals("session.sqlite", StringComparison.OrdinalIgnoreCase))
                     continue;
                 if (relative.Equals("session.sqlite-wal", StringComparison.OrdinalIgnoreCase) ||

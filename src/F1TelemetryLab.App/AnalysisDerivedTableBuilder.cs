@@ -31,6 +31,7 @@ internal static class AnalysisDerivedTableBuilder
                received_at AS selected_at
         FROM raw_packets
         WHERE packet_format = 2026
+          AND packet_id = 2
           AND session_uid IS NOT NULL
           AND CAST(session_uid AS TEXT) NOT IN ('', '0')
         ORDER BY id DESC
@@ -490,10 +491,14 @@ internal static class AnalysisDerivedTableBuilder
             SELECT * FROM final_ranked WHERE packet_rank = 1 AND car_rank = 1
         ),
         best_laps AS (
-            SELECT session_uid, car_idx, MIN(lap_time_ms) AS best_lap_ms
-            FROM lap_summary
-            WHERE clean_lap = 1 AND lap_time_ms > 0
-            GROUP BY session_uid, car_idx
+            SELECT s.session_uid, s.car_idx, MIN(s.lap_time_ms) AS best_lap_ms
+            FROM lap_summary s
+            JOIN lap_state_summary state
+              ON state.session_uid = s.session_uid
+             AND state.car_idx = s.car_idx
+             AND state.lap_num = s.lap_num
+            WHERE s.clean_lap = 1 AND state.pit_this_lap = 0 AND s.lap_time_ms > 0
+            GROUP BY s.session_uid, s.car_idx
         ),
         official_rows AS (
             SELECT

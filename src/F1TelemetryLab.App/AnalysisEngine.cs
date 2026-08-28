@@ -362,335 +362,6 @@ public static class AnalysisEngine
 
     private static void BuildSqlDerivedTables(SqliteConnection con) => AnalysisDerivedTableBuilder.Build(con);
 
-    // Kept temporarily while the v0.6 projection is validated against existing session packs.
-    // It is not executed; the new builder above owns the normalized projection.
-    private static void BuildSqlDerivedTablesLegacy(SqliteConnection con)
-    {
-        TryAddColumn(con, "driver_aliases", "short_name", "TEXT");
-        // Execute derived-table statements one by one. Some providers pretend
-        // multi-statement commands are fine, then quietly leave humanity with
-        // "no such table". We are not giving them that opportunity.
-        ExecuteNonQuery(con, "DROP TABLE IF EXISTS analysis_samples;");
-        ExecuteNonQuery(con, """
-        CREATE TABLE analysis_samples AS
-        SELECT
-            l.received_at, l.session_uid, l.session_time, l.frame_identifier, l.car_idx, l.is_player,
-            l.lap_num, l.lap_distance, l.total_distance, l.position, l.sector, l.lap_invalid,
-            l.current_lap_time_ms, l.last_lap_time_ms, l.penalties, l.warnings,
-            t.speed, t.throttle, t.brake, t.steer, t.gear, t.engine_rpm, t.drs,
-            m.world_position_x, m.world_position_y, m.world_position_z, m.yaw, m.g_force_lateral, m.g_force_longitudinal,
-            q.clean_lap, q.rewind_count, q.invalid_count
-        FROM lap_data l
-        LEFT JOIN car_telemetry t ON t.frame_identifier = l.frame_identifier AND t.car_idx = l.car_idx
-        LEFT JOIN motion_data m ON m.frame_identifier = l.frame_identifier AND m.car_idx = l.car_idx
-        LEFT JOIN lap_quality q ON q.car_idx = l.car_idx AND q.lap_num = l.lap_num;
-        """);
-        ExecuteNonQuery(con, "DROP TABLE IF EXISTS lap_summary;");
-        ExecuteNonQuery(con, """
-        CREATE TABLE lap_summary AS
-        SELECT
-            a.car_idx,
-            a.lap_num,
-            MAX(a.is_player) AS is_player,
-            MAX(a.position) AS best_position_seen,
-            MAX(a.clean_lap) AS clean_lap,
-            MAX(a.rewind_count) AS rewind_count,
-            MAX(a.invalid_count) AS invalid_count,
-            COUNT(*) AS sample_count,
-            MIN(a.lap_distance) AS min_distance,
-            MAX(a.lap_distance) AS max_distance,
-            MAX(a.current_lap_time_ms) AS lap_time_ms,
-            MAX(a.speed) AS max_speed,
-            AVG(a.speed) AS avg_speed,
-            MIN(a.speed) AS min_speed,
-            AVG(a.throttle) AS avg_throttle,
-            AVG(a.brake) AS avg_brake,
-            MAX(a.penalties) AS penalties,
-            MAX(a.warnings) AS warnings
-        FROM analysis_samples a
-        WHERE a.lap_num > 0
-        GROUP BY a.car_idx, a.lap_num;
-        """);
-
-        ExecuteNonQuery(con, "DROP TABLE IF EXISTS lap_state_summary;");
-        ExecuteNonQuery(con, """
-        CREATE TABLE lap_state_summary AS
-        WITH
-        lap_ranked AS (
-            SELECT l.*,
-                   ROW_NUMBER() OVER (PARTITION BY l.car_idx, l.lap_num ORDER BY l.frame_identifier ASC, l.session_time ASC) AS rn_start,
-                   ROW_NUMBER() OVER (PARTITION BY l.car_idx, l.lap_num ORDER BY l.frame_identifier DESC, l.session_time DESC) AS rn_end
-            FROM lap_data l
-            WHERE l.lap_num > 0
-        ),
-        lap_start AS (SELECT * FROM lap_ranked WHERE rn_start = 1),
-        lap_end AS (SELECT * FROM lap_ranked WHERE rn_end = 1),
-        lap_agg AS (
-            SELECT car_idx, lap_num,
-                   MAX(pit_status) AS pit_status_max,
-                   MIN(num_pit_stops) AS pit_stops_start,
-                   MAX(num_pit_stops) AS pit_stops_end,
-                   MAX(lap_invalid) AS lap_invalid,
-                   MAX(warnings) AS warnings,
-                   MAX(penalties) AS penalties
-            FROM lap_data
-            WHERE lap_num > 0
-            GROUP BY car_idx, lap_num
-        ),
-        status_tagged AS (
-            SELECT s.*, l.lap_num
-            FROM car_status s
-            JOIN lap_data l ON l.frame_identifier = s.frame_identifier AND l.car_idx = s.car_idx
-            WHERE l.lap_num > 0
-        ),
-        status_ranked AS (
-            SELECT s.*,
-                   ROW_NUMBER() OVER (PARTITION BY s.car_idx, s.lap_num ORDER BY s.frame_identifier ASC, s.session_time ASC) AS rn_start,
-                   ROW_NUMBER() OVER (PARTITION BY s.car_idx, s.lap_num ORDER BY s.frame_identifier DESC, s.session_time DESC) AS rn_end
-            FROM status_tagged s
-        ),
-        status_start AS (SELECT * FROM status_ranked WHERE rn_start = 1),
-        status_end AS (SELECT * FROM status_ranked WHERE rn_end = 1),
-        status_agg AS (
-            SELECT car_idx, lap_num,
-                   MIN(ers_store_energy) AS ers_min,
-                   MAX(ers_store_energy) AS ers_max,
-                   MAX(ers_deployed_this_lap) AS ers_deployed_this_lap,
-                   MAX(ers_harvested_this_lap_mguk) AS ers_harvest_mguk_this_lap,
-                   MAX(ers_harvested_this_lap_mguh) AS ers_harvest_mguh_this_lap
-            FROM status_tagged
-            GROUP BY car_idx, lap_num
-        ),
-        damage_tagged AS (
-            SELECT d.*, l.lap_num
-            FROM car_damage d
-            JOIN lap_data l ON l.frame_identifier = d.frame_identifier AND l.car_idx = d.car_idx
-            WHERE l.lap_num > 0
-        ),
-        damage_ranked AS (
-            SELECT d.*,
-                   ROW_NUMBER() OVER (PARTITION BY d.car_idx, d.lap_num ORDER BY d.frame_identifier ASC, d.session_time ASC) AS rn_start,
-                   ROW_NUMBER() OVER (PARTITION BY d.car_idx, d.lap_num ORDER BY d.frame_identifier DESC, d.session_time DESC) AS rn_end
-            FROM damage_tagged d
-        ),
-        damage_start AS (SELECT * FROM damage_ranked WHERE rn_start = 1),
-        damage_end AS (SELECT * FROM damage_ranked WHERE rn_end = 1),
-        telemetry_agg AS (
-            SELECT car_idx, lap_num,
-                   MAX(speed) AS max_speed,
-                   AVG(speed) AS avg_speed,
-                   100.0 * AVG(CASE WHEN throttle >= 0.98 THEN 1.0 ELSE 0.0 END) AS full_throttle_pct,
-                   100.0 * AVG(CASE WHEN brake >= 0.05 THEN 1.0 ELSE 0.0 END) AS brake_pct,
-                   100.0 * AVG(CASE WHEN drs > 0 THEN 1.0 ELSE 0.0 END) AS drs_pct
-            FROM analysis_samples
-            WHERE lap_num > 0
-            GROUP BY car_idx, lap_num
-        )
-        SELECT
-            ls.car_idx,
-            ls.lap_num,
-            ls.is_player,
-            ls.clean_lap,
-            ls.rewind_count,
-            ls.invalid_count,
-            COALESCE(la.lap_invalid, 0) AS lap_invalid,
-            ls.lap_time_ms,
-            COALESCE(le.sector1_time_ms, 0) AS sector1_ms,
-            COALESCE(le.sector2_time_ms, 0) AS sector2_ms,
-            CASE
-                WHEN ls.lap_time_ms > 0 AND COALESCE(le.sector1_time_ms, 0) > 0 AND COALESCE(le.sector2_time_ms, 0) > 0
-                THEN ls.lap_time_ms - le.sector1_time_ms - le.sector2_time_ms
-                ELSE 0
-            END AS sector3_ms,
-            COALESCE(l0.position, 0) AS position_start,
-            COALESCE(le.position, 0) AS position_end,
-            COALESCE(la.warnings, ls.warnings, 0) AS warnings,
-            COALESCE(la.penalties, ls.penalties, 0) AS penalties,
-            CASE
-                WHEN COALESCE(la.pit_status_max, 0) > 0 THEN 1
-                WHEN COALESCE(la.pit_stops_end, 0) > COALESCE(la.pit_stops_start, 0) THEN 1
-                WHEN COALESCE(se.tyres_age_laps, 0) > 0 AND COALESCE(se.tyres_age_laps, 0) < COALESCE(ss.tyres_age_laps, 0) THEN 1
-                WHEN COALESCE(ss.actual_tyre_compound, 0) > 0 AND COALESCE(se.actual_tyre_compound, 0) > 0 AND ss.actual_tyre_compound <> se.actual_tyre_compound THEN 1
-                WHEN COALESCE(ss.visual_tyre_compound, 0) > 0 AND COALESCE(se.visual_tyre_compound, 0) > 0 AND ss.visual_tyre_compound <> se.visual_tyre_compound THEN 1
-                ELSE 0
-            END AS pit_this_lap,
-            COALESCE(la.pit_status_max, 0) AS pit_status_max,
-            COALESCE(la.pit_stops_start, 0) AS pit_stops_start,
-            COALESCE(la.pit_stops_end, 0) AS pit_stops_end,
-            COALESCE(ss.actual_tyre_compound, 0) AS actual_tyre_compound_start,
-            COALESCE(se.actual_tyre_compound, 0) AS actual_tyre_compound_end,
-            COALESCE(ss.visual_tyre_compound, 0) AS visual_tyre_compound_start,
-            COALESCE(se.visual_tyre_compound, 0) AS visual_tyre_compound_end,
-            COALESCE(ss.tyres_age_laps, 0) AS tyres_age_start,
-            COALESCE(se.tyres_age_laps, 0) AS tyres_age_end,
-            ss.fuel_in_tank AS fuel_start,
-            se.fuel_in_tank AS fuel_end,
-            CASE WHEN ss.fuel_in_tank IS NOT NULL AND se.fuel_in_tank IS NOT NULL THEN ss.fuel_in_tank - se.fuel_in_tank ELSE NULL END AS fuel_used,
-            se.fuel_remaining_laps AS fuel_remaining_laps_end,
-            ss.ers_store_energy AS ers_start,
-            se.ers_store_energy AS ers_end,
-            sa.ers_min,
-            sa.ers_max,
-            CASE WHEN ss.ers_store_energy IS NOT NULL AND se.ers_store_energy IS NOT NULL THEN se.ers_store_energy - ss.ers_store_energy ELSE NULL END AS ers_delta,
-            sa.ers_deployed_this_lap,
-            sa.ers_harvest_mguk_this_lap,
-            sa.ers_harvest_mguh_this_lap,
-            COALESCE(se.ers_deploy_mode, 0) AS ers_deploy_mode_end,
-            ds.tyre_wear_fl AS tyre_wear_fl_start,
-            de.tyre_wear_fl AS tyre_wear_fl_end,
-            CASE WHEN ds.tyre_wear_fl IS NOT NULL AND de.tyre_wear_fl IS NOT NULL THEN de.tyre_wear_fl - ds.tyre_wear_fl ELSE NULL END AS tyre_wear_fl_delta,
-            ds.tyre_wear_fr AS tyre_wear_fr_start,
-            de.tyre_wear_fr AS tyre_wear_fr_end,
-            CASE WHEN ds.tyre_wear_fr IS NOT NULL AND de.tyre_wear_fr IS NOT NULL THEN de.tyre_wear_fr - ds.tyre_wear_fr ELSE NULL END AS tyre_wear_fr_delta,
-            ds.tyre_wear_rl AS tyre_wear_rl_start,
-            de.tyre_wear_rl AS tyre_wear_rl_end,
-            CASE WHEN ds.tyre_wear_rl IS NOT NULL AND de.tyre_wear_rl IS NOT NULL THEN de.tyre_wear_rl - ds.tyre_wear_rl ELSE NULL END AS tyre_wear_rl_delta,
-            ds.tyre_wear_rr AS tyre_wear_rr_start,
-            de.tyre_wear_rr AS tyre_wear_rr_end,
-            CASE WHEN ds.tyre_wear_rr IS NOT NULL AND de.tyre_wear_rr IS NOT NULL THEN de.tyre_wear_rr - ds.tyre_wear_rr ELSE NULL END AS tyre_wear_rr_delta,
-            de.tyre_wear_avg AS tyre_wear_avg_end,
-            CASE WHEN ds.tyre_wear_avg IS NOT NULL AND de.tyre_wear_avg IS NOT NULL THEN de.tyre_wear_avg - ds.tyre_wear_avg ELSE NULL END AS tyre_wear_avg_delta,
-            COALESCE(de.tyre_damage_fl, 0) AS tyre_damage_fl_end,
-            COALESCE(de.tyre_damage_fr, 0) AS tyre_damage_fr_end,
-            COALESCE(de.tyre_damage_rl, 0) AS tyre_damage_rl_end,
-            COALESCE(de.tyre_damage_rr, 0) AS tyre_damage_rr_end,
-            COALESCE(de.front_left_wing_damage, 0) AS front_left_wing_damage_end,
-            COALESCE(de.front_right_wing_damage, 0) AS front_right_wing_damage_end,
-            COALESCE(de.rear_wing_damage, 0) AS rear_wing_damage_end,
-            COALESCE(de.floor_damage, 0) AS floor_damage_end,
-            COALESCE(de.diffuser_damage, 0) AS diffuser_damage_end,
-            COALESCE(de.sidepod_damage, 0) AS sidepod_damage_end,
-            MAX(
-                ABS(COALESCE(de.front_left_wing_damage, 0) - COALESCE(ds.front_left_wing_damage, 0)),
-                ABS(COALESCE(de.front_right_wing_damage, 0) - COALESCE(ds.front_right_wing_damage, 0)),
-                ABS(COALESCE(de.rear_wing_damage, 0) - COALESCE(ds.rear_wing_damage, 0)),
-                ABS(COALESCE(de.floor_damage, 0) - COALESCE(ds.floor_damage, 0)),
-                ABS(COALESCE(de.diffuser_damage, 0) - COALESCE(ds.diffuser_damage, 0)),
-                ABS(COALESCE(de.sidepod_damage, 0) - COALESCE(ds.sidepod_damage, 0))
-            ) AS damage_delta_max,
-            ta.max_speed,
-            ta.avg_speed,
-            ta.full_throttle_pct,
-            ta.brake_pct,
-            ta.drs_pct
-        FROM lap_summary ls
-        LEFT JOIN lap_start l0 ON l0.car_idx = ls.car_idx AND l0.lap_num = ls.lap_num
-        LEFT JOIN lap_end le ON le.car_idx = ls.car_idx AND le.lap_num = ls.lap_num
-        LEFT JOIN lap_agg la ON la.car_idx = ls.car_idx AND la.lap_num = ls.lap_num
-        LEFT JOIN status_start ss ON ss.car_idx = ls.car_idx AND ss.lap_num = ls.lap_num
-        LEFT JOIN status_end se ON se.car_idx = ls.car_idx AND se.lap_num = ls.lap_num
-        LEFT JOIN status_agg sa ON sa.car_idx = ls.car_idx AND sa.lap_num = ls.lap_num
-        LEFT JOIN damage_start ds ON ds.car_idx = ls.car_idx AND ds.lap_num = ls.lap_num
-        LEFT JOIN damage_end de ON de.car_idx = ls.car_idx AND de.lap_num = ls.lap_num
-        LEFT JOIN telemetry_agg ta ON ta.car_idx = ls.car_idx AND ta.lap_num = ls.lap_num
-        WHERE ls.lap_num > 0;
-        """);
-        ExecuteNonQuery(con, "CREATE INDEX IF NOT EXISTS idx_lap_state_summary_car_lap ON lap_state_summary(car_idx, lap_num);");
-
-        ExecuteNonQuery(con, "DROP TABLE IF EXISTS analysis_trace_10m;");
-        ExecuteNonQuery(con, """
-        CREATE TABLE analysis_trace_10m AS
-        SELECT
-            a.car_idx,
-            a.lap_num,
-            MAX(a.is_player) AS is_player,
-            MAX(a.clean_lap) AS clean_lap,
-            CAST(a.lap_distance / 10 AS INTEGER) * 10 AS distance_bin_m,
-            MAX(a.current_lap_time_ms) AS time_ms,
-            AVG(a.speed) AS speed,
-            AVG(a.throttle) AS throttle,
-            AVG(a.brake) AS brake,
-            AVG(a.steer) AS steer,
-            AVG(a.gear) AS gear,
-            AVG(a.world_position_x) AS world_position_x,
-            AVG(a.world_position_z) AS world_position_z,
-            AVG(a.yaw) AS yaw,
-            AVG(a.g_force_lateral) AS g_force_lateral,
-            AVG(a.g_force_longitudinal) AS g_force_longitudinal
-        FROM analysis_samples a
-        WHERE a.lap_num > 0 AND a.lap_distance >= 0
-          AND NOT (a.current_lap_time_ms <= 100 AND a.lap_distance > 200)
-        GROUP BY a.car_idx, a.lap_num, distance_bin_m;
-        """);
-        ExecuteNonQuery(con, "DROP TABLE IF EXISTS final_classification;");
-        ExecuteNonQuery(con, """
-        CREATE TABLE final_classification AS
-        WITH latest_lap AS (
-            SELECT l.*
-            FROM lap_data l
-            JOIN (
-                SELECT car_idx, MAX(frame_identifier) AS max_frame
-                FROM lap_data
-                GROUP BY car_idx
-            ) x ON x.car_idx = l.car_idx AND x.max_frame = l.frame_identifier
-        ), latest_names AS (
-            SELECT p.car_idx, p.name, p.ai_controlled, p.driver_id, p.team_id, p.race_number
-            FROM participants p
-            JOIN (
-                SELECT car_idx, MAX(frame_identifier) AS max_frame
-                FROM participants
-                GROUP BY car_idx
-            ) x ON x.car_idx = p.car_idx AND x.max_frame = p.frame_identifier
-        ), best_laps AS (
-            SELECT car_idx, MIN(lap_time_ms) AS best_lap_ms
-            FROM lap_summary
-            WHERE lap_time_ms > 0
-            GROUP BY car_idx
-        )
-        SELECT
-            l.position,
-            l.car_idx,
-            l.is_player,
-            COALESCE(n.name, CASE WHEN l.is_player = 1 THEN 'YOU' ELSE 'F1 Generic' END) AS name,
-            COALESCE(n.name, CASE WHEN l.is_player = 1 THEN 'YOU' ELSE 'F1 Generic' END) AS original_name,
-            COALESCE(NULLIF(a.display_name, ''), COALESCE(n.name, CASE WHEN l.is_player = 1 THEN 'YOU' ELSE 'F1 Generic' END)) AS display_name,
-            COALESCE(NULLIF(a.short_name, ''), CASE WHEN l.is_player = 1 THEN 'YOU' ELSE printf('C%02d', l.car_idx) END) AS short_name,
-            COALESCE(n.ai_controlled, 0) AS ai_controlled,
-            COALESCE(n.driver_id, -1) AS driver_id,
-            COALESCE(n.team_id, -1) AS team_id,
-            COALESCE(n.race_number, -1) AS race_number,
-            l.lap_num,
-            l.last_lap_time_ms,
-            COALESCE(b.best_lap_ms, 0) AS best_lap_ms,
-            l.penalties,
-            l.warnings,
-            l.result_status,
-            l.driver_status
-        FROM latest_lap l
-        LEFT JOIN latest_names n ON n.car_idx = l.car_idx
-        LEFT JOIN driver_aliases a ON a.car_idx = l.car_idx
-        LEFT JOIN best_laps b ON b.car_idx = l.car_idx
-        WHERE l.position > 0
-        ORDER BY l.position ASC, l.car_idx ASC;
-        """);
-        ExecuteNonQuery(con, "CREATE INDEX IF NOT EXISTS idx_analysis_samples_car_lap_dist ON analysis_samples(car_idx, lap_num, lap_distance);");
-        ExecuteNonQuery(con, "CREATE INDEX IF NOT EXISTS idx_analysis_trace_car_lap_dist ON analysis_trace_10m(car_idx, lap_num, distance_bin_m);");
-        ExecuteNonQuery(con, "CREATE INDEX IF NOT EXISTS idx_lap_summary_clean_time ON lap_summary(clean_lap, lap_time_ms);");
-    }
-
-    private static void TryAddColumn(SqliteConnection con, string table, string column, string type)
-    {
-        try
-        {
-            using var info = con.CreateCommand();
-            info.CommandText = $"PRAGMA table_info({table})";
-            using var reader = info.ExecuteReader();
-            while (reader.Read())
-            {
-                if (!reader.IsDBNull(1) && string.Equals(reader.GetString(1), column, StringComparison.OrdinalIgnoreCase)) return;
-            }
-            ExecuteNonQuery(con, $"ALTER TABLE {table} ADD COLUMN {column} {type}");
-        }
-        catch { }
-    }
-
-    private static void ExecuteNonQuery(SqliteConnection con, string sql)
-    {
-        using var cmd = con.CreateCommand();
-        cmd.CommandText = sql;
-        cmd.ExecuteNonQuery();
-    }
-
     private static void ExportBestLaps(SqliteConnection con, string path)
     {
         using var cmd = con.CreateCommand();
@@ -698,12 +369,18 @@ public static class AnalysisEngine
         SELECT s.*
         FROM lap_summary s
         JOIN (
-            SELECT car_idx, MIN(lap_time_ms) AS best_time
-            FROM lap_summary
-            WHERE clean_lap = 1 AND lap_time_ms > 0
-            GROUP BY car_idx
-        ) b ON b.car_idx = s.car_idx AND b.best_time = s.lap_time_ms
-        WHERE s.clean_lap = 1
+            SELECT summary.session_uid, summary.car_idx, MIN(summary.lap_time_ms) AS best_time
+            FROM lap_summary summary
+            JOIN lap_state_summary state
+              ON state.session_uid = summary.session_uid
+             AND state.car_idx = summary.car_idx
+             AND state.lap_num = summary.lap_num
+            WHERE summary.clean_lap = 1 AND state.pit_this_lap = 0 AND summary.lap_time_ms > 0
+            GROUP BY summary.session_uid, summary.car_idx
+        ) b ON b.session_uid = s.session_uid AND b.car_idx = s.car_idx AND b.best_time = s.lap_time_ms
+        JOIN lap_state_summary state
+          ON state.session_uid = s.session_uid AND state.car_idx = s.car_idx AND state.lap_num = s.lap_num
+        WHERE s.clean_lap = 1 AND state.pit_this_lap = 0
         ORDER BY s.lap_time_ms ASC, s.car_idx ASC
         """;
         ExportReaderToCsv(cmd, path);
@@ -711,31 +388,33 @@ public static class AnalysisEngine
 
     private static void ExportPlayerVsFastest(SqliteConnection con, string path)
     {
-        var player = GetBestLap(con, "is_player = 1");
-        var reference = GetBestLap(con, "is_player = 0");
+        var player = GetBestLap(con, "s.is_player = 1");
+        var reference = GetBestLap(con, "s.is_player = 0");
         if (player is null || reference is null)
         {
             File.WriteAllText(path, "message\nNo clean player/reference lap found\n", Encoding.UTF8);
             return;
         }
 
-        var p = LoadBins(con, player.CarIndex, player.LapNum);
-        var r = LoadBins(con, reference.CarIndex, reference.LapNum);
-        var bins = p.Keys.Union(r.Keys).OrderBy(x => x).ToList();
+        var playerBins = LoadBins(con, player.CarIndex, player.LapNum);
+        var referenceBins = LoadBins(con, reference.CarIndex, reference.LapNum);
         using var writer = new StreamWriter(path, false, Encoding.UTF8);
         writer.WriteLine("distance_bin_m,player_car,player_lap,ref_car,ref_lap,player_time_ms,ref_time_ms,delta_ms,player_speed,ref_speed,speed_delta,player_throttle,ref_throttle,player_brake,ref_brake,player_steer,ref_steer");
-        foreach (var b in bins)
+        foreach (var referenceBin in referenceBins)
         {
-            p.TryGetValue(b, out var pb);
-            r.TryGetValue(b, out var rb);
+            var playerTime = InterpolateBin(playerBins, referenceBin.Bin, x => x.TimeMs);
+            var playerSpeed = InterpolateBin(playerBins, referenceBin.Bin, x => x.Speed);
+            var playerThrottle = InterpolateBin(playerBins, referenceBin.Bin, x => x.Throttle);
+            var playerBrake = InterpolateBin(playerBins, referenceBin.Bin, x => x.Brake);
+            var playerSteer = InterpolateBin(playerBins, referenceBin.Bin, x => x.Steer);
             writer.WriteLine(string.Join(',', new[]
             {
-                b.ToString(CultureInfo.InvariantCulture),
+                referenceBin.Bin.ToString(CultureInfo.InvariantCulture),
                 player.CarIndex.ToString(CultureInfo.InvariantCulture), player.LapNum.ToString(CultureInfo.InvariantCulture),
                 reference.CarIndex.ToString(CultureInfo.InvariantCulture), reference.LapNum.ToString(CultureInfo.InvariantCulture),
-                Num(pb?.TimeMs), Num(rb?.TimeMs), Num(pb is null || rb is null ? null : pb.TimeMs - rb.TimeMs),
-                Num(pb?.Speed), Num(rb?.Speed), Num(pb is null || rb is null ? null : pb.Speed - rb.Speed),
-                Num(pb?.Throttle), Num(rb?.Throttle), Num(pb?.Brake), Num(rb?.Brake), Num(pb?.Steer), Num(rb?.Steer)
+                Num(playerTime), Num(referenceBin.TimeMs), Num(playerTime - referenceBin.TimeMs),
+                Num(playerSpeed), Num(referenceBin.Speed), Num(playerSpeed - referenceBin.Speed),
+                Num(playerThrottle), Num(referenceBin.Throttle), Num(playerBrake), Num(referenceBin.Brake), Num(playerSteer), Num(referenceBin.Steer)
             }));
         }
     }
@@ -743,37 +422,45 @@ public static class AnalysisEngine
     private static BestLapRow? GetBestLap(SqliteConnection con, string where)
     {
         using var cmd = con.CreateCommand();
-        cmd.CommandText = $"SELECT car_idx, lap_num, is_player, lap_time_ms FROM lap_summary WHERE clean_lap = 1 AND lap_time_ms > 0 AND {where} ORDER BY lap_time_ms ASC LIMIT 1";
+        cmd.CommandText = $"""
+        SELECT s.car_idx, s.lap_num, s.is_player, s.lap_time_ms
+        FROM lap_summary s
+        JOIN lap_state_summary state
+          ON state.session_uid = s.session_uid AND state.car_idx = s.car_idx AND state.lap_num = s.lap_num
+        WHERE s.clean_lap = 1 AND state.pit_this_lap = 0 AND s.lap_time_ms > 0 AND {where}
+        ORDER BY s.lap_time_ms ASC
+        LIMIT 1
+        """;
         using var reader = cmd.ExecuteReader();
         if (!reader.Read()) return null;
         return new BestLapRow(reader.GetInt32(0), reader.GetInt32(1), reader.GetInt32(2) == 1, Convert.ToUInt32(reader.GetValue(3), CultureInfo.InvariantCulture));
     }
 
-    private static Dictionary<int, TelemetryBin> LoadBins(SqliteConnection con, int carIdx, int lapNum)
+    private static List<TelemetryBin> LoadBins(SqliteConnection con, int carIdx, int lapNum)
     {
-        var result = new Dictionary<int, TelemetryBin>();
+        var result = new List<TelemetryBin>();
         using var cmd = con.CreateCommand();
         cmd.CommandText = """
-        SELECT CAST(lap_distance / 10 AS INTEGER) * 10 AS bin,
-               AVG(current_lap_time_ms), AVG(speed), AVG(throttle), AVG(brake), AVG(steer), AVG(gear)
-        FROM analysis_samples
-        WHERE car_idx = $car AND lap_num = $lap AND clean_lap = 1 AND lap_distance >= 0
-        GROUP BY bin
-        ORDER BY bin
+        SELECT distance_bin_m, time_ms, speed, throttle, brake, steer, gear
+        FROM analysis_trace_10m
+        WHERE car_idx = $car AND lap_num = $lap AND clean_lap = 1
+        ORDER BY distance_bin_m
         """;
         cmd.Parameters.AddWithValue("$car", carIdx);
         cmd.Parameters.AddWithValue("$lap", lapNum);
         using var reader = cmd.ExecuteReader();
         while (reader.Read())
         {
-            var bin = reader.GetInt32(0);
-            result[bin] = new TelemetryBin(bin, D(reader, 1), D(reader, 2), D(reader, 3), D(reader, 4), D(reader, 5), D(reader, 6));
+            result.Add(new TelemetryBin(reader.GetInt32(0), D(reader, 1), D(reader, 2), D(reader, 3), D(reader, 4), D(reader, 5), D(reader, 6)));
         }
         return result;
     }
 
+    private static double? InterpolateBin(IReadOnlyList<TelemetryBin> bins, int distanceM, Func<TelemetryBin, double> valueSelector) =>
+        DistanceSeriesInterpolator.Linear(bins, distanceM, x => x.Bin, valueSelector);
+
     private static double D(SqliteDataReader reader, int idx) => reader.IsDBNull(idx) ? double.NaN : Convert.ToDouble(reader.GetValue(idx), CultureInfo.InvariantCulture);
-    private static string Num(double? value) => value is null || double.IsNaN(value.Value) ? "" : value.Value.ToString("0.###", CultureInfo.InvariantCulture);
+    private static string Num(double? value) => value is null || !double.IsFinite(value.Value) ? "" : value.Value.ToString("0.###", CultureInfo.InvariantCulture);
 
     private static void ExportCsv(SqliteConnection con, string path, string sql)
     {

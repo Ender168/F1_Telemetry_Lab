@@ -111,7 +111,7 @@ public static class F12026Parser
             p += 2; // pit lane time ms
             p += 2; // pit stop timer ms
             p += 1; // should serve pen
-            // speed trap fields are not required for v0.2 summary
+            // Speed-trap fields are not part of the current lap summary model.
 
             samples.Add(new LapDataSample(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.OverallFrameIdentifier, h.PlayerCarIndex, i,
                 h.PlayerCarIndex == i, lastLap, currentLap, SectorMs(s1ms, s1min), SectorMs(s2ms, s2min), SectorMs(frontMs, frontMin), SectorMs(leaderMs, leaderMin),
@@ -161,8 +161,8 @@ public static class F12026Parser
             var frontBrakeBias = c[3];
             var fuelInTank = F32(c, 5);
             var fuelRemainingLaps = F32(c, 13);
-            // F1 25 2026 Season Pack CarStatusData includes uint16 m_drsActivationDistance at bytes 23-24.
-            // Everything after it starts at byte 25. Reading from byte 24 turns ERS into comedy-grade nonsense.
+            // The 2026 CarStatusData layout includes uint16 m_drsActivationDistance at bytes 23-24.
+            // All tyre and ERS fields therefore begin at byte 25.
             var actualTyreCompound = c[25];
             var visualTyreCompound = c[26];
             var tyreAge = unchecked((sbyte)c[27]);

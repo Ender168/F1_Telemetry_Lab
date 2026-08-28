@@ -1,11 +1,16 @@
 using System.Buffers.Binary;
 using System.Text;
 using F1TelemetryLab;
+using Microsoft.Data.Sqlite;
 
 var tests = new (string Name, Action Run)[]
 {
     ("header carries overall frame", HeaderCarriesOverallFrame),
     ("telemetry carries overall frame", TelemetryCarriesOverallFrame),
+    ("lap layout follows 2026 spec", LapLayoutFollows2026Spec),
+    ("status layout follows 2026 spec", StatusLayoutFollows2026Spec),
+    ("damage layout follows 2026 spec", DamageLayoutFollows2026Spec),
+    ("flashback event carries target", FlashbackEventCarriesTarget),
     ("participant layout follows 2026 spec", ParticipantLayoutFollows2026Spec),
     ("final classification layout", FinalClassificationLayout),
     ("completed lap is authoritative", CompletedLapIsAuthoritative),
@@ -17,7 +22,10 @@ var tests = new (string Name, Action Run)[]
     ("one pit stop is not duplicated", OnePitStopIsNotDuplicated),
     ("pit lap cannot become best clean", PitLapCannotBecomeBestClean),
     ("short telemetry gaps are interpolated", ShortTelemetryGapsAreInterpolated),
-    ("long telemetry gaps are rejected", LongTelemetryGapsAreRejected)
+    ("long telemetry gaps are rejected", LongTelemetryGapsAreRejected),
+    ("minor header noise is a warning", MinorHeaderNoiseIsWarning),
+    ("queue loss is unreliable", QueueLossIsUnreliable),
+    ("analysis isolates the latest logical session", AnalysisIsolatesLatestLogicalSession)
 };
 
 var failed = 0;
@@ -69,6 +77,107 @@ static void TelemetryCarriesOverallFrame()
     Equal(321, first.Speed, "speed");
     Near(0.75, first.Throttle, 0.0001, "throttle");
     Check(first.IsPlayer, "player flag");
+}
+
+static void LapLayoutFollows2026Spec()
+{
+    var packet = LapPacket(sessionUid: 8, frame: 21, overall: 31, sessionTime: 12.5f, lap: 7, distance: 1_234.5f,
+        currentMs: 65_432, lastMs: 90_123, invalid: true);
+    var row = packet.AsSpan(F12026Parser.HeaderSize, 57);
+    BinaryPrimitives.WriteUInt16LittleEndian(row[8..], 5_678);
+    row[10] = 1;
+    BinaryPrimitives.WriteUInt16LittleEndian(row[11..], 4_321);
+    row[13] = 1;
+    row[32] = 4;
+    row[34] = 2;
+    row[35] = 1;
+    row[36] = 2;
+    row[38] = 5;
+    row[39] = 3;
+    row[44] = 4;
+    row[45] = 2;
+
+    var sample = F12026Parser.ParseLapDataPacket(packet, DateTimeOffset.UnixEpoch)[0];
+    Equal((uint)90_123, sample.LastLapTimeMs, "last lap");
+    Equal((uint)65_432, sample.CurrentLapTimeMs, "current lap");
+    Equal(65_678, sample.Sector1TimeMs, "sector 1 minute part");
+    Equal(64_321, sample.Sector2TimeMs, "sector 2 minute part");
+    Near(1_234.5, sample.LapDistance, 0.001, "lap distance");
+    Equal(4, sample.Position, "position");
+    Equal(7, sample.LapNum, "lap number");
+    Check(sample.LapInvalid, "invalid flag");
+    Equal(3, sample.Warnings, "warnings");
+}
+
+static void StatusLayoutFollows2026Spec()
+{
+    const int rowSize = 59;
+    var packet = Packet(packetId: 7, payloadSize: rowSize * 24, sessionUid: 12, frame: 2, overall: 3, player: 0);
+    var row = packet.AsSpan(F12026Parser.HeaderSize, rowSize);
+    row[3] = 57;
+    WriteFloat(row, 5, 42.5f);
+    WriteFloat(row, 13, 18.25f);
+    BinaryPrimitives.WriteUInt16LittleEndian(row[23..], 900);
+    row[25] = 20;
+    row[26] = 18;
+    row[27] = 9;
+    WriteFloat(row, 29, 600_000f);
+    WriteFloat(row, 33, 120_000f);
+    WriteFloat(row, 37, 3_500_000f);
+    row[41] = 3;
+    WriteFloat(row, 42, 800_000f);
+    WriteFloat(row, 46, 400_000f);
+    WriteFloat(row, 50, 2_000_000f);
+    WriteFloat(row, 54, 1_100_000f);
+
+    var sample = F12026Parser.ParseCarStatusPacket(packet, DateTimeOffset.UnixEpoch)[0];
+    Equal(57, sample.FrontBrakeBias, "brake bias");
+    Near(42.5, sample.FuelInTank, 0.001, "fuel");
+    Equal(20, sample.ActualTyreCompound, "actual compound");
+    Equal(18, sample.VisualTyreCompound, "visual compound");
+    Equal(9, sample.TyresAgeLaps, "tyre age");
+    Near(3_500_000, sample.ErsStoreEnergy, 0.1, "ERS store");
+    Equal(3, sample.ErsDeployMode, "ERS mode");
+}
+
+static void DamageLayoutFollows2026Spec()
+{
+    const int rowSize = 46;
+    var packet = Packet(packetId: 10, payloadSize: rowSize * 24, sessionUid: 13, frame: 2, overall: 3, player: 0);
+    var row = packet.AsSpan(F12026Parser.HeaderSize, rowSize);
+    WriteFloat(row, 0, 10f);
+    WriteFloat(row, 4, 20f);
+    WriteFloat(row, 8, 30f);
+    WriteFloat(row, 12, 40f);
+    row[16] = 1;
+    row[17] = 2;
+    row[18] = 3;
+    row[19] = 4;
+    row[28] = 11;
+    row[29] = 12;
+    row[30] = 13;
+    row[31] = 14;
+    row[32] = 15;
+    row[33] = 16;
+
+    var sample = F12026Parser.ParseCarDamagePacket(packet, DateTimeOffset.UnixEpoch)[0];
+    Near(25, sample.TyreWearAvg, 0.001, "average tyre wear");
+    Equal(3, sample.TyreDamageFl, "front-left tyre damage");
+    Equal(11, sample.FrontLeftWingDamage, "front-left wing");
+    Equal(16, sample.SidepodDamage, "sidepod");
+}
+
+static void FlashbackEventCarriesTarget()
+{
+    var packet = Packet(packetId: 3, payloadSize: 12, sessionUid: 14, frame: 200, overall: 300, player: 0);
+    Encoding.ASCII.GetBytes("FLBK", packet.AsSpan(F12026Parser.HeaderSize, 4));
+    BinaryPrimitives.WriteUInt32LittleEndian(packet.AsSpan(F12026Parser.HeaderSize + 4), 123);
+    WriteFloat(packet, F12026Parser.HeaderSize + 8, 45.5f);
+
+    var sample = F12026Parser.ParseEventPacket(packet, DateTimeOffset.UnixEpoch);
+    Check(sample is not null, "flashback event rejected");
+    Check(sample!.DetailsJson.Contains("123", StringComparison.Ordinal), "flashback frame missing");
+    Check(sample.DetailsJson.Contains("45.5", StringComparison.Ordinal), "flashback time missing");
 }
 
 static void FinalClassificationLayout()
@@ -256,6 +365,75 @@ static void LongTelemetryGapsAreRejected()
     Check(value is null, "long gap was interpolated");
 }
 
+static void MinorHeaderNoiseIsWarning()
+{
+    var quality = new RecordingQualitySnapshot(10_000, 100_000, 1, 0, 0, 0, 0, 0, 0, 0, 0);
+    Equal("Usable with warnings", quality.Rating, "quality rating");
+}
+
+static void QueueLossIsUnreliable()
+{
+    var quality = new RecordingQualitySnapshot(10_000, 100_000, 0, 0, 0, 0, 0, 1, 0, 0, 0);
+    Equal("Unreliable", quality.Rating, "quality rating");
+}
+
+static void AnalysisIsolatesLatestLogicalSession()
+{
+    var folder = Path.Combine(Path.GetTempPath(), "F1TelemetryLab_selftest_" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(folder);
+    var databasePath = Path.Combine(folder, "session.sqlite");
+    try
+    {
+        using (var database = new TelemetryDatabase(databasePath))
+        {
+            database.SaveMetadata(new SessionMetadata
+            {
+                SessionName = "SelfTest",
+                SessionUid = 202,
+                TrackLengthMeters = 1_000,
+                SessionFolder = folder,
+                DatabasePath = databasePath
+            });
+
+            AddLapPackets(database, sessionUid: 101, lapTimeMs: 90_000, sequenceOffset: 0);
+            AddLapPackets(database, sessionUid: 202, lapTimeMs: 80_000, sequenceOffset: 10);
+        }
+
+        var result = AnalysisEngine.AnalyzeSession(folder);
+        Equal(6, result.RawPacketsProcessed, "raw packet count");
+
+        using var con = new SqliteConnection($"Data Source={databasePath};Mode=ReadOnly");
+        con.Open();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(DISTINCT session_uid), MIN(session_uid), MIN(lap_time_ms) FROM lap_summary WHERE clean_lap = 1";
+        using var reader = cmd.ExecuteReader();
+        Check(reader.Read(), "lap summary missing");
+        Equal(1L, reader.GetInt64(0), "logical session count");
+        Equal("202", reader.GetString(1), "selected session UID");
+        Equal(80_000L, reader.GetInt64(2), "selected session best lap");
+        Check(File.Exists(Path.Combine(folder, "analysis_manifest.json")), "analysis manifest missing");
+    }
+    finally
+    {
+        if (Directory.Exists(folder)) Directory.Delete(folder, recursive: true);
+    }
+}
+
+static void AddLapPackets(TelemetryDatabase database, ulong sessionUid, uint lapTimeMs, int sequenceOffset)
+{
+    var packets = new[]
+    {
+        LapPacket(sessionUid, 10, 100, 1.0f, 1, 0, 100),
+        LapPacket(sessionUid, 11, 101, 80.0f, 1, 990, lapTimeMs - 100),
+        LapPacket(sessionUid, 12, 102, 81.0f, 2, 0, 50, lapTimeMs)
+    };
+    for (var i = 0; i < packets.Length; i++)
+    {
+        Check(F12026Parser.TryParseHeader(packets[i], out var header), "self-test packet header rejected");
+        database.InsertRaw(DateTimeOffset.UnixEpoch.AddSeconds(sequenceOffset + i), header, packets[i]);
+    }
+}
+
 static RaceLapReportRow RaceLap(int lap, int visualCompound, int tyreAge, bool pit = false) => new()
 {
     LapNum = lap,
@@ -305,6 +483,33 @@ static byte[] Packet(byte packetId, int payloadSize, ulong sessionUid, uint fram
     span[27] = player;
     span[28] = 255;
     return bytes;
+}
+
+static byte[] LapPacket(
+    ulong sessionUid,
+    uint frame,
+    uint overall,
+    float sessionTime,
+    int lap,
+    float distance,
+    uint currentMs,
+    uint lastMs = 0,
+    bool invalid = false)
+{
+    const int rowSize = 57;
+    var packet = Packet(2, rowSize * 24 + 2, sessionUid, frame, overall, 0);
+    WriteFloat(packet, 15, sessionTime);
+    var row = packet.AsSpan(F12026Parser.HeaderSize, rowSize);
+    BinaryPrimitives.WriteUInt32LittleEndian(row, lastMs);
+    BinaryPrimitives.WriteUInt32LittleEndian(row[4..], currentMs);
+    WriteFloat(row, 20, distance);
+    WriteFloat(row, 24, Math.Max(0, lap - 1) * 1_000 + distance);
+    row[32] = 1;
+    row[33] = (byte)lap;
+    row[37] = invalid ? (byte)1 : (byte)0;
+    row[44] = 4;
+    row[45] = 2;
+    return packet;
 }
 
 static void WriteFloat(Span<byte> span, int offset, float value) =>

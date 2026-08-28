@@ -13,12 +13,14 @@ public sealed class UdpRecorder : IAsyncDisposable
 
     private readonly ConcurrentDictionary<int, LiveCarRow> _liveCars = new();
     private readonly ConcurrentDictionary<(ulong SessionUid, byte PacketId), uint> _lastOverallFrames = new();
+    private readonly object _lifecycleSync = new();
     private CancellationTokenSource? _cts;
     private UdpClient? _udp;
     private TelemetryDatabase? _db;
     private Channel<QueuedPacket>? _packetQueue;
     private Task? _receiveTask;
     private Task? _writerTask;
+    private Task<SessionMetadata?>? _stopTask;
     private SessionMetadata? _metadata;
     private DateTimeOffset _startedAt;
     private Exception? _backgroundError;
@@ -35,6 +37,14 @@ public sealed class UdpRecorder : IAsyncDisposable
     private int _sessionChanges;
 
     public bool IsRecording => _cts is not null;
+    public bool IsStopping
+    {
+        get
+        {
+            lock (_lifecycleSync) return _stopTask is { IsCompleted: false };
+        }
+    }
+    public bool IsActive => IsRecording || IsStopping;
     public string Status { get; private set; } = "Idle";
     public SessionMetadata? CurrentSession => _metadata;
     public long PacketsSeen => Interlocked.Read(ref _packetsSeen);
@@ -58,7 +68,7 @@ public sealed class UdpRecorder : IAsyncDisposable
 
     public void Start(int port, string rootFolder)
     {
-        if (IsRecording) return;
+        if (IsActive) return;
 
         UdpClient? udp = null;
         TelemetryDatabase? database = null;
@@ -93,6 +103,7 @@ public sealed class UdpRecorder : IAsyncDisposable
                 AllowSynchronousContinuations = false
             });
             _cts = new CancellationTokenSource();
+            _stopTask = null;
             _udp = udp;
             _db = database;
             udp = null;
@@ -118,7 +129,18 @@ public sealed class UdpRecorder : IAsyncDisposable
         }
     }
 
-    public async Task<SessionMetadata?> StopAsync(bool createZip)
+    public Task<SessionMetadata?> StopAsync(bool createZip)
+    {
+        lock (_lifecycleSync)
+        {
+            if (_stopTask is { IsCompleted: false }) return _stopTask;
+            if (_cts is null) return Task.FromResult(_metadata);
+            _stopTask = StopCoreAsync(createZip);
+            return _stopTask;
+        }
+    }
+
+    private async Task<SessionMetadata?> StopCoreAsync(bool createZip)
     {
         var cts = _cts;
         if (cts is null) return _metadata;
@@ -426,6 +448,6 @@ public sealed class UdpRecorder : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (IsRecording) await StopAsync(createZip: false);
+        if (IsActive) await StopAsync(createZip: false);
     }
 }

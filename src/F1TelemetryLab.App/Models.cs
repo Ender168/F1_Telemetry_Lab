@@ -243,11 +243,20 @@ public sealed record RecordingQualitySnapshot(
     int QueueHighWatermark,
     int SessionChanges)
 {
-    public string Rating => QueueDrops > 0 || InvalidHeaders > 0 || EstimatedMissingFrames > 100
-        ? "Unreliable"
-        : EstimatedMissingFrames > 0 || DuplicateFrames > 0 || OutOfOrderFrames > 0 || SessionChanges > 0
-            ? "Usable with warnings"
-            : "Good";
+    public string Rating
+    {
+        get
+        {
+            var invalidLimit = Math.Max(3, PacketsReceived / 1_000);
+            var missingLimit = Math.Max(100, PacketsReceived / 100);
+            if (QueueDrops > 0 || InvalidHeaders > invalidLimit || EstimatedMissingFrames > missingLimit)
+                return "Unreliable";
+            if (InvalidHeaders > 0 || UnsupportedPackets > 0 || EstimatedMissingFrames > 0 ||
+                DuplicateFrames > 0 || OutOfOrderFrames > 0 || SessionChanges > 0)
+                return "Usable with warnings";
+            return "Good";
+        }
+    }
 }
 
 public sealed class LiveCarRow
