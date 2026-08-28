@@ -31,6 +31,40 @@ public sealed record CarTelemetrySample(
     int EngineRpm,
     int Drs);
 
+public sealed record CarSetupSample(
+    DateTimeOffset ReceivedAt,
+    ulong SessionUid,
+    float SessionTime,
+    uint FrameIdentifier,
+    uint OverallFrameIdentifier,
+    byte PlayerCarIndex,
+    int CarIndex,
+    bool IsPlayer,
+    int FrontWing,
+    int RearWing,
+    int OnThrottle,
+    int OffThrottle,
+    float FrontCamber,
+    float RearCamber,
+    float FrontToe,
+    float RearToe,
+    int FrontSuspension,
+    int RearSuspension,
+    int FrontAntiRollBar,
+    int RearAntiRollBar,
+    int FrontRideHeight,
+    int RearRideHeight,
+    int BrakePressure,
+    int BrakeBias,
+    int EngineBraking,
+    float RearLeftTyrePressure,
+    float RearRightTyrePressure,
+    float FrontLeftTyrePressure,
+    float FrontRightTyrePressure,
+    int Ballast,
+    float FuelLoad,
+    float? NextFrontWingValue);
+
 public sealed record LapDataSample(
     DateTimeOffset ReceivedAt,
     ulong SessionUid,
@@ -143,6 +177,14 @@ public sealed record EventSample(
     int OtherVehicleIdx,
     string DetailsJson);
 
+public sealed record FlashbackSignal(
+    ulong SessionUid,
+    DateTimeOffset ReceivedAt,
+    float EventSessionTime,
+    uint OverallFrameIdentifier,
+    uint TargetFrameIdentifier,
+    float TargetSessionTime);
+
 public sealed record ParticipantPacketDebug(
     DateTimeOffset ReceivedAt,
     ulong SessionUid,
@@ -241,21 +283,29 @@ public sealed record RecordingQualitySnapshot(
     long QueueDrops,
     int QueueDepth,
     int QueueHighWatermark,
-    int SessionChanges)
+    int SessionChanges,
+    bool MissingFrameEstimateAvailable = false)
 {
-    public string Rating
+    public string CaptureRating
     {
         get
         {
             var invalidLimit = Math.Max(3, PacketsReceived / 1_000);
             var missingLimit = Math.Max(100, PacketsReceived / 100);
-            if (QueueDrops > 0 || InvalidHeaders > invalidLimit || EstimatedMissingFrames > missingLimit)
+            if (QueueDrops > 0 || InvalidHeaders > invalidLimit ||
+                (MissingFrameEstimateAvailable && EstimatedMissingFrames > missingLimit))
                 return "Unreliable";
-            if (InvalidHeaders > 0 || UnsupportedPackets > 0 || EstimatedMissingFrames > 0 ||
+            if (InvalidHeaders > 0 || UnsupportedPackets > 0 ||
+                (MissingFrameEstimateAvailable && EstimatedMissingFrames > 0) ||
                 DuplicateFrames > 0 || OutOfOrderFrames > 0 || SessionChanges > 0)
                 return "Usable with warnings";
             return "Good";
         }
+    }
+
+    public string Rating
+    {
+        get => CaptureRating;
     }
 }
 
@@ -300,6 +350,7 @@ public sealed record AnalysisResult(
     int MotionRows,
     int StatusRows,
     int DamageRows,
+    int SetupRows,
     int EventsRows,
     int ParticipantsRows,
     int FinalClassificationRows,

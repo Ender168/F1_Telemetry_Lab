@@ -2,75 +2,113 @@ namespace F1TelemetryLab;
 
 public static class LapQualityAnalyzer
 {
-    private sealed record Completion(uint LapTimeMs, uint ConfirmedAtOverallFrame);
+    private sealed record Completion(uint LapTimeMs, uint ConfirmedAtOverallFrame, string Evidence);
 
     public static IReadOnlyList<LapQualityResult> Analyze(
         IReadOnlyList<LapDataSample> samples,
         int trackLengthMeters,
+        out List<RewindEventResult> rewindEvents)
+        => Analyze(samples, trackLengthMeters, Array.Empty<FlashbackSignal>(), out rewindEvents);
+
+    public static IReadOnlyList<LapQualityResult> Analyze(
+        IReadOnlyList<LapDataSample> samples,
+        int trackLengthMeters,
+        IReadOnlyList<FlashbackSignal> flashbacks,
         out List<RewindEventResult> rewindEvents)
     {
         rewindEvents = new List<RewindEventResult>();
         var completions = new Dictionary<(ulong SessionUid, int CarIndex, int LapNum), Completion>();
         var activeFrom = new Dictionary<(ulong SessionUid, int CarIndex, int LapNum), uint>();
         var rewindCounts = new Dictionary<(ulong SessionUid, int CarIndex, int LapNum), int>();
-        var invalidCounts = new Dictionary<(ulong SessionUid, int CarIndex, int LapNum), int>();
 
         foreach (var carGroup in samples
                      .Where(x => x.LapNum > 0)
                      .GroupBy(x => (x.SessionUid, x.CarIndex)))
         {
+            var ordered = carGroup
+                .OrderBy(x => x.OverallFrameIdentifier)
+                .ThenBy(x => x.ReceivedAt)
+                .ToList();
+            var officialFlashbacks = flashbacks
+                .Where(x => x.SessionUid == carGroup.Key.SessionUid)
+                .OrderBy(x => x.OverallFrameIdentifier)
+                .ThenBy(x => x.ReceivedAt)
+                .ToList();
+            var flashbackIndex = 0;
             LapDataSample? previous = null;
-            foreach (var sample in carGroup.OrderBy(x => x.OverallFrameIdentifier).ThenBy(x => x.ReceivedAt))
+            foreach (var sample in ordered)
             {
+                var officialRollbackHandled = false;
+                while (flashbackIndex < officialFlashbacks.Count &&
+                       officialFlashbacks[flashbackIndex].OverallFrameIdentifier <= sample.OverallFrameIdentifier)
+                {
+                    var signal = officialFlashbacks[flashbackIndex++];
+                    var target = FindFlashbackTarget(ordered, signal);
+                    if (target is not null)
+                    {
+                        RegisterRollback(
+                            target.LapNum,
+                            signal.OverallFrameIdentifier,
+                            target,
+                            $"official_flbk:target_frame={signal.TargetFrameIdentifier};target_time={signal.TargetSessionTime:0.000}",
+                            activeFrom,
+                            rewindCounts,
+                            completions,
+                            rewindEvents);
+                        officialRollbackHandled = true;
+                    }
+                }
+
                 var key = (sample.SessionUid, sample.CarIndex, sample.LapNum);
                 activeFrom.TryAdd(key, sample.OverallFrameIdentifier);
-                if (sample.LapInvalid)
-                    invalidCounts[key] = invalidCounts.GetValueOrDefault(key) + 1;
 
                 if (previous is not null)
                 {
                     var sameLap = previous.LapNum == sample.LapNum;
+                    var finishReset = IsFinishReset(previous, sample, trackLengthMeters);
                     var reasons = new List<string>();
-                    if (sample.FrameIdentifier < previous.FrameIdentifier && sample.OverallFrameIdentifier >= previous.OverallFrameIdentifier)
+                    if (!finishReset && sample.FrameIdentifier < previous.FrameIdentifier && sample.OverallFrameIdentifier >= previous.OverallFrameIdentifier)
                         reasons.Add("frame_identifier_backwards");
-                    if (sample.SessionTime < previous.SessionTime - 0.25f)
+                    if (!finishReset && sample.SessionTime < previous.SessionTime - 0.25f)
                         reasons.Add("session_time_backwards");
                     if (sample.LapNum < previous.LapNum)
                         reasons.Add("lap_number_backwards");
-                    if (sameLap && sample.LapDistance < previous.LapDistance - 50f)
+                    if (!finishReset && sameLap && sample.LapDistance < previous.LapDistance - 50f)
                         reasons.Add("lap_distance_backwards");
-                    if (sameLap && sample.CurrentLapTimeMs + 750 < previous.CurrentLapTimeMs)
+                    if (!finishReset && sameLap && sample.CurrentLapTimeMs + 750 < previous.CurrentLapTimeMs)
                         reasons.Add("lap_time_backwards");
 
-                    if (reasons.Count > 0)
+                    // An official FLBK event is authoritative. The heuristic remains only for
+                    // recordings where the game event packet is missing.
+                    if (reasons.Count > 0 && !officialRollbackHandled)
                     {
                         var rollbackLap = Math.Max(1, sample.LapNum);
-                        var affectedKeys = activeFrom.Keys
-                            .Where(x => x.SessionUid == sample.SessionUid && x.CarIndex == sample.CarIndex && x.LapNum >= rollbackLap)
-                            .ToList();
-                        foreach (var affected in affectedKeys)
-                        {
-                            activeFrom[affected] = sample.OverallFrameIdentifier;
-                            rewindCounts[affected] = rewindCounts.GetValueOrDefault(affected) + 1;
-                            completions.Remove(affected);
-                        }
-                        rewindCounts[key] = Math.Max(1, rewindCounts.GetValueOrDefault(key));
-                        rewindEvents.Add(new RewindEventResult(
-                            sample.SessionUid,
-                            sample.CarIndex,
-                            sample.LapNum,
-                            sample.ReceivedAt,
-                            sample.SessionTime,
+                        RegisterRollback(
+                            rollbackLap,
                             sample.OverallFrameIdentifier,
-                            sample.LapDistance,
-                            sample.CurrentLapTimeMs,
-                            string.Join(';', reasons)));
+                            sample,
+                            "heuristic:" + string.Join(';', reasons),
+                            activeFrom,
+                            rewindCounts,
+                            completions,
+                            rewindEvents);
                     }
 
                     if (sample.LapNum == previous.LapNum + 1 && sample.LastLapTimeMs > 0)
                     {
                         var completedKey = (previous.SessionUid, previous.CarIndex, previous.LapNum);
-                        completions[completedKey] = new Completion(sample.LastLapTimeMs, sample.OverallFrameIdentifier);
+                        completions[completedKey] = new Completion(
+                            sample.LastLapTimeMs,
+                            sample.OverallFrameIdentifier,
+                            $"next_lap_last_lap_time@{sample.OverallFrameIdentifier}");
+                    }
+                    else if (finishReset)
+                    {
+                        var completedKey = (previous.SessionUid, previous.CarIndex, previous.LapNum);
+                        completions[completedKey] = new Completion(
+                            sample.LastLapTimeMs,
+                            sample.OverallFrameIdentifier,
+                            $"finish_last_lap_time@{sample.OverallFrameIdentifier}");
                     }
                 }
 
@@ -105,7 +143,7 @@ public static class LapQualityAnalyzer
             var hasCompletion = completions.TryGetValue(key, out var completion);
             var complete = hasCompletion && startCovered && endCovered;
             var rewindCount = rewindCounts.GetValueOrDefault(key);
-            var invalidCount = invalidCounts.GetValueOrDefault(key);
+            var invalidCount = active.Count(x => x.LapInvalid);
 
             var state = rewindCount > 0
                 ? LapState.Rewound
@@ -122,7 +160,7 @@ public static class LapQualityAnalyzer
             var lapTime = complete ? completion!.LapTimeMs : 0u;
             var sector3 = lapTime > sector1 + sector2 ? (int)lapTime - sector1 - sector2 : 0;
             var evidence = complete
-                ? $"next_lap_last_lap_time@{completion!.ConfirmedAtOverallFrame}"
+                ? completion!.Evidence
                 : hasCompletion
                     ? "transition_confirmed_but_distance_coverage_incomplete"
                     : "no_confirmed_next_lap_transition";
@@ -148,5 +186,63 @@ public static class LapQualityAnalyzer
         }
 
         return result;
+    }
+
+    private static LapDataSample? FindFlashbackTarget(IReadOnlyList<LapDataSample> ordered, FlashbackSignal signal)
+    {
+        return ordered
+            .Where(x => x.OverallFrameIdentifier < signal.OverallFrameIdentifier)
+            .OrderBy(x => Math.Abs((long)x.FrameIdentifier - signal.TargetFrameIdentifier))
+            .ThenBy(x => Math.Abs(x.SessionTime - signal.TargetSessionTime))
+            .ThenByDescending(x => x.OverallFrameIdentifier)
+            .FirstOrDefault();
+    }
+
+    private static void RegisterRollback(
+        int rollbackLap,
+        uint activeOverallFrame,
+        LapDataSample sample,
+        string reason,
+        Dictionary<(ulong SessionUid, int CarIndex, int LapNum), uint> activeFrom,
+        Dictionary<(ulong SessionUid, int CarIndex, int LapNum), int> rewindCounts,
+        Dictionary<(ulong SessionUid, int CarIndex, int LapNum), Completion> completions,
+        List<RewindEventResult> rewindEvents)
+    {
+        var affectedKeys = activeFrom.Keys
+            .Where(x => x.SessionUid == sample.SessionUid && x.CarIndex == sample.CarIndex && x.LapNum >= rollbackLap)
+            .ToList();
+        foreach (var affected in affectedKeys)
+        {
+            activeFrom[affected] = activeOverallFrame;
+            rewindCounts[affected] = rewindCounts.GetValueOrDefault(affected) + 1;
+            completions.Remove(affected);
+        }
+
+        var targetKey = (sample.SessionUid, sample.CarIndex, rollbackLap);
+        activeFrom[targetKey] = activeOverallFrame;
+        rewindCounts[targetKey] = Math.Max(1, rewindCounts.GetValueOrDefault(targetKey));
+        completions.Remove(targetKey);
+        rewindEvents.Add(new RewindEventResult(
+            sample.SessionUid,
+            sample.CarIndex,
+            rollbackLap,
+            sample.ReceivedAt,
+            sample.SessionTime,
+            activeOverallFrame,
+            sample.LapDistance,
+            sample.CurrentLapTimeMs,
+            reason));
+    }
+
+    private static bool IsFinishReset(LapDataSample previous, LapDataSample sample, int trackLengthMeters)
+    {
+        if (previous.LapNum != sample.LapNum || sample.LastLapTimeMs == 0) return false;
+        var startTolerance = trackLengthMeters > 0 ? Math.Max(100f, trackLengthMeters * 0.03f) : 180f;
+        var endThreshold = trackLengthMeters > 0 ? trackLengthMeters * 0.80f : 1_000f;
+        if (previous.LapDistance < endThreshold || sample.LapDistance > startTolerance) return false;
+        if (sample.CurrentLapTimeMs > 2_000) return false;
+        if (sample.LastLapTimeMs + 2_000 < previous.CurrentLapTimeMs) return false;
+        return sample.ResultStatus >= 3 || sample.DriverStatus >= 3 ||
+               sample.CurrentLapTimeMs + 750 < previous.CurrentLapTimeMs;
     }
 }

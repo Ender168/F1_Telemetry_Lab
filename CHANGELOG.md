@@ -1,37 +1,63 @@
 # Changelog
 
+## 0.7.0
+
+### Interface
+
+- Верхний уровень сокращён до пяти разделов: Live, Sessions, Analysis, Race и Settings.
+- Lap Compare и Track Map объединены в Analysis; Track Detail встроен в выбранную зону карты.
+- Overview, Car Setup, Driver Compare, Stints и Pits объединены в Race.
+- Добавлена постоянная строка контекста выбранной сессии.
+- Sessions показывает карточки metadata, размер, длительность, качество, setup snapshots и источник классификации; raw manifest вынесен в технический Expander.
+- Выбор сессии автоматически загружает доступных гонщиков и отчёты.
+- Lap Compare по умолчанию показывает Reference + Compare, дополнительные серии открываются явно; добавлены metric help и интерактивный cursor tooltip.
+- Убраны дубли вида `YOU YOU` и синтетические `C08 #08`.
+- Псевдонимы сохраняются одной операцией с индикатором несохранённых изменений.
+- Settings теперь сохраняет port, root, Auto ZIP, retention, RU/EN shell language и UI scale; измеренная частота отделена от рекомендуемых 60 Hz.
+- Retention имеет preview, исключает выбранную сессию и требует отдельного подтверждения удаления.
+
+### Car Setup
+
+- Добавлен официальный 50-байтовый parser packet 5 для формата 2026.
+- Таблица `car_setups` хранит исходную конфигурацию и изменения для активных машин.
+- Сохраняются wings, differential, engine braking, camber/toe, suspension, ARB, ride height, brakes, tyre pressures, ballast, fuel load и next front wing.
+- Неизменившиеся 2 Hz setup-пакеты дедуплицируются.
+- Setup включён в `car_setups.csv`, manifest, экран приложения, `chatgpt_pack.sqlite` и ZIP.
+- Schema version повышена до 4.
+
+## 0.6.2
+
+### Regression and scale
+
+- Добавлен xUnit-проект с независимыми тестами, не удаляя 21 старый self-test.
+- Golden fixture фиксирует четыре FLBK, завершённые круги 2 и 3, лучший круг игрока 1:23.559 и gap 2.478 s до Russell.
+- Добавлены тесты pit/compound stints, packet 8 с penalty/DNF/multiple tyre stints, packet-aware sequence rules, schema migration и compact setup pack.
+- Добавлен opt-in часовой fixture на 72 000 packet 6 с проверкой времени, памяти, размера raw DB, compact DB и ZIP.
+- Анализ читает raw packets потоково, учитывает active car count и создаёт индексы перед тяжёлыми join.
+- Derived tables строятся в staging SQLite; исходная база заменяется атомарно только после успешного анализа.
+- Введены формальные миграции через `PRAGMA user_version`.
+- GitHub Actions запускает self-tests, xUnit regression suite и опциональный long-session benchmark.
+
+## 0.6.1
+
+### Data correctness
+
+- Официальный `FLBK` стал основным сигналом rollback; эвристика оставлена как fallback с явной причиной.
+- Финишный reset больше не считается flashback. Последний круг подтверждается через `last_lap_time_ms`, driver/result status и покрытие дистанции.
+- Геометрическая дистанция Track Map пересчитывается по X/Z и нормализуется на `track_length_m`; corner markers переносятся в ту же шкалу.
+- Условный 12 m corridor больше не описывается как точная граница трассы.
+- Packet sequence диагностика учитывает multi-event packet 3, per-car packet 11 и terminal frame 0.
+- Качество разделено на Capture, Session completeness и Analysis confidence; неизвестный missing-frame estimate показывается как not calculated.
+- Fuel, wear, ERS и degradation aggregates используют только завершённые непитовые круги и показывают `n`.
+- Manifest обновляется после анализа и упаковки.
+- Classification явно маркируется как `official_udp` или `provisional_latest_lap_data`.
+
 ## 0.6.0
 
-### Recording
-
-- UDP receive loop отделён от SQLite writer ограниченной очередью на 8192 пакета.
-- Добавлены WAL, пакетные транзакции, контроль глубины очереди и безопасное дренирование при Stop/Close.
-- Повторные запросы остановки ожидают один и тот же lifecycle task.
-- Добавлены `session_segments` и `recording_quality`.
-
-### Protocol and data correctness
-
-- Парсер приведён к официальной структуре F1 2026: 29-байтовый header, 24 машины, 60-байтовый Participant и 46-байтовый Final Classification.
-- Исправлены 16-битные `driverId`/`teamId`, 32-байтовое имя участника и смещения итоговой классификации.
-- Добавлены `overallFrameIdentifier`, packet 8, FLBK target и collision severity.
-- Все ключевые join выполняются по `session_uid + overall_frame_identifier + car_idx`.
-- Анализ выбирает последнюю логическую сессию, содержащую Lap Data, и не смешивает UID.
-
-### Analysis
-
-- Введены состояния круга `Complete`, `PartialStart`, `PartialEnd`, `Invalid`, `Rewound`.
-- Лучшие круги и сравнения исключают pit/invalid/rewound/partial laps.
-- Ущерб учитывается только как положительный прирост; ремонт хранится отдельно.
-- Официальная итоговая классификация имеет приоритет над provisional Lap Data.
-- Исправлены границы стинтов и дедупликация одного пит-стопа, замеченного несколькими сигналами.
-- Delta и Track Map интерполируют только короткие разрывы до 100 м.
-
-### Quality and maintenance
-
-- Удалён неиспользуемый legacy SQL projector.
-- Версия и schema version централизованы в `AppInfo`.
-- Добавлена GitHub Actions Release-сборка и сквозной self-test проект.
-- Самотесты покрывают layouts UDP 2026, flashback, завершённость кругов, разделение UID, пит-стратегию, интерполяцию и полный SQLite analysis pipeline.
+- UDP receive loop отделён от SQLite writer ограниченной очередью.
+- Добавлены WAL, пакетные транзакции, safe Stop/Close, `session_segments` и `recording_quality`.
+- Парсер приведён к структурам F1 2026; добавлены overall frame, packet 8, FLBK target и damage.
+- Введены lap states, Race Report, Driver Compare, Stint/Pit reports и Track Map.
 
 ## 0.5.3
 

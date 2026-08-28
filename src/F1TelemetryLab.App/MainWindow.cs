@@ -16,6 +16,7 @@ namespace F1TelemetryLab;
 
 public sealed class MainWindow : Window
 {
+    private readonly AppSettings _settings;
     private readonly UdpRecorder _recorder = new();
     private readonly ObservableCollection<string> _liveRows = new();
     private readonly ObservableCollection<string> _logRows = new();
@@ -26,6 +27,8 @@ public sealed class MainWindow : Window
     private readonly ObservableCollection<string> _raceReportRows = new();
     private readonly Dictionary<int, TextBox> _aliasBoxes = new();
     private readonly Dictionary<int, TextBox> _shortAliasBoxes = new();
+    private readonly List<Action> _sessionContextLoaders = new();
+    private readonly List<Border> _compareSlotContainers = new();
     private readonly DispatcherTimer _timer;
 
     private TextBlock _statusText = null!;
@@ -40,9 +43,13 @@ public sealed class MainWindow : Window
     private Button _stopButton = null!;
     private ListBox _sessionList = null!;
     private TextBlock _selectedSessionText = null!;
+    private TextBlock _technicalManifestText = null!;
+    private TextBlock _globalSessionContext = null!;
+    private TextBlock _classificationHeading = null!;
     private ComboBox _compareMetric = null!;
     private CheckBox _compareCleanOnly = null!;
     private TextBlock _compareStatus = null!;
+    private TextBlock _compareMetricHelp = null!;
     private TextBlock _referenceText = null!;
     private TextBox _zoomFromText = null!;
     private TextBox _zoomToText = null!;
@@ -70,12 +77,17 @@ public sealed class MainWindow : Window
     private readonly ComboBox[] _compareLapBoxes = new ComboBox[6];
     private StackPanel _driverAliasPanel = null!;
     private TextBlock _driverAliasStatus = null!;
+    private TextBlock _settingsStatus = null!;
+    private TextBlock _measuredRateText = null!;
     private List<DriverOption> _compareDrivers = new();
     private List<LapOption> _lastComparedLaps = new();
     private int? _zoomFromM;
     private int? _zoomToM;
     private bool _updatingCompareSlots;
     private bool _updatingTrackZoneSelection;
+    private bool _aliasesDirty;
+    private int _visibleCompareSlots = 2;
+    private IReadOnlyList<SessionRetentionCandidate> _retentionPreview = Array.Empty<SessionRetentionCandidate>();
     private TrackMapRenderData? _lastTrackMapData;
     private bool _busy;
     private bool _closingAfterStop;
@@ -83,11 +95,13 @@ public sealed class MainWindow : Window
 
     public MainWindow()
     {
+        _settings = AppSettingsService.Load();
         Title = $"{AppInfo.Name} v{AppInfo.Version}";
         Width = 1440;
         Height = 860;
         MinWidth = 1150;
         MinHeight = 680;
+        FontSize = 14 * _settings.UiScalePercent / 100.0;
         Background = Hex(0x101318);
 
         _recorder.Updated += () => Dispatcher.UIThread.Post(UpdateLiveUi);
@@ -118,6 +132,61 @@ public sealed class MainWindow : Window
 
     private static Color ChartColor(int index) => ChartPalette[index % ChartPalette.Length];
 
+    private static readonly IReadOnlyDictionary<string, string> RussianUi = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["Live"] = "Запись",
+        ["Sessions"] = "Сессии",
+        ["Analysis"] = "Анализ",
+        ["Race"] = "Гонка",
+        ["Settings"] = "Настройки",
+        ["Lap Compare"] = "Сравнение кругов",
+        ["Track"] = "Трасса",
+        ["Overview"] = "Обзор",
+        ["Car Setup"] = "Настройки болида",
+        ["Driver Compare"] = "Сравнение гонщиков",
+        ["Stints"] = "Стинты",
+        ["Pits"] = "Пит-стопы",
+        ["General"] = "Общие",
+        ["Drivers / Aliases"] = "Гонщики / псевдонимы",
+        ["Pitwall Live"] = "Запись телеметрии",
+        ["Start Recording"] = "Начать запись",
+        ["Stop"] = "Остановить",
+        ["Refresh"] = "Обновить",
+        ["Open session folder"] = "Открыть папку сессии",
+        ["Analyze selected session"] = "Проанализировать сессию",
+        ["Classification"] = "Классификация",
+        ["Technical details and manifest"] = "Технические сведения и manifest",
+        ["Save all aliases"] = "Сохранить все псевдонимы",
+        ["Track Map"] = "Карта трассы",
+        ["Plot from compare"] = "Построить из сравнения",
+        ["Best vs YOU"] = "Лучший против вас",
+        ["Clear"] = "Очистить",
+        ["Race Report"] = "Отчёт по гонке",
+        ["Clean only"] = "Только чистые",
+        ["Problems only"] = "Только проблемы",
+        ["Export CSV"] = "Экспорт CSV",
+        ["Column help"] = "Описание столбцов",
+        ["Stint Report"] = "Отчёт по стинтам",
+        ["Pit Report"] = "Отчёт по пит-стопам",
+        ["Build report"] = "Построить отчёт",
+        ["Compare"] = "Сравнить",
+        ["Comparison slots"] = "Сравниваемые круги",
+        ["Clean laps only"] = "Только чистые круги",
+        ["Load laps"] = "Загрузить круги",
+        ["Plot"] = "Построить",
+        ["Export"] = "Экспорт",
+        ["Apply"] = "Применить",
+        ["Reset"] = "Сбросить",
+        ["+ Add comparison"] = "+ Добавить сравнение",
+        ["Legend"] = "Легенда",
+        ["Save settings"] = "Сохранить настройки",
+        ["Preview retention"] = "Предпросмотр очистки",
+        ["Delete previewed"] = "Удалить показанные",
+        ["Copy logs"] = "Копировать журнал",
+        ["Cars"] = "Болиды",
+        ["Log"] = "Журнал"
+    };
+
     private static IBrush Hex(uint rgb)
     {
         return new SolidColorBrush(Color.FromRgb(
@@ -128,26 +197,87 @@ public sealed class MainWindow : Window
 
     private Control BuildRoot()
     {
+        var root = new Grid { RowDefinitions = new RowDefinitions("Auto,*") };
+        _globalSessionContext = new TextBlock
+        {
+            Text = "No session selected",
+            Foreground = Hex(0xD8E2F0),
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(12, 8)
+        };
+        var context = new Border
+        {
+            Background = Hex(0x1D2630),
+            BorderBrush = Hex(0x354255),
+            BorderThickness = new Thickness(0, 0, 0, 1),
+            Child = _globalSessionContext
+        };
+        root.Children.Add(context);
+
         var tabs = new TabControl
         {
             Margin = new Thickness(16),
             ItemsSource = new[]
             {
-                new TabItem { Header = "Pitwall Live", Content = BuildLiveTab() },
+                new TabItem { Header = "Live", Content = BuildLiveTab() },
                 new TabItem { Header = "Sessions", Content = BuildSessionsTab() },
-                new TabItem { Header = "Drivers", Content = BuildDriversTab() },
-                new TabItem { Header = "Lap Compare", Content = BuildCompareTab() },
-                new TabItem { Header = "Track Map", Content = BuildTrackMapTab() },
-                new TabItem { Header = "Track Detail", Content = BuildTrackDetailTab() },
-                new TabItem { Header = "Race Report", Content = BuildRaceReportTab() },
-                new TabItem { Header = "Driver Compare", Content = BuildDriverCompareTab() },
-                new TabItem { Header = "Stint Report", Content = BuildStintReportTab() },
-                new TabItem { Header = "Pit Report", Content = BuildPitReportTab() },
-                new TabItem { Header = "Settings", Content = BuildSettingsTab() }
+                new TabItem { Header = "Analysis", Content = BuildAnalysisWorkspace() },
+                new TabItem { Header = "Race", Content = BuildRaceWorkspace() },
+                new TabItem { Header = "Settings", Content = BuildSettingsWorkspace() }
             }
         };
-        return tabs;
+        Grid.SetRow(tabs, 1);
+        root.Children.Add(tabs);
+        if (string.Equals(_settings.Language, "ru", StringComparison.OrdinalIgnoreCase)) LocalizeControlTree(root);
+        return root;
     }
+
+    private static void LocalizeControlTree(Control control)
+    {
+        if (control is TextBlock text && RussianUi.TryGetValue(text.Text ?? "", out var translatedText)) text.Text = translatedText;
+        if (control is Button button && button.Content is string buttonText && RussianUi.TryGetValue(buttonText, out var translatedButton)) button.Content = translatedButton;
+        if (control is CheckBox checkBox && checkBox.Content is string checkText && RussianUi.TryGetValue(checkText, out var translatedCheck)) checkBox.Content = translatedCheck;
+        if (control is TabItem tab && tab.Header is string tabText && RussianUi.TryGetValue(tabText, out var translatedTab)) tab.Header = translatedTab;
+        if (control is Expander expander && expander.Header is string expanderText && RussianUi.TryGetValue(expanderText, out var translatedExpander)) expander.Header = translatedExpander;
+
+        if (control is Panel panel)
+            foreach (var child in panel.Children) LocalizeControlTree(child);
+        if (control is Border border && border.Child is Control borderChild) LocalizeControlTree(borderChild);
+        if (control is ScrollViewer scroll && scroll.Content is Control scrollChild) LocalizeControlTree(scrollChild);
+        if (control is ContentControl content && content.Content is Control contentChild) LocalizeControlTree(contentChild);
+        if (control is ItemsControl items && items.ItemsSource is System.Collections.IEnumerable source)
+            foreach (var item in source) if (item is Control itemControl) LocalizeControlTree(itemControl);
+    }
+
+    private Control BuildAnalysisWorkspace() => new TabControl
+    {
+        ItemsSource = new[]
+        {
+            new TabItem { Header = "Lap Compare", Content = BuildCompareTab() },
+            new TabItem { Header = "Track", Content = BuildTrackMapTab() }
+        }
+    };
+
+    private Control BuildRaceWorkspace() => new TabControl
+    {
+        ItemsSource = new[]
+        {
+            new TabItem { Header = "Overview", Content = BuildRaceReportTab() },
+            new TabItem { Header = "Car Setup", Content = BuildCarSetupTab() },
+            new TabItem { Header = "Driver Compare", Content = BuildDriverCompareTab() },
+            new TabItem { Header = "Stints", Content = BuildStintReportTab() },
+            new TabItem { Header = "Pits", Content = BuildPitReportTab() }
+        }
+    };
+
+    private Control BuildSettingsWorkspace() => new TabControl
+    {
+        ItemsSource = new[]
+        {
+            new TabItem { Header = "General", Content = BuildSettingsTab() },
+            new TabItem { Header = "Drivers / Aliases", Content = BuildDriversTab() }
+        }
+    };
 
     private Control BuildLiveTab()
     {
@@ -168,13 +298,13 @@ public sealed class MainWindow : Window
         Grid.SetColumnSpan(title, 2);
         grid.Children.Add(title);
 
-        var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Margin = new Thickness(0, 0, 0, 12) };
+        var controls = new WrapPanel { Orientation = Orientation.Horizontal, ItemSpacing = 10, LineSpacing = 8, Margin = new Thickness(0, 0, 0, 12) };
         Grid.SetRow(controls, 1);
         Grid.SetColumnSpan(controls, 2);
 
-        _portText = new TextBox { Text = "20777", Width = 80, PlaceholderText = "Port" };
-        _rootText = new TextBox { Text = DefaultRootFolder(), Width = 320, PlaceholderText = "Root folder" };
-        _autoZipCheck = new CheckBox { Content = "Auto zip after Stop", IsChecked = true, Foreground = Brushes.White, VerticalAlignment = VerticalAlignment.Center };
+        _portText = new TextBox { Text = _settings.Port.ToString(CultureInfo.InvariantCulture), Width = 80, PlaceholderText = "Port" };
+        _rootText = new TextBox { Text = _settings.RootFolder, Width = 320, PlaceholderText = "Root folder" };
+        _autoZipCheck = new CheckBox { Content = "Auto ZIP after Stop", IsChecked = _settings.AutoZip, Foreground = Brushes.White, VerticalAlignment = VerticalAlignment.Center };
         _startButton = new Button { Content = "Start Recording", Width = 150 };
         _stopButton = new Button { Content = "Stop", Width = 100, IsEnabled = false };
         _startButton.Click += (_, _) => StartRecording();
@@ -189,25 +319,27 @@ public sealed class MainWindow : Window
         controls.Children.Add(_stopButton);
         grid.Children.Add(controls);
 
-        var livePanel = new StackPanel { Spacing = 8 };
+        var livePanel = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,*"), RowSpacing = 8 };
         Grid.SetRow(livePanel, 2);
         Grid.SetColumn(livePanel, 0);
         livePanel.Children.Add(BuildCards());
-        livePanel.Children.Add(new TextBlock { Text = "Cars", FontSize = 18, FontWeight = FontWeight.Bold, Foreground = Brushes.White });
+        var carsTitle = new TextBlock { Text = "Cars", FontSize = 18, FontWeight = FontWeight.Bold, Foreground = Brushes.White };
+        Grid.SetRow(carsTitle, 1);
+        livePanel.Children.Add(carsTitle);
         var liveList = new ListBox
         {
             ItemsSource = _liveRows,
-            Height = 520,
             FontFamily = FontFamily.Parse("Consolas"),
             Background = Hex(0x161B22),
             Foreground = Brushes.White
         };
         ScrollViewer.SetHorizontalScrollBarVisibility(liveList, ScrollBarVisibility.Auto);
         ScrollViewer.SetVerticalScrollBarVisibility(liveList, ScrollBarVisibility.Auto);
+        Grid.SetRow(liveList, 2);
         livePanel.Children.Add(liveList);
         grid.Children.Add(livePanel);
 
-        var logPanel = new StackPanel { Spacing = 8, Margin = new Thickness(16, 0, 0, 0) };
+        var logPanel = new Grid { RowDefinitions = new RowDefinitions("Auto,*"), RowSpacing = 8, Margin = new Thickness(16, 0, 0, 0) };
         Grid.SetRow(logPanel, 2);
         Grid.SetColumn(logPanel, 1);
         var logHeader = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10 };
@@ -219,7 +351,6 @@ public sealed class MainWindow : Window
         var logList = new ListBox
         {
             ItemsSource = _logRows,
-            Height = 610,
             FontFamily = FontFamily.Parse("Consolas"),
             Background = Hex(0x161B22),
             Foreground = Brushes.White,
@@ -234,6 +365,7 @@ public sealed class MainWindow : Window
         };
         ScrollViewer.SetHorizontalScrollBarVisibility(logList, ScrollBarVisibility.Disabled);
         ScrollViewer.SetVerticalScrollBarVisibility(logList, ScrollBarVisibility.Auto);
+        Grid.SetRow(logList, 1);
         logPanel.Children.Add(logList);
         grid.Children.Add(logPanel);
 
@@ -300,7 +432,7 @@ public sealed class MainWindow : Window
         var grid = new Grid
         {
             RowDefinitions = new RowDefinitions("Auto,*"),
-            ColumnDefinitions = new ColumnDefinitions("2*,3*"),
+            ColumnDefinitions = new ColumnDefinitions("420,*"),
             Margin = new Thickness(0)
         };
 
@@ -316,37 +448,52 @@ public sealed class MainWindow : Window
         {
             Background = Hex(0x161B22),
             Foreground = Brushes.White,
-            FontFamily = FontFamily.Parse("Consolas")
+            ItemTemplate = new FuncDataTemplate<SessionListItem>((value, _) => BuildSessionCard(value), true)
         };
         _sessionList.SelectionChanged += (_, _) => UpdateSelectedSession();
         Grid.SetRow(_sessionList, 1);
         Grid.SetColumn(_sessionList, 0);
         grid.Children.Add(_sessionList);
 
-        var details = new StackPanel { Margin = new Thickness(16, 0, 0, 0), Spacing = 10 };
+        var details = new Grid
+        {
+            RowDefinitions = new RowDefinitions("Auto,Auto,Auto,*,Auto"),
+            RowSpacing = 10,
+            Margin = new Thickness(16, 0, 0, 0)
+        };
         _selectedSessionText = new TextBlock
         {
-            Text = "Выбери сессию слева.",
+            Text = "Select a session on the left.",
             Foreground = Brushes.White,
-            FontFamily = FontFamily.Parse("Consolas"),
             TextWrapping = TextWrapping.Wrap
         };
+        details.Children.Add(new Border
+        {
+            Background = Hex(0x1D2630),
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(12),
+            Child = _selectedSessionText
+        });
         var openFolder = new Button { Content = "Open session folder", Width = 180 };
         openFolder.Click += (_, _) => OpenSelectedSessionFolder();
         var analyze = new Button { Content = "Analyze selected session", Width = 210 };
         analyze.Click += async (_, _) => await AnalyzeSelectedSessionAsync();
-        details.Children.Add(_selectedSessionText);
-        details.Children.Add(new StackPanel
+        var actions = new WrapPanel
         {
             Orientation = Orientation.Horizontal,
-            Spacing = 10,
+            ItemSpacing = 10,
+            LineSpacing = 8,
             Children = { openFolder, analyze }
-        });
-        details.Children.Add(new TextBlock { Text = "Final classification", Foreground = Brushes.White, FontSize = 18, FontWeight = FontWeight.Bold });
+        };
+        Grid.SetRow(actions, 1);
+        details.Children.Add(actions);
+
+        _classificationHeading = new TextBlock { Text = "Classification", Foreground = Brushes.White, FontSize = 18, FontWeight = FontWeight.Bold };
+        Grid.SetRow(_classificationHeading, 2);
+        details.Children.Add(_classificationHeading);
         var classificationList = new ListBox
         {
             ItemsSource = _classificationRows,
-            Height = 300,
             Background = Hex(0x161B22),
             Foreground = Brushes.White,
             FontFamily = FontFamily.Parse("Consolas"),
@@ -361,18 +508,64 @@ public sealed class MainWindow : Window
         };
         ScrollViewer.SetHorizontalScrollBarVisibility(classificationList, ScrollBarVisibility.Disabled);
         ScrollViewer.SetVerticalScrollBarVisibility(classificationList, ScrollBarVisibility.Auto);
+        Grid.SetRow(classificationList, 3);
         details.Children.Add(classificationList);
-        details.Children.Add(new TextBlock
+
+        _technicalManifestText = new TextBlock
         {
-            Text = $"v{AppInfo.Version}: Race Report summary, Driver Compare, charts, Stint Report and Pit Report.",
+            Text = "No manifest loaded.",
             Foreground = Brushes.LightGray,
+            FontFamily = FontFamily.Parse("Consolas"),
             TextWrapping = TextWrapping.Wrap
-        });
+        };
+        var technical = new Expander
+        {
+            Header = "Technical details and manifest",
+            Content = new ScrollViewer
+            {
+                Content = _technicalManifestText,
+                MaxHeight = 220,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+            }
+        };
+        Grid.SetRow(technical, 4);
+        details.Children.Add(technical);
         Grid.SetRow(details, 1);
         Grid.SetColumn(details, 1);
         grid.Children.Add(details);
 
         return grid;
+    }
+
+    private Control BuildSessionCard(SessionListItem? session)
+    {
+        if (session is null) return new TextBlock { Text = "Unavailable session", Foreground = Brushes.LightGray };
+        var stack = new StackPanel { Spacing = 4 };
+        stack.Children.Add(new TextBlock
+        {
+            Text = session.SessionName,
+            Foreground = Brushes.White,
+            FontWeight = FontWeight.SemiBold,
+            TextWrapping = TextWrapping.Wrap
+        });
+        stack.Children.Add(new TextBlock { Text = session.SummaryLine, Foreground = Hex(0xB8C4D6), FontSize = 12, TextWrapping = TextWrapping.Wrap });
+        stack.Children.Add(new TextBlock { Text = session.QualityLine, Foreground = Hex(0xA8C7A8), FontSize = 12, TextWrapping = TextWrapping.Wrap });
+        stack.Children.Add(new TextBlock
+        {
+            Text = $"{session.AnalysisState} | classification: {session.ClassificationSource} | setup snapshots: {session.SetupSnapshots:N0}",
+            Foreground = Brushes.LightGray,
+            FontSize = 12,
+            TextWrapping = TextWrapping.Wrap
+        });
+        return new Border
+        {
+            Background = Hex(0x1A2028),
+            BorderBrush = Hex(0x303846),
+            BorderThickness = new Thickness(0, 0, 0, 1),
+            Padding = new Thickness(10),
+            Child = stack
+        };
     }
 
 
@@ -402,7 +595,7 @@ public sealed class MainWindow : Window
         saveAll.Click += (_, _) => SaveAllAliases();
         _driverAliasStatus = new TextBlock
         {
-            Text = "Выбери сессию во вкладке Sessions, затем загрузи список гонщиков.",
+            Text = "Select an analyzed session. Driver aliases load automatically.",
             Foreground = Brushes.LightGray,
             VerticalAlignment = VerticalAlignment.Center,
             TextWrapping = TextWrapping.Wrap
@@ -422,6 +615,7 @@ public sealed class MainWindow : Window
         };
         Grid.SetRow(scroller, 2);
         grid.Children.Add(scroller);
+        _sessionContextLoaders.Add(LoadDriverAliasEditor);
         return grid;
     }
 
@@ -431,8 +625,9 @@ public sealed class MainWindow : Window
     {
         var grid = new Grid
         {
-            RowDefinitions = new RowDefinitions("Auto,Auto,*"),
-            ColumnDefinitions = new ColumnDefinitions("*,340"),
+            RowDefinitions = new RowDefinitions("Auto,Auto,3*,2*"),
+            ColumnDefinitions = new ColumnDefinitions("*,320"),
+            RowSpacing = 10,
             Margin = new Thickness(0)
         };
 
@@ -447,7 +642,7 @@ public sealed class MainWindow : Window
         Grid.SetColumnSpan(title, 2);
         grid.Children.Add(title);
 
-        var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Margin = new Thickness(0, 0, 0, 12) };
+        var controls = new WrapPanel { Orientation = Orientation.Horizontal, ItemSpacing = 10, LineSpacing = 8, Margin = new Thickness(0, 0, 0, 4) };
         Grid.SetRow(controls, 1);
         Grid.SetColumnSpan(controls, 2);
         _trackMapMetric = new ComboBox { Width = 170, ItemsSource = TrackMapDataService.Metrics, SelectedIndex = 0 };
@@ -467,10 +662,10 @@ public sealed class MainWindow : Window
         controls.Children.Add(plot);
         controls.Children.Add(useTop);
         controls.Children.Add(clear);
-        controls.Children.Add(new TextBlock { Text = "Click top-zones to highlight them on the map. Blue = compare gains, white = neutral, red = compare loses.", Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap });
+        controls.Children.Add(new TextBlock { Text = "Select a zone to inspect it below. Blue = gain, white = neutral, red = loss.", Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap });
         grid.Children.Add(controls);
 
-        _trackMapControl = new TrackMapControl { Height = 690 };
+        _trackMapControl = new TrackMapControl { MinHeight = 320 };
         Grid.SetRow(_trackMapControl, 2);
         Grid.SetColumn(_trackMapControl, 0);
         grid.Children.Add(_trackMapControl);
@@ -481,7 +676,7 @@ public sealed class MainWindow : Window
         right.Children.Add(new TextBlock { Text = "Map status", Foreground = Brushes.White, FontSize = 18, FontWeight = FontWeight.Bold });
         _trackMapStatus = new TextBlock
         {
-            Text = "Выбери сессию, в Lap Compare выбери Reference + Compare, затем нажми Plot from compare.",
+            Text = "Select a session and two laps in Lap Compare, then choose Plot from compare.",
             Foreground = Brushes.LightGray,
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 0, 0, 12)
@@ -507,6 +702,44 @@ public sealed class MainWindow : Window
         ScrollViewer.SetVerticalScrollBarVisibility(_trackMapCornerList, ScrollBarVisibility.Auto);
         right.Children.Add(_trackMapCornerList);
         grid.Children.Add(right);
+
+        var detail = new Grid
+        {
+            RowDefinitions = new RowDefinitions("Auto,*"),
+            ColumnDefinitions = new ColumnDefinitions("300,*"),
+            ColumnSpacing = 12,
+            Margin = new Thickness(0, 4, 0, 0)
+        };
+        Grid.SetRow(detail, 3);
+        Grid.SetColumnSpan(detail, 2);
+        _trackDetailStatus = new TextBlock
+        {
+            Text = "Select a gain or loss zone to open aligned trajectory detail.",
+            Foreground = Brushes.LightGray,
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 0, 0, 6)
+        };
+        Grid.SetColumnSpan(_trackDetailStatus, 2);
+        detail.Children.Add(_trackDetailStatus);
+
+        _trackDetailZoneList = BuildInsightListBox(230);
+        _trackDetailZoneList.SelectionChanged += (_, _) =>
+        {
+            if (_updatingTrackZoneSelection) return;
+            if (_trackDetailZoneList.SelectedItem is TrackMapInsight insight) SelectTrackMapInsight(insight);
+        };
+        var zonePanel = new Grid { RowDefinitions = new RowDefinitions("Auto,*"), RowSpacing = 6 };
+        zonePanel.Children.Add(new TextBlock { Text = "Selected-zone navigation", Foreground = Brushes.White, FontWeight = FontWeight.Bold });
+        Grid.SetRow(_trackDetailZoneList, 1);
+        zonePanel.Children.Add(_trackDetailZoneList);
+        Grid.SetRow(zonePanel, 1);
+        detail.Children.Add(zonePanel);
+
+        _trackDetailControl = new TrackDetailControl { MinHeight = 230 };
+        Grid.SetRow(_trackDetailControl, 1);
+        Grid.SetColumn(_trackDetailControl, 1);
+        detail.Children.Add(_trackDetailControl);
+        grid.Children.Add(detail);
 
         return grid;
     }
@@ -541,7 +774,7 @@ public sealed class MainWindow : Window
         _raceReportCleanOnly.Click += (_, _) => LoadRaceReportRows();
         _raceReportProblemsOnly = new CheckBox { Content = "Problems only", Foreground = Brushes.White, VerticalAlignment = VerticalAlignment.Center };
         _raceReportProblemsOnly.Click += (_, _) => LoadRaceReportRows();
-        var load = new Button { Content = "Load drivers", Width = 115 };
+        var load = new Button { Content = "Refresh", Width = 95 };
         load.Click += (_, _) => LoadRaceReportDrivers();
         var export = new Button { Content = "Export CSV", Width = 105 };
         export.Click += (_, _) => ExportRaceReportCsv();
@@ -560,7 +793,7 @@ public sealed class MainWindow : Window
 
         _raceReportStatus = new TextBlock
         {
-            Text = "Выбери сессию во вкладке Sessions, запусти Analyze selected session, потом нажми Load drivers.",
+            Text = "Select a session. Analyzed driver data loads automatically; use Refresh only after external changes.",
             Foreground = Brushes.LightGray,
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 0, 0, 8)
@@ -608,6 +841,7 @@ public sealed class MainWindow : Window
         grid.Children.Add(tableBorder);
 
         BuildRaceReportTable(Array.Empty<RaceLapReportRow>(), "Overview");
+        _sessionContextLoaders.Add(LoadRaceReportDrivers);
         return grid;
     }
 
@@ -745,7 +979,7 @@ public sealed class MainWindow : Window
         var driverC = new ComboBox { Width = 260 };
         var mode = new ComboBox { Width = 120, ItemsSource = RaceAnalysisDataService.CompareModes, SelectedIndex = 0 };
         var group = new ComboBox { Width = 115, ItemsSource = RaceAnalysisDataService.MetricGroups, SelectedIndex = 0 };
-        var load = new Button { Content = "Load drivers", Width = 115 };
+        var load = new Button { Content = "Refresh", Width = 95 };
         var compare = new Button { Content = "Compare", Width = 100 };
         controls.Children.Add(new TextBlock { Text = "A", Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center });
         controls.Children.Add(driverA);
@@ -761,7 +995,7 @@ public sealed class MainWindow : Window
         controls.Children.Add(compare);
         grid.Children.Add(controls);
 
-        var status = new TextBlock { Text = "Load drivers, pick 2-3 cars, then compare. Humanity bravely invents the leaderboard again.", Foreground = Brushes.LightGray, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 8) };
+        var status = new TextBlock { Text = "Select an analyzed session. Two drivers are loaded and compared automatically.", Foreground = Brushes.LightGray, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 8) };
         Grid.SetRow(status, 2);
         grid.Children.Add(status);
         var legend = new TextBlock { Text = "", Foreground = Hex(0xA8B3C7), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 8) };
@@ -782,7 +1016,7 @@ public sealed class MainWindow : Window
             try
             {
                 var folder = GetSelectedSessionFolder();
-                if (folder is null) { status.Text = "Сначала выбери сессию во вкладке Sessions."; return; }
+                if (folder is null) { status.Text = "Select a session first."; return; }
                 var drivers = RaceReportDataService.LoadDrivers(folder);
                 driverA.ItemsSource = drivers;
                 driverB.ItemsSource = drivers;
@@ -790,7 +1024,7 @@ public sealed class MainWindow : Window
                 driverA.SelectedItem = drivers.FirstOrDefault(x => x.IsPlayer) ?? drivers.FirstOrDefault();
                 driverB.SelectedItem = drivers.FirstOrDefault(x => !x.IsPlayer) ?? drivers.Skip(1).FirstOrDefault();
                 driverC.SelectedItem = null;
-                status.Text = $"Loaded {drivers.Count:N0} drivers. Выбери 2-3 и жми Compare.";
+                status.Text = $"Loaded {drivers.Count:N0} drivers. Select two or three drivers, then compare.";
             }
             catch (Exception ex)
             {
@@ -804,7 +1038,7 @@ public sealed class MainWindow : Window
             try
             {
                 var folder = GetSelectedSessionFolder();
-                if (folder is null) { status.Text = "Сначала выбери сессию."; return; }
+                if (folder is null) { status.Text = "Select a session first."; return; }
                 var selected = new[] { driverA.SelectedItem as RaceReportDriverOption, driverB.SelectedItem as RaceReportDriverOption, driverC.SelectedItem as RaceReportDriverOption }
                     .Where(x => x is not null).Cast<RaceReportDriverOption>().GroupBy(x => x.CarIndex).Select(g => g.First()).ToList();
                 var selectedMode = mode.SelectedItem?.ToString() ?? RaceAnalysisDataService.CompareModes[0];
@@ -829,6 +1063,11 @@ public sealed class MainWindow : Window
         group.SelectionChanged += (_, _) => { if (driverA.SelectedItem is not null && driverB.SelectedItem is not null) RunCompare(); };
         mode.SelectionChanged += (_, _) => { if (driverA.SelectedItem is not null && driverB.SelectedItem is not null) RunCompare(); };
         BuildAnalysisTable(panel, new AnalysisTableResult(Array.Empty<AnalysisTableColumn>(), Array.Empty<AnalysisTableRow>(), "No compare yet.", ""));
+        _sessionContextLoaders.Add(() =>
+        {
+            LoadDrivers();
+            if (driverA.SelectedItem is not null && driverB.SelectedItem is not null) RunCompare();
+        });
         return grid;
     }
 
@@ -839,7 +1078,7 @@ public sealed class MainWindow : Window
         var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Margin = new Thickness(0, 0, 0, 10) };
         Grid.SetRow(controls, 1);
         var driver = new ComboBox { Width = 330 };
-        var load = new Button { Content = "Load drivers", Width = 115 };
+        var load = new Button { Content = "Refresh", Width = 95 };
         var build = new Button { Content = "Build report", Width = 120 };
         controls.Children.Add(new TextBlock { Text = "Driver", Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center });
         controls.Children.Add(driver);
@@ -860,7 +1099,7 @@ public sealed class MainWindow : Window
             try
             {
                 var folder = GetSelectedSessionFolder();
-                if (folder is null) { status.Text = "Сначала выбери сессию."; return; }
+                if (folder is null) { status.Text = "Select a session first."; return; }
                 var drivers = RaceReportDataService.LoadDrivers(folder);
                 driver.ItemsSource = drivers;
                 driver.SelectedItem = drivers.FirstOrDefault(x => x.IsPlayer) ?? drivers.FirstOrDefault();
@@ -873,7 +1112,7 @@ public sealed class MainWindow : Window
             try
             {
                 var folder = GetSelectedSessionFolder();
-                if (folder is null) { status.Text = "Сначала выбери сессию."; return; }
+                if (folder is null) { status.Text = "Select a session first."; return; }
                 var result = RaceAnalysisDataService.BuildStintReport(folder, driver.SelectedItem as RaceReportDriverOption);
                 BuildAnalysisTable(panel, result);
                 status.Text = result.Status;
@@ -884,6 +1123,7 @@ public sealed class MainWindow : Window
         load.Click += (_, _) => LoadDrivers();
         build.Click += (_, _) => Build();
         BuildAnalysisTable(panel, new AnalysisTableResult(Array.Empty<AnalysisTableColumn>(), Array.Empty<AnalysisTableRow>(), "No stint report yet.", ""));
+        _sessionContextLoaders.Add(() => { LoadDrivers(); if (driver.SelectedItem is not null) Build(); });
         return grid;
     }
 
@@ -894,7 +1134,7 @@ public sealed class MainWindow : Window
         var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Margin = new Thickness(0, 0, 0, 10) };
         Grid.SetRow(controls, 1);
         var driver = new ComboBox { Width = 330 };
-        var load = new Button { Content = "Load drivers", Width = 115 };
+        var load = new Button { Content = "Refresh", Width = 95 };
         var build = new Button { Content = "Build report", Width = 120 };
         controls.Children.Add(new TextBlock { Text = "Driver", Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center });
         controls.Children.Add(driver);
@@ -915,7 +1155,7 @@ public sealed class MainWindow : Window
             try
             {
                 var folder = GetSelectedSessionFolder();
-                if (folder is null) { status.Text = "Сначала выбери сессию."; return; }
+                if (folder is null) { status.Text = "Select a session first."; return; }
                 var drivers = RaceReportDataService.LoadDrivers(folder);
                 driver.ItemsSource = drivers;
                 driver.SelectedItem = drivers.FirstOrDefault(x => x.IsPlayer) ?? drivers.FirstOrDefault();
@@ -928,7 +1168,7 @@ public sealed class MainWindow : Window
             try
             {
                 var folder = GetSelectedSessionFolder();
-                if (folder is null) { status.Text = "Сначала выбери сессию."; return; }
+                if (folder is null) { status.Text = "Select a session first."; return; }
                 var result = RaceAnalysisDataService.BuildPitReport(folder, driver.SelectedItem as RaceReportDriverOption);
                 BuildAnalysisTable(panel, result);
                 status.Text = result.Status;
@@ -939,6 +1179,132 @@ public sealed class MainWindow : Window
         load.Click += (_, _) => LoadDrivers();
         build.Click += (_, _) => Build();
         BuildAnalysisTable(panel, new AnalysisTableResult(Array.Empty<AnalysisTableColumn>(), Array.Empty<AnalysisTableRow>(), "No pit report yet.", ""));
+        _sessionContextLoaders.Add(() => { LoadDrivers(); if (driver.SelectedItem is not null) Build(); });
+        return grid;
+    }
+
+    private Control BuildCarSetupTab()
+    {
+        var grid = new Grid
+        {
+            RowDefinitions = new RowDefinitions("Auto,Auto,Auto,*"),
+            ColumnDefinitions = new ColumnDefinitions("2*,3*"),
+            RowSpacing = 10,
+            ColumnSpacing = 14
+        };
+        var title = new TextBlock
+        {
+            Text = "Car Setup",
+            FontSize = 28,
+            FontWeight = FontWeight.Bold,
+            Foreground = Brushes.White,
+            Margin = new Thickness(0, 0, 0, 2)
+        };
+        Grid.SetColumnSpan(title, 2);
+        grid.Children.Add(title);
+
+        var driver = new ComboBox { Width = 360 };
+        var refresh = new Button { Content = "Refresh", Width = 95 };
+        var controls = new WrapPanel { Orientation = Orientation.Horizontal, ItemSpacing = 10, LineSpacing = 8 };
+        controls.Children.Add(new TextBlock { Text = "Driver", Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center });
+        controls.Children.Add(driver);
+        controls.Children.Add(refresh);
+        Grid.SetRow(controls, 1);
+        Grid.SetColumnSpan(controls, 2);
+        grid.Children.Add(controls);
+
+        var status = new TextBlock
+        {
+            Text = "Setup changes are extracted from UDP packet 5 during analysis and included in chatgpt_pack.sqlite.",
+            Foreground = Hex(0xA8B3C7),
+            TextWrapping = TextWrapping.Wrap
+        };
+        Grid.SetRow(status, 2);
+        Grid.SetColumnSpan(status, 2);
+        grid.Children.Add(status);
+
+        var changes = new ListBox
+        {
+            Background = Hex(0x161B22),
+            Foreground = Brushes.White,
+            FontFamily = FontFamily.Parse("Consolas"),
+            ItemTemplate = new FuncDataTemplate<CarSetupViewRow>((value, _) => new TextBlock
+            {
+                Text = value?.Label ?? "",
+                Foreground = Brushes.White,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(6, 4)
+            }, true)
+        };
+        Grid.SetRow(changes, 3);
+        grid.Children.Add(changes);
+
+        var detail = new TextBlock
+        {
+            Text = "Select a setup snapshot.",
+            Foreground = Brushes.White,
+            FontFamily = FontFamily.Parse("Consolas"),
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(12)
+        };
+        var detailScroll = new ScrollViewer
+        {
+            Content = detail,
+            Background = Hex(0x161B22),
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
+        };
+        Grid.SetRow(detailScroll, 3);
+        Grid.SetColumn(detailScroll, 1);
+        grid.Children.Add(detailScroll);
+
+        void LoadSetups()
+        {
+            try
+            {
+                var folder = GetSelectedSessionFolder();
+                if (folder is null || driver.SelectedItem is not RaceReportDriverOption selected)
+                {
+                    changes.ItemsSource = Array.Empty<CarSetupViewRow>();
+                    detail.Text = "Select a session and driver.";
+                    return;
+                }
+                var rows = CarSetupDataService.LoadChanges(folder, selected.CarIndex);
+                changes.ItemsSource = rows;
+                changes.SelectedItem = rows.LastOrDefault();
+                detail.Text = rows.LastOrDefault()?.Detail ?? "No Car Setup rows were found. Re-analyze the session with v0.7.0; the original raw packet 5 data is retained.";
+                status.Text = rows.Count == 0
+                    ? "No setup snapshots for this driver. Re-analyze the session if it was recorded by an older version."
+                    : $"{rows.Count:N0} initial/change snapshot(s). Unchanged 2 Hz packets are intentionally deduplicated; all fields are included in chatgpt_pack.sqlite and car_setups.csv.";
+            }
+            catch (Exception ex)
+            {
+                status.Text = "Car Setup load failed: " + ex.Message;
+                AddLog(status.Text);
+            }
+        }
+
+        void LoadDrivers()
+        {
+            try
+            {
+                var folder = GetSelectedSessionFolder();
+                if (folder is null) return;
+                var drivers = RaceReportDataService.LoadDrivers(folder);
+                driver.ItemsSource = drivers;
+                driver.SelectedItem = drivers.FirstOrDefault(x => x.IsPlayer) ?? drivers.FirstOrDefault();
+                LoadSetups();
+            }
+            catch (Exception ex)
+            {
+                status.Text = "Car Setup driver load failed: " + ex.Message;
+            }
+        }
+
+        driver.SelectionChanged += (_, _) => LoadSetups();
+        changes.SelectionChanged += (_, _) => detail.Text = (changes.SelectedItem as CarSetupViewRow)?.Detail ?? "Select a setup snapshot.";
+        refresh.Click += (_, _) => LoadDrivers();
+        _sessionContextLoaders.Add(LoadDrivers);
         return grid;
     }
 
@@ -1024,64 +1390,6 @@ public sealed class MainWindow : Window
         return Brushes.White;
     }
 
-    private Control BuildTrackDetailTab()
-    {
-        var grid = new Grid
-        {
-            RowDefinitions = new RowDefinitions("Auto,Auto,*"),
-            ColumnDefinitions = new ColumnDefinitions("360,*"),
-            Margin = new Thickness(0)
-        };
-
-        var title = new TextBlock
-        {
-            Text = "Track Detail",
-            FontSize = 28,
-            FontWeight = FontWeight.Bold,
-            Foreground = Brushes.White,
-            Margin = new Thickness(0, 0, 0, 12)
-        };
-        Grid.SetColumnSpan(title, 2);
-        grid.Children.Add(title);
-
-        _trackDetailStatus = new TextBlock
-        {
-            Text = "Построй Track Map и выбери top-zone. Здесь появится увеличенный фрагмент с траекториями и границами трассы.",
-            Foreground = Brushes.LightGray,
-            TextWrapping = TextWrapping.Wrap,
-            Margin = new Thickness(0, 0, 0, 12)
-        };
-        Grid.SetRow(_trackDetailStatus, 1);
-        Grid.SetColumnSpan(_trackDetailStatus, 2);
-        grid.Children.Add(_trackDetailStatus);
-
-        var left = new StackPanel { Spacing = 8, Margin = new Thickness(0, 0, 14, 0) };
-        Grid.SetRow(left, 2);
-        Grid.SetColumn(left, 0);
-        left.Children.Add(new TextBlock { Text = "Top zones", Foreground = Brushes.White, FontSize = 18, FontWeight = FontWeight.Bold });
-        _trackDetailZoneList = BuildInsightListBox(620);
-        _trackDetailZoneList.SelectionChanged += (_, _) =>
-        {
-            if (_updatingTrackZoneSelection) return;
-            if (_trackDetailZoneList.SelectedItem is TrackMapInsight insight) SelectTrackMapInsight(insight);
-        };
-        left.Children.Add(_trackDetailZoneList);
-        left.Children.Add(new TextBlock
-        {
-            Text = "Выбор зоны синхронизирован с Track Map; список служит навигацией по найденным потерям и выигрышам.",
-            Foreground = Brushes.LightGray,
-            TextWrapping = TextWrapping.Wrap
-        });
-        grid.Children.Add(left);
-
-        _trackDetailControl = new TrackDetailControl { Height = 690 };
-        Grid.SetRow(_trackDetailControl, 2);
-        Grid.SetColumn(_trackDetailControl, 1);
-        grid.Children.Add(_trackDetailControl);
-
-        return grid;
-    }
-
     private ListBox BuildInsightListBox(double height)
     {
         var list = new ListBox
@@ -1109,7 +1417,7 @@ public sealed class MainWindow : Window
         var grid = new Grid
         {
             RowDefinitions = new RowDefinitions("Auto,Auto,*"),
-            ColumnDefinitions = new ColumnDefinitions("430,*,320"),
+            ColumnDefinitions = new ColumnDefinitions("360,*,260"),
             Margin = new Thickness(0)
         };
 
@@ -1124,11 +1432,15 @@ public sealed class MainWindow : Window
         Grid.SetColumnSpan(title, 3);
         grid.Children.Add(title);
 
-        var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Margin = new Thickness(0, 0, 0, 12) };
+        var controls = new WrapPanel { Orientation = Orientation.Horizontal, ItemSpacing = 10, LineSpacing = 8, Margin = new Thickness(0, 0, 0, 12) };
         Grid.SetRow(controls, 1);
         Grid.SetColumnSpan(controls, 3);
         _compareMetric = new ComboBox { Width = 115, ItemsSource = CompareDataService.Metrics, SelectedIndex = 0 };
-        _compareMetric.SelectionChanged += (_, _) => { if (_lastComparedLaps.Count > 0) PlotLaps(_lastComparedLaps); };
+        _compareMetric.SelectionChanged += (_, _) =>
+        {
+            UpdateCompareMetricHelp();
+            if (_lastComparedLaps.Count > 0) PlotLaps(_lastComparedLaps);
+        };
         _compareCleanOnly = new CheckBox { Content = "Clean laps only", IsChecked = true, Foreground = Brushes.White, VerticalAlignment = VerticalAlignment.Center };
         var load = new Button { Content = "Load laps", Width = 105 };
         load.Click += (_, _) => LoadCompareLaps();
@@ -1170,19 +1482,33 @@ public sealed class MainWindow : Window
         grid.Children.Add(controls);
 
         var left = new StackPanel { Spacing = 8, Margin = new Thickness(0, 0, 14, 0) };
-        Grid.SetRow(left, 2);
-        Grid.SetColumn(left, 0);
         left.Children.Add(new TextBlock { Text = "Comparison slots", Foreground = Brushes.White, FontSize = 18, FontWeight = FontWeight.Bold });
-        for (var i = 0; i < 6; i++) left.Children.Add(BuildCompareSlot(i));
+        for (var i = 0; i < 6; i++)
+        {
+            var slot = BuildCompareSlot(i);
+            slot.IsVisible = i < _visibleCompareSlots;
+            left.Children.Add(slot);
+        }
+        var addComparison = new Button { Content = "+ Add comparison", HorizontalAlignment = HorizontalAlignment.Left };
+        addComparison.Click += (_, _) => ShowNextCompareSlot();
+        left.Children.Add(addComparison);
         _compareStatus = new TextBlock
         {
-            Text = "Slot 1 = Reference. Все остальные delta_ms считаются относительно него. Загрузи сессию, выбери гонщиков и круги.",
+            Text = "Slot 1 is the reference. Select a second lap, then add more series only when needed.",
             Foreground = Brushes.LightGray,
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 8, 0, 0)
         };
         left.Children.Add(_compareStatus);
-        grid.Children.Add(left);
+        var leftScroll = new ScrollViewer
+        {
+            Content = left,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
+        };
+        Grid.SetRow(leftScroll, 2);
+        Grid.SetColumn(leftScroll, 0);
+        grid.Children.Add(leftScroll);
 
         var middle = new Grid { RowDefinitions = new RowDefinitions("Auto,*,Auto") };
         Grid.SetRow(middle, 2);
@@ -1197,21 +1523,21 @@ public sealed class MainWindow : Window
         };
         Grid.SetRow(_referenceText, 0);
         middle.Children.Add(_referenceText);
-        _compareChart = new SimpleLineChart { Height = 610 };
+        _compareChart = new SimpleLineChart { MinHeight = 390 };
         Grid.SetRow(_compareChart, 1);
         middle.Children.Add(_compareChart);
-        var note = new TextBlock
+        _compareMetricHelp = new TextBlock
         {
-            Text = "delta_ms = накопленная разница времени относительно Reference. +300 ms значит медленнее на 0.300 сек в этой точке трассы. throttle/brake показаны в процентах.",
+            Text = CompareMetricHelp("speed"),
             Foreground = Brushes.LightGray,
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 8, 0, 0)
         };
-        Grid.SetRow(note, 2);
-        middle.Children.Add(note);
+        Grid.SetRow(_compareMetricHelp, 2);
+        middle.Children.Add(_compareMetricHelp);
         grid.Children.Add(middle);
 
-        var right = new StackPanel { Spacing = 8, Margin = new Thickness(14, 0, 0, 0) };
+        var right = new Grid { RowDefinitions = new RowDefinitions("Auto,*"), RowSpacing = 8, Margin = new Thickness(14, 0, 0, 0) };
         Grid.SetRow(right, 2);
         Grid.SetColumn(right, 2);
         right.Children.Add(new TextBlock { Text = "Legend", Foreground = Brushes.White, FontSize = 18, FontWeight = FontWeight.Bold });
@@ -1219,18 +1545,19 @@ public sealed class MainWindow : Window
         {
             ItemsSource = _compareLegendItems,
             Background = Hex(0x161B22),
-            Foreground = Brushes.White,
-            Height = 610
+            Foreground = Brushes.White
         };
         ScrollViewer.SetHorizontalScrollBarVisibility(legend, ScrollBarVisibility.Disabled);
         ScrollViewer.SetVerticalScrollBarVisibility(legend, ScrollBarVisibility.Auto);
+        Grid.SetRow(legend, 1);
         right.Children.Add(legend);
         grid.Children.Add(right);
 
+        _sessionContextLoaders.Add(LoadCompareLaps);
         return grid;
     }
 
-    private Control BuildCompareSlot(int slotIndex)
+    private Border BuildCompareSlot(int slotIndex)
     {
         var label = new TextBlock
         {
@@ -1253,8 +1580,8 @@ public sealed class MainWindow : Window
         header.Children.Add(clearSlot);
         header.Children.Add(label);
 
-        var driver = new ComboBox { Width = 385 };
-        var lap = new ComboBox { Width = 385 };
+        var driver = new ComboBox { HorizontalAlignment = HorizontalAlignment.Stretch };
+        var lap = new ComboBox { HorizontalAlignment = HorizontalAlignment.Stretch };
         _compareDriverBoxes[slotIndex] = driver;
         _compareLapBoxes[slotIndex] = lap;
 
@@ -1274,7 +1601,7 @@ public sealed class MainWindow : Window
         stack.Children.Add(driver);
         stack.Children.Add(lap);
 
-        return new Border
+        var border = new Border
         {
             Background = Hex(slotIndex == 0 ? 0x243142u : 0x161B22u),
             BorderBrush = Hex(slotIndex == 0 ? 0x586B82u : 0x242A33u),
@@ -1283,21 +1610,224 @@ public sealed class MainWindow : Window
             Padding = new Thickness(10),
             Child = stack
         };
+        _compareSlotContainers.Add(border);
+        return border;
     }
+
+    private void ShowNextCompareSlot()
+    {
+        if (_visibleCompareSlots >= _compareSlotContainers.Count)
+        {
+            _compareStatus.Text = "All six comparison slots are already visible.";
+            return;
+        }
+        _visibleCompareSlots++;
+        _compareSlotContainers[_visibleCompareSlots - 1].IsVisible = true;
+        _compareStatus.Text = $"Comparison slot {_visibleCompareSlots} added.";
+    }
+
+    private void EnsureVisibleCompareSlots(int count)
+    {
+        _visibleCompareSlots = Math.Clamp(Math.Max(2, count), 2, _compareSlotContainers.Count);
+        for (var i = 0; i < _compareSlotContainers.Count; i++) _compareSlotContainers[i].IsVisible = i < _visibleCompareSlots;
+    }
+
+    private void UpdateCompareMetricHelp()
+    {
+        if (_compareMetricHelp is null) return;
+        _compareMetricHelp.Text = CompareMetricHelp(_compareMetric?.SelectedItem?.ToString() ?? "speed");
+    }
+
+    private static string CompareMetricHelp(string metric) => metric switch
+    {
+        "speed" => "Speed in km/h. Move the pointer over the plot for distance and per-series values.",
+        "throttle_%" => "Throttle pedal input in percent. 100% means full throttle.",
+        "brake_%" => "Brake pedal input in percent. Higher values mean stronger braking input.",
+        "steer" => "Normalized steering input. Negative and positive values indicate opposite directions.",
+        "gear" => "Selected gear by track distance.",
+        "delta_ms" => "Accumulated time relative to the reference. +300 ms means 0.300 s slower at that point.",
+        _ => "Metric values plotted against normalized track distance."
+    };
 
     private Control BuildSettingsTab()
     {
-        return new StackPanel
+        var panel = new StackPanel { Spacing = 14, MaxWidth = 980, HorizontalAlignment = HorizontalAlignment.Left };
+        panel.Children.Add(new TextBlock { Text = "Settings", FontSize = 28, FontWeight = FontWeight.Bold, Foreground = Brushes.White });
+        panel.Children.Add(new TextBlock
         {
-            Spacing = 12,
-            Children =
+            Text = "Recommended game configuration: UDP Telemetry On, 2026 format, 127.0.0.1, the port below, and 60 Hz send rate. Measured rate is shown separately from the recommendation.",
+            Foreground = Brushes.LightGray,
+            TextWrapping = TextWrapping.Wrap
+        });
+
+        var form = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("190,420"),
+            RowDefinitions = new RowDefinitions("Auto,Auto,Auto,Auto,Auto,Auto"),
+            RowSpacing = 10,
+            ColumnSpacing = 12
+        };
+        var port = new TextBox { Text = _settings.Port.ToString(CultureInfo.InvariantCulture), Width = 120, HorizontalAlignment = HorizontalAlignment.Left };
+        var root = new TextBox { Text = _settings.RootFolder, HorizontalAlignment = HorizontalAlignment.Stretch };
+        var autoZip = new CheckBox { Content = "Create compact ZIP after Stop", IsChecked = _settings.AutoZip, Foreground = Brushes.White };
+        var retention = new TextBox { Text = _settings.RetentionDays.ToString(CultureInfo.InvariantCulture), Width = 120, HorizontalAlignment = HorizontalAlignment.Left };
+        var language = new ComboBox { ItemsSource = new[] { "English (en)", "Русский (ru)" }, Width = 180, HorizontalAlignment = HorizontalAlignment.Left };
+        language.SelectedIndex = string.Equals(_settings.Language, "ru", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+        var scale = new ComboBox { ItemsSource = new[] { "80%", "90%", "100%", "110%", "125%", "150%", "175%" }, Width = 120, HorizontalAlignment = HorizontalAlignment.Left };
+        scale.SelectedItem = $"{_settings.UiScalePercent}%";
+        if (scale.SelectedItem is null) scale.SelectedItem = "100%";
+
+        AddSettingRow(form, 0, "UDP port", port);
+        AddSettingRow(form, 1, "Storage root", root);
+        AddSettingRow(form, 2, "Automatic packaging", autoZip);
+        AddSettingRow(form, 3, "Retention, days", retention);
+        AddSettingRow(form, 4, "UI language", language);
+        AddSettingRow(form, 5, "UI scale", scale);
+        panel.Children.Add(new Border
+        {
+            Background = Hex(0x1D2630),
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(14),
+            Child = form
+        });
+
+        _measuredRateText = new TextBlock
+        {
+            Text = "Measured telemetry rate: select a recorded session.",
+            Foreground = Hex(0xB8CBE4),
+            TextWrapping = TextWrapping.Wrap
+        };
+        panel.Children.Add(_measuredRateText);
+
+        var save = new Button { Content = "Save settings", Width = 140 };
+        var previewRetention = new Button { Content = "Preview retention", Width = 150 };
+        var confirmDelete = new CheckBox { Content = "Confirm deletion of previewed session folders", Foreground = Brushes.White };
+        var deleteRetention = new Button { Content = "Delete previewed", Width = 150, IsEnabled = false };
+        confirmDelete.Click += (_, _) => deleteRetention.IsEnabled = confirmDelete.IsChecked == true && _retentionPreview.Count > 0;
+
+        save.Click += (_, _) =>
+        {
+            if (!int.TryParse(port.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var portValue) || portValue is < 1 or > 65_535)
             {
-                new TextBlock { Text = "Settings", FontSize = 28, FontWeight = FontWeight.Bold, Foreground = Brushes.White },
-                new TextBlock { Text = "Game UDP settings:", Foreground = Brushes.White, FontWeight = FontWeight.Bold },
-                new TextBlock { Text = "UDP Telemetry: On\nUDP Format: 2026\nUDP IP Address: 127.0.0.1\nUDP Port: 20777\nUDP Send Rate: 60Hz", Foreground = Brushes.LightGray, FontFamily = FontFamily.Parse("Consolas") },
-                new TextBlock { Text = $"F1 Telemetry Lab v{AppInfo.Version} stores raw packets locally, drains pending writes on Stop, then builds reports and an optional compact ZIP.", Foreground = Brushes.LightGray, TextWrapping = TextWrapping.Wrap }
+                _settingsStatus.Text = "Port must be between 1 and 65535.";
+                return;
+            }
+            if (!int.TryParse(retention.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var retentionDays) || retentionDays is < 0 or > 3_650)
+            {
+                _settingsStatus.Text = "Retention must be between 0 and 3650 days. Use 0 to keep all sessions.";
+                return;
+            }
+            var scaleText = scale.SelectedItem?.ToString()?.TrimEnd('%') ?? "100";
+            if (!int.TryParse(scaleText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var scaleValue)) scaleValue = 100;
+            _settings.Port = portValue;
+            _settings.RootFolder = string.IsNullOrWhiteSpace(root.Text) ? AppSettingsService.DefaultRootFolder() : root.Text.Trim();
+            _settings.AutoZip = autoZip.IsChecked == true;
+            _settings.RetentionDays = retentionDays;
+            _settings.Language = language.SelectedIndex == 1 ? "ru" : "en";
+            _settings.UiScalePercent = scaleValue;
+            try
+            {
+                AppSettingsService.Save(_settings);
+                _portText.Text = _settings.Port.ToString(CultureInfo.InvariantCulture);
+                _rootText.Text = _settings.RootFolder;
+                _autoZipCheck.IsChecked = _settings.AutoZip;
+                FontSize = 14 * _settings.UiScalePercent / 100.0;
+                RefreshSessions();
+                _settingsStatus.Text = "Settings saved. Language changes apply after restart; scale is applied immediately.";
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                _settingsStatus.Text = "Settings save failed: " + ex.Message;
             }
         };
+
+        previewRetention.Click += (_, _) =>
+        {
+            if (!int.TryParse(retention.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var retentionDays) || retentionDays <= 0)
+            {
+                _retentionPreview = Array.Empty<SessionRetentionCandidate>();
+                deleteRetention.IsEnabled = false;
+                _settingsStatus.Text = "Set retention above 0 days to preview cleanup. The selected session is always excluded.";
+                return;
+            }
+            try
+            {
+                _retentionPreview = SessionRetentionService.Preview(root.Text ?? _settings.RootFolder, retentionDays, GetSelectedSessionFolder());
+                var bytes = _retentionPreview.Sum(x => x.SizeBytes);
+                _settingsStatus.Text = _retentionPreview.Count == 0
+                    ? "No session folders match the retention rule."
+                    : $"Preview: {_retentionPreview.Count:N0} session folder(s), {FormatBytes(bytes)}. Check confirmation before deleting.";
+                deleteRetention.IsEnabled = confirmDelete.IsChecked == true && _retentionPreview.Count > 0;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+                _settingsStatus.Text = "Retention preview failed: " + ex.Message;
+            }
+        };
+
+        deleteRetention.Click += (_, _) =>
+        {
+            if (confirmDelete.IsChecked != true || _retentionPreview.Count == 0) return;
+            try
+            {
+                var removed = SessionRetentionService.Delete(root.Text ?? _settings.RootFolder, _retentionPreview);
+                _retentionPreview = Array.Empty<SessionRetentionCandidate>();
+                confirmDelete.IsChecked = false;
+                deleteRetention.IsEnabled = false;
+                RefreshSessions();
+                _settingsStatus.Text = $"Removed {removed:N0} previewed session folder(s). This operation cannot be undone.";
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                _settingsStatus.Text = "Retention cleanup failed: " + ex.Message;
+            }
+        };
+
+        var actions = new WrapPanel { Orientation = Orientation.Horizontal, ItemSpacing = 10, LineSpacing = 8 };
+        actions.Children.Add(save);
+        actions.Children.Add(previewRetention);
+        actions.Children.Add(confirmDelete);
+        actions.Children.Add(deleteRetention);
+        panel.Children.Add(actions);
+
+        _settingsStatus = new TextBlock
+        {
+            Text = "Retention 0 keeps all sessions. Cleanup only removes folders shown by Preview retention and requires explicit confirmation.",
+            Foreground = Brushes.LightGray,
+            TextWrapping = TextWrapping.Wrap
+        };
+        panel.Children.Add(_settingsStatus);
+        panel.Children.Add(new TextBlock
+        {
+            Text = $"v{AppInfo.Version} | schema {AppInfo.DatabaseSchemaVersion} | compact packages include lap reports, data-quality dimensions, telemetry bins and Car Setup changes.",
+            Foreground = Hex(0xA8B3C7),
+            TextWrapping = TextWrapping.Wrap
+        });
+
+        return new ScrollViewer
+        {
+            Content = panel,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
+        };
+    }
+
+    private static void AddSettingRow(Grid grid, int row, string label, Control control)
+    {
+        var text = new TextBlock { Text = label, Foreground = Brushes.White, VerticalAlignment = VerticalAlignment.Center };
+        Grid.SetRow(text, row);
+        grid.Children.Add(text);
+        Grid.SetRow(control, row);
+        Grid.SetColumn(control, 1);
+        grid.Children.Add(control);
+    }
+
+    private static string FormatBytes(long value)
+    {
+        if (value >= 1_073_741_824) return $"{value / 1_073_741_824d:0.0} GB";
+        if (value >= 1_048_576) return $"{value / 1_048_576d:0.0} MB";
+        if (value >= 1_024) return $"{value / 1_024d:0.0} KB";
+        return $"{value:N0} B";
     }
 
     private static Control BuildPlaceholder(string title, string text)
@@ -1335,6 +1865,11 @@ public sealed class MainWindow : Window
         {
             var root = string.IsNullOrWhiteSpace(_rootText.Text) ? DefaultRootFolder() : _rootText.Text.Trim();
             Directory.CreateDirectory(root);
+            _settings.Port = port;
+            _settings.RootFolder = root;
+            _settings.AutoZip = _autoZipCheck.IsChecked == true;
+            try { AppSettingsService.Save(_settings); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { AddLog("Settings persistence warning: " + ex.Message); }
             _recorder.Start(port, root);
             _startButton.IsEnabled = false;
             _stopButton.IsEnabled = true;
@@ -1458,31 +1993,61 @@ public sealed class MainWindow : Window
     private void RefreshSessions()
     {
         if (_sessionList is null) return;
-        var root = string.IsNullOrWhiteSpace(_rootText?.Text) ? DefaultRootFolder() : _rootText.Text.Trim();
-        var packs = Path.Combine(root, "telemetry_packs");
-        Directory.CreateDirectory(packs);
-        var folders = Directory.GetDirectories(packs).OrderByDescending(x => x).ToList();
-        _sessionList.ItemsSource = folders.Select(Path.GetFileName).ToList();
+        var selectedFolder = (_sessionList.SelectedItem as SessionListItem)?.FolderPath;
+        try
+        {
+            var root = string.IsNullOrWhiteSpace(_rootText?.Text) ? DefaultRootFolder() : _rootText.Text.Trim();
+            var packs = Path.Combine(root, "telemetry_packs");
+            Directory.CreateDirectory(packs);
+            var sessions = Directory.GetDirectories(packs)
+                .OrderByDescending(Directory.GetLastWriteTimeUtc)
+                .Select(SessionSummaryService.Load)
+                .ToList();
+            _sessionList.ItemsSource = sessions;
+            _sessionList.SelectedItem = sessions.FirstOrDefault(x => string.Equals(x.FolderPath, selectedFolder, StringComparison.OrdinalIgnoreCase))
+                                        ?? sessions.FirstOrDefault();
+            if (sessions.Count == 0)
+            {
+                _selectedSessionText.Text = "No recorded sessions found in the selected storage root.";
+                _globalSessionContext.Text = "No session selected";
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _selectedSessionText.Text = "Session list could not be loaded: " + ex.Message;
+            AddLog("Session refresh failed: " + ex.Message);
+        }
     }
 
     private void UpdateSelectedSession()
     {
-        var name = _sessionList.SelectedItem?.ToString();
-        if (string.IsNullOrWhiteSpace(name)) return;
-        var root = string.IsNullOrWhiteSpace(_rootText.Text) ? DefaultRootFolder() : _rootText.Text.Trim();
-        var folder = Path.Combine(root, "telemetry_packs", name);
-        var manifest = Path.Combine(folder, "manifest.json");
+        if (_sessionList.SelectedItem is not SessionListItem session) return;
+        var folder = session.FolderPath;
         var zip = Directory.Exists(folder)
             ? Directory.GetFiles(folder, "*.zip").OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault()
             : null;
-        var preferred = ReadPreferredSessionName(folder) ?? name;
         var quality = RecordingQualityService.Load(folder);
         _selectedSessionText.Text =
-            $"Session: {preferred}\nPhysical folder: {folder}\nSQLite: {Path.Combine(folder, "session.sqlite")}\nZip: {(zip is not null ? zip : "not created")}\n" +
-            $"Data quality: {quality?.Summary ?? "not recorded by this version"}\n\nManifest:\n" +
-            (File.Exists(manifest) ? File.ReadAllText(manifest) : "manifest.json not found");
+            $"{session.SessionName}\n" +
+            $"Track: {session.TrackName} | Started: {session.DateLabel} | Duration: {session.DurationLabel}\n" +
+            $"State: {session.AnalysisState} | Classification: {session.ClassificationSource} | Laps: {session.TotalLaps:N0}\n" +
+            $"Capture: {session.CaptureQuality} | Completeness: {session.Completeness} | Analysis: {session.AnalysisConfidence}\n" +
+            $"Car Setup changes: {session.SetupSnapshots:N0} | Stored size: {session.SizeLabel}";
+        _technicalManifestText.Text =
+            $"Physical folder: {folder}\nSQLite: {Path.Combine(folder, "session.sqlite")}\nZIP: {(zip is not null ? zip : "not created")}\n\nManifest:\n{session.TechnicalDetails}";
+        _globalSessionContext.Text =
+            $"Session: {session.SessionName} | Track: {session.TrackName} | Driver: {session.PlayerName} | {session.AnalysisState} | " +
+            $"Capture {session.CaptureQuality} / Completeness {session.Completeness} / Analysis {session.AnalysisConfidence}";
+        if (_measuredRateText is not null)
+            _measuredRateText.Text = quality?.MeasuredTelemetryRateHz is double rate
+                ? $"Measured telemetry packet rate: {rate:0.0} Hz. Recommended game setting: 60 Hz."
+                : "Measured telemetry packet rate: not available for this session. Recommended game setting: 60 Hz.";
         LoadFinalClassification(folder);
-        LoadDriverAliasEditor();
+        foreach (var loader in _sessionContextLoaders)
+        {
+            try { loader(); }
+            catch (Exception ex) { AddLog("Session context refresh failed: " + ex.Message); }
+        }
     }
 
     private void LoadFinalClassification(string folder)
@@ -1491,6 +2056,7 @@ public sealed class MainWindow : Window
         var db = Path.Combine(folder, "session.sqlite");
         if (!File.Exists(db))
         {
+            if (_classificationHeading is not null) _classificationHeading.Text = "Classification unavailable";
             _classificationRows.Add("session.sqlite not found");
             return;
         }
@@ -1500,8 +2066,31 @@ public sealed class MainWindow : Window
             con.Open();
             if (!TableExists(con, "final_classification"))
             {
+                if (_classificationHeading is not null) _classificationHeading.Text = "Classification unavailable";
                 _classificationRows.Add("Run Analyze selected session to build final_classification.");
                 return;
+            }
+            var source = "legacy analysis";
+            if (ColumnExists(con, "final_classification", "classification_source"))
+            {
+                using var sourceCommand = con.CreateCommand();
+                sourceCommand.CommandText = "SELECT classification_source FROM final_classification LIMIT 1";
+                source = Convert.ToString(sourceCommand.ExecuteScalar(), CultureInfo.InvariantCulture) ?? source;
+            }
+            var lastPacket = "time unavailable";
+            if (TableExists(con, "raw_packets"))
+            {
+                using var timeCommand = con.CreateCommand();
+                timeCommand.CommandText = "SELECT MAX(received_at) FROM raw_packets";
+                var rawTime = Convert.ToString(timeCommand.ExecuteScalar(), CultureInfo.InvariantCulture);
+                if (DateTimeOffset.TryParse(rawTime, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsedTime))
+                    lastPacket = parsedTime.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.CurrentCulture);
+            }
+            if (_classificationHeading is not null)
+            {
+                _classificationHeading.Text = string.Equals(source, "official_udp", StringComparison.OrdinalIgnoreCase)
+                    ? $"Official classification (UDP packet 8, last packet {lastPacket})"
+                    : $"Provisional classification (latest Lap Data fallback, last packet {lastPacket})";
             }
             using var cmd = con.CreateCommand();
             var nameColumn = ColumnExists(con, "final_classification", "display_name") ? "display_name" : "name";
@@ -1541,10 +2130,11 @@ public sealed class MainWindow : Window
         _driverAliasPanel.Children.Clear();
         _aliasBoxes.Clear();
         _shortAliasBoxes.Clear();
+        _aliasesDirty = false;
         var folder = GetSelectedSessionFolder();
         if (folder is null)
         {
-            _driverAliasStatus.Text = "Сначала выбери сессию во вкладке Sessions.";
+            _driverAliasStatus.Text = "Select a session first.";
             return;
         }
 
@@ -1553,7 +2143,7 @@ public sealed class MainWindow : Window
             var rows = DriverAliasService.LoadRows(folder);
             if (rows.Count == 0)
             {
-                _driverAliasStatus.Text = "Нет final_classification. Запусти Analyze selected session.";
+                _driverAliasStatus.Text = "No classification data. Run Analyze selected session.";
                 _driverAliasPanel.Children.Add(new TextBlock
                 {
                     Text = "Run Analyze selected session first.",
@@ -1563,7 +2153,7 @@ public sealed class MainWindow : Window
                 return;
             }
 
-            _driverAliasStatus.Text = $"Loaded {rows.Count} cars. Измени Display name / Code и нажми Save all aliases.";
+            _driverAliasStatus.Text = $"Loaded {rows.Count} cars. Display name is used in reports; code is the compact legend label.";
             _driverAliasPanel.Children.Add(BuildAliasHeader());
             foreach (var row in rows)
             {
@@ -1581,14 +2171,13 @@ public sealed class MainWindow : Window
     {
         var grid = new Grid
         {
-            ColumnDefinitions = new ColumnDefinitions("90,2*,2*,110,Auto"),
+            ColumnDefinitions = new ColumnDefinitions("90,2*,2*,110"),
             Margin = new Thickness(8, 8, 8, 2)
         };
         AddAliasText(grid, "Pos / Car", 0, bold: true);
         AddAliasText(grid, "Original name", 1, bold: true);
         AddAliasText(grid, "Display name", 2, bold: true);
         AddAliasText(grid, "Code", 3, bold: true);
-        AddAliasText(grid, "Save", 4, bold: true);
         return grid;
     }
 
@@ -1596,7 +2185,7 @@ public sealed class MainWindow : Window
     {
         var grid = new Grid
         {
-            ColumnDefinitions = new ColumnDefinitions("90,2*,2*,110,Auto"),
+            ColumnDefinitions = new ColumnDefinitions("90,2*,2*,110"),
             Margin = new Thickness(8, 2, 8, 2)
         };
         var bg = row.IsPlayer ? Hex(0x213044) : Hex(0x1A2028);
@@ -1619,6 +2208,7 @@ public sealed class MainWindow : Window
         Grid.SetColumn(box, 2);
         grid.Children.Add(box);
         _aliasBoxes[row.CarIndex] = box;
+        box.TextChanged += (_, _) => MarkAliasesDirty();
 
         var shortBox = new TextBox
         {
@@ -1629,12 +2219,15 @@ public sealed class MainWindow : Window
         Grid.SetColumn(shortBox, 3);
         grid.Children.Add(shortBox);
         _shortAliasBoxes[row.CarIndex] = shortBox;
-
-        var save = new Button { Content = "Save", Width = 70 };
-        save.Click += (_, _) => SaveAliasRow(row, box.Text ?? "", shortBox.Text ?? "");
-        Grid.SetColumn(save, 4);
-        grid.Children.Add(save);
+        shortBox.TextChanged += (_, _) => MarkAliasesDirty();
         return border;
+    }
+
+    private void MarkAliasesDirty()
+    {
+        if (_aliasesDirty) return;
+        _aliasesDirty = true;
+        if (_driverAliasStatus is not null) _driverAliasStatus.Text = "Unsaved alias changes. Use Save all aliases to apply them.";
     }
 
     private static void AddAliasText(Grid grid, string text, int column, bool bold = false)
@@ -1675,7 +2268,7 @@ public sealed class MainWindow : Window
         var folder = GetSelectedSessionFolder();
         if (folder is null)
         {
-            _driverAliasStatus.Text = "Сначала выбери сессию.";
+            _driverAliasStatus.Text = "Select a session first.";
             return;
         }
         try
@@ -1691,6 +2284,7 @@ public sealed class MainWindow : Window
             }
             AddLog("All driver aliases saved.");
             _driverAliasStatus.Text = "Aliases saved. Lap Compare/Legend will use Display name after reload.";
+            _aliasesDirty = false;
             LoadFinalClassification(folder);
             LoadCompareLaps();
         }
@@ -1755,7 +2349,7 @@ public sealed class MainWindow : Window
         if (_raceReportDriver is null) return;
         if (_busy)
         {
-            _raceReportStatus.Text = "Дождись окончания анализа. Таблицы ещё формируются.";
+            _raceReportStatus.Text = "Wait for analysis to finish before loading reports.";
             return;
         }
 
@@ -1764,7 +2358,7 @@ public sealed class MainWindow : Window
             var folder = GetSelectedSessionFolder();
             if (folder is null)
             {
-                _raceReportStatus.Text = "Сначала выбери сессию во вкладке Sessions.";
+                _raceReportStatus.Text = "Select a session first.";
                 return;
             }
 
@@ -1773,8 +2367,8 @@ public sealed class MainWindow : Window
             var player = _raceReportDrivers.FirstOrDefault(x => x.IsPlayer);
             _raceReportDriver.SelectedItem = player ?? _raceReportDrivers.FirstOrDefault();
             _raceReportStatus.Text = _raceReportDrivers.Count == 0
-                ? "Нет данных по гонщикам. Запусти Analyze selected session."
-                : $"Loaded {_raceReportDrivers.Count:N0} drivers. Выбери гонщика и режим таблицы.";
+                ? "No driver data. Analyze the selected session first."
+                : $"Loaded {_raceReportDrivers.Count:N0} drivers. Select a driver and table view.";
             LoadRaceReportRows();
         }
         catch (Exception ex)
@@ -1805,7 +2399,7 @@ public sealed class MainWindow : Window
 
             var problemCount = rows.Count(x => x.HasProblem);
             var pitCount = rows.Count(x => x.PitThisLap);
-            _raceReportStatus.Text = $"{driver.Code} / {driver.DisplayName}: {rows.Count:N0} laps shown, {pitCount:N0} pit laps, {problemCount:N0} flagged laps. Table: {view}.";
+            _raceReportStatus.Text = $"{driver.Identity}: {rows.Count:N0} laps shown, {pitCount:N0} pit laps, {problemCount:N0} flagged laps. Table: {view}.";
         }
         catch (Exception ex)
         {
@@ -1822,7 +2416,7 @@ public sealed class MainWindow : Window
             var driver = _raceReportDriver?.SelectedItem as RaceReportDriverOption;
             if (folder is null || driver is null)
             {
-                _raceReportStatus.Text = "Сначала выбери сессию и гонщика.";
+                _raceReportStatus.Text = "Select a session and driver first.";
                 return;
             }
 
@@ -1841,7 +2435,7 @@ public sealed class MainWindow : Window
     {
         if (_recorder.IsRecording)
         {
-            AddLog("Stop recording before analysis. SQLite does not enjoy being copied while it is still being written.");
+            AddLog("Stop recording before analysis so all pending database writes can be drained safely.");
             return;
         }
         if (_busy)
@@ -1850,15 +2444,12 @@ public sealed class MainWindow : Window
             return;
         }
 
-        var name = _sessionList.SelectedItem?.ToString();
-        if (string.IsNullOrWhiteSpace(name))
+        var folder = GetSelectedSessionFolder();
+        if (folder is null)
         {
             AddLog("Select a session first.");
             return;
         }
-
-        var root = string.IsNullOrWhiteSpace(_rootText.Text) ? DefaultRootFolder() : _rootText.Text.Trim();
-        var folder = Path.Combine(root, "telemetry_packs", name);
         _busy = true;
         try
         {
@@ -1871,8 +2462,8 @@ public sealed class MainWindow : Window
                 var zip = SessionPackager.CreateZip(folder, dbPath, ReadPreferredSessionName(folder));
                 AddLog("Zip refreshed: " + zip);
             }
-            UpdateSelectedSession();
             InvalidateCompareAfterAnalysis();
+            RefreshSessions();
             if (_raceReportDriver is not null) LoadRaceReportDrivers();
         }
         catch (Exception ex)
@@ -1888,6 +2479,7 @@ public sealed class MainWindow : Window
 
     private string? GetSelectedSessionFolder()
     {
+        if (_sessionList?.SelectedItem is SessionListItem session) return session.FolderPath;
         var name = _sessionList?.SelectedItem?.ToString();
         if (string.IsNullOrWhiteSpace(name)) return null;
         var root = string.IsNullOrWhiteSpace(_rootText.Text) ? DefaultRootFolder() : _rootText.Text.Trim();
@@ -1929,11 +2521,11 @@ public sealed class MainWindow : Window
 
             UpdateReferenceText();
             if (_compareStatus is not null)
-                _compareStatus.Text = "Analysis refreshed. Click Load laps, then Plot. Старые линии очищены, чтобы легенда не врала как пресс-релиз.";
+                _compareStatus.Text = "Analysis refreshed. The previous plot was cleared to avoid mixing data versions.";
         }
         catch
         {
-            // UI refresh must never break analysis. That would be too on-brand for software.
+            // UI refresh must never break a completed analysis.
         }
     }
 
@@ -1941,7 +2533,7 @@ public sealed class MainWindow : Window
     {
         if (_busy)
         {
-            _compareStatus.Text = "Дождись окончания анализа. Сейчас таблицы ещё создаются, не надо дёргать их за рукав.";
+            _compareStatus.Text = "Wait for analysis to finish before loading comparison data.";
             AddLog("Compare load blocked: analysis/stop is still running.");
             return;
         }
@@ -1951,7 +2543,7 @@ public sealed class MainWindow : Window
             var folder = GetSelectedSessionFolder();
             if (folder is null)
             {
-                _compareStatus.Text = "Сначала выбери сессию во вкладке Sessions.";
+                _compareStatus.Text = "Select a session first.";
                 return;
             }
 
@@ -1965,7 +2557,7 @@ public sealed class MainWindow : Window
             }
             if (_compareDrivers.Count == 0)
             {
-                _compareStatus.Text = "Нет кругов для сравнения. Запусти анализ выбранной сессии.";
+                _compareStatus.Text = "No laps are available. Analyze the selected session first.";
                 return;
             }
 
@@ -2017,11 +2609,11 @@ public sealed class MainWindow : Window
             _lastComparedLaps.Clear();
             _compareChart.SetData(Array.Empty<CompareSeries>(), _compareMetric.SelectedItem?.ToString() ?? "speed");
             _compareLegendItems.Clear();
-            _compareStatus.Text = "Reference cleared. Выбери новый Slot 1 перед сравнением.";
+            _compareStatus.Text = "Reference cleared. Select a new lap in Slot 1 before plotting.";
         }
         else
         {
-            _compareStatus.Text = $"Slot {slotIndex + 1} disabled. Теперь можно сравнивать 2-3 круга, а не устраивать линейную кашу.";
+            _compareStatus.Text = $"Slot {slotIndex + 1} disabled.";
             if (_lastComparedLaps.Count > 0) PlotCurrentCompareSlots();
         }
         UpdateReferenceText();
@@ -2046,7 +2638,7 @@ public sealed class MainWindow : Window
     private List<LapOption> GetSelectedCompareLaps()
     {
         var laps = new List<LapOption>();
-        for (var i = 0; i < 6; i++)
+        for (var i = 0; i < _visibleCompareSlots; i++)
         {
             if (_compareLapBoxes[i].SelectedItem is LapOption lap) laps.Add(lap);
         }
@@ -2057,13 +2649,13 @@ public sealed class MainWindow : Window
     {
         if (_compareLapBoxes[0].SelectedItem is not LapOption)
         {
-            _compareStatus.Text = "Сначала выбери Reference-круг в Slot 1. Delta без эталона превращается в декоративную математику.";
+            _compareStatus.Text = "Select the reference lap in Slot 1 first.";
             return;
         }
         var selected = GetSelectedCompareLaps();
         if (selected.Count == 0)
         {
-            _compareStatus.Text = "Выбери хотя бы Reference-круг. График из воздуха пока не строим, хотя люди пытались.";
+            _compareStatus.Text = "Select at least the reference lap.";
             return;
         }
         PlotLaps(selected);
@@ -2081,7 +2673,7 @@ public sealed class MainWindow : Window
             var folder = GetSelectedSessionFolder();
             if (folder is null)
             {
-                _compareStatus.Text = "Сначала выбери сессию во вкладке Sessions.";
+                _compareStatus.Text = "Select a session first.";
                 return;
             }
             var best = CompareDataService.LoadBestCleanLaps(folder, 6);
@@ -2092,7 +2684,7 @@ public sealed class MainWindow : Window
             }
             if (best.Count == 0)
             {
-                _compareStatus.Text = "Нет кругов для сравнения. Запусти анализ выбранной сессии.";
+                _compareStatus.Text = "No laps are available. Analyze the selected session first.";
                 return;
             }
             FillCompareSlots(best);
@@ -2112,7 +2704,7 @@ public sealed class MainWindow : Window
             var folder = GetSelectedSessionFolder();
             if (folder is null)
             {
-                _compareStatus.Text = "Сначала выбери сессию во вкладке Sessions.";
+                _compareStatus.Text = "Select a session first.";
                 return;
             }
             var laps = CompareDataService.LoadYouVsTop(folder, 6);
@@ -2123,7 +2715,7 @@ public sealed class MainWindow : Window
             }
             if (laps.Count == 0)
             {
-                _compareStatus.Text = "Нет кругов для YOU vs top 5. Запусти анализ выбранной сессии.";
+                _compareStatus.Text = "No laps are available for YOU vs top 5. Analyze the selected session first.";
                 return;
             }
             FillCompareSlots(laps);
@@ -2142,6 +2734,7 @@ public sealed class MainWindow : Window
         if (folder is null) return;
         if (_compareDrivers.Count == 0) _compareDrivers = CompareDataService.LoadDrivers(folder, _compareCleanOnly.IsChecked == true);
 
+        EnsureVisibleCompareSlots(laps.Count);
         _updatingCompareSlots = true;
         try
         {
@@ -2203,10 +2796,10 @@ public sealed class MainWindow : Window
         var folder = GetSelectedSessionFolder();
         if (folder is null)
         {
-            _compareStatus.Text = "Сначала выбери сессию во вкладке Sessions.";
+            _compareStatus.Text = "Select a session first.";
             return;
         }
-        for (var i = 0; i < 6; i++)
+        for (var i = 0; i < _visibleCompareSlots; i++)
         {
             if (_compareDriverBoxes[i].SelectedItem is not DriverOption driver) continue;
             var laps = CompareDataService.LoadLapOptionsForDriver(folder, driver.CarIndex, _compareCleanOnly.IsChecked == true);
@@ -2225,18 +2818,18 @@ public sealed class MainWindow : Window
         var folder = GetSelectedSessionFolder();
         if (folder is null)
         {
-            _compareStatus.Text = "Сначала выбери сессию во вкладке Sessions.";
+            _compareStatus.Text = "Select a session first.";
             return;
         }
         if (_compareLapBoxes[0].SelectedItem is not LapOption reference)
         {
-            _compareStatus.Text = "Сначала выбери Reference lap в Slot 1.";
+            _compareStatus.Text = "Select a reference lap in Slot 1 first.";
             return;
         }
 
         var changed = 0;
         var missed = 0;
-        for (var i = 0; i < 6; i++)
+        for (var i = 0; i < _visibleCompareSlots; i++)
         {
             if (_compareDriverBoxes[i].SelectedItem is not DriverOption driver) continue;
             var laps = CompareDataService.LoadLapOptionsForDriver(folder, driver.CarIndex, _compareCleanOnly.IsChecked == true);
@@ -2266,7 +2859,7 @@ public sealed class MainWindow : Window
         _zoomToM = TryParseDistance(_zoomToText.Text);
         if (_zoomFromM is not null && _zoomToM is not null && _zoomToM <= _zoomFromM)
         {
-            _compareStatus.Text = "Zoom to должен быть больше from. Даже метры требуют хоть немного порядка.";
+            _compareStatus.Text = "Zoom end must be greater than zoom start.";
             return;
         }
         _compareChart.SetZoom(_zoomFromM, _zoomToM);
@@ -2295,7 +2888,7 @@ public sealed class MainWindow : Window
         var reference = _compareLapBoxes[0]?.SelectedItem as LapOption;
         _referenceText.Text = reference is null
             ? "Reference: not selected"
-            : $"Reference: {reference.Code} | #{reference.CarIndex:00} {reference.DisplayName} | Lap {reference.LapNum} | {LapOption.FormatLapTime(reference.LapTimeMs)} | {(reference.CleanLap ? "clean" : "dirty")}";
+            : $"Reference: #{reference.CarIndex:00} {reference.Identity} | Lap {reference.LapNum} | {LapOption.FormatLapTime(reference.LapTimeMs)} | {(reference.CleanLap ? "clean" : "dirty")}";
     }
 
     private void PlotLaps(List<LapOption> laps)
@@ -2333,13 +2926,13 @@ public sealed class MainWindow : Window
             var folder = GetSelectedSessionFolder();
             if (folder is null)
             {
-                _compareStatus.Text = "Сначала выбери сессию во вкладке Sessions.";
+                _compareStatus.Text = "Select a session first.";
                 return;
             }
             var laps = _lastComparedLaps.Count > 0 ? _lastComparedLaps : GetSelectedCompareLaps();
             if (laps.Count == 0)
             {
-                _compareStatus.Text = "Нечего экспортировать: выбери и построй сравнение.";
+                _compareStatus.Text = "Nothing to export. Select and plot at least one lap.";
                 return;
             }
             var path = CompareDataService.ExportCustomComparison(folder, laps);
@@ -2361,14 +2954,14 @@ public sealed class MainWindow : Window
             var folder = GetSelectedSessionFolder();
             if (folder is null)
             {
-                _trackMapStatus.Text = "Сначала выбери сессию во вкладке Sessions.";
+                _trackMapStatus.Text = "Select a session first.";
                 return;
             }
             var selected = GetSelectedCompareLaps();
             if (selected.Count < 2 && _lastComparedLaps.Count >= 2) selected = _lastComparedLaps.Take(2).ToList();
             if (selected.Count < 2)
             {
-                _trackMapStatus.Text = "Нужно минимум два круга: Slot 1 Reference и Slot 2 Compare. Карта из одного круга будет просто автопортретом.";
+                _trackMapStatus.Text = "Select at least two laps: Slot 1 Reference and Slot 2 Compare.";
                 return;
             }
             PlotTrackMap(folder, selected[0], selected[1]);
@@ -2387,13 +2980,13 @@ public sealed class MainWindow : Window
             var folder = GetSelectedSessionFolder();
             if (folder is null)
             {
-                _trackMapStatus.Text = "Сначала выбери сессию во вкладке Sessions.";
+                _trackMapStatus.Text = "Select a session first.";
                 return;
             }
             var laps = LoadBestReferenceVsYou(folder);
             if (laps.Count < 2)
             {
-                _trackMapStatus.Text = "Не найдено два круга для Best vs YOU. Запусти анализ выбранной сессии.";
+                _trackMapStatus.Text = "Two laps for Best vs YOU were not found. Analyze the selected session first.";
                 return;
             }
             FillCompareSlots(laps);
@@ -2522,15 +3115,10 @@ public sealed class MainWindow : Window
 
     private void OpenSelectedSessionFolder()
     {
-        var name = _sessionList.SelectedItem?.ToString();
-        if (string.IsNullOrWhiteSpace(name)) return;
-        var root = string.IsNullOrWhiteSpace(_rootText.Text) ? DefaultRootFolder() : _rootText.Text.Trim();
-        var folder = Path.Combine(root, "telemetry_packs", name);
+        var folder = GetSelectedSessionFolder();
+        if (folder is null) return;
         if (Directory.Exists(folder)) Process.Start(new ProcessStartInfo("explorer.exe", folder) { UseShellExecute = true });
     }
 
-    private static string DefaultRootFolder()
-    {
-        return Directory.Exists(@"D:\") ? "D:\\F1TelemetryLab" : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "F1TelemetryLab");
-    }
+    private static string DefaultRootFolder() => AppSettingsService.DefaultRootFolder();
 }

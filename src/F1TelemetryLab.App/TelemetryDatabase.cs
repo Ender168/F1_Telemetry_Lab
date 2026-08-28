@@ -155,7 +155,8 @@ public sealed class TelemetryDatabase : IDisposable
                 queue_high_watermark INTEGER NOT NULL,
                 session_changes INTEGER NOT NULL,
                 rating TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                missing_frames_estimated INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE INDEX IF NOT EXISTS idx_raw_packets_session_overall
@@ -166,14 +167,7 @@ public sealed class TelemetryDatabase : IDisposable
                 ON car_telemetry(session_uid, overall_frame_identifier, car_idx);
             """;
         cmd.ExecuteNonQuery();
-
-        EnsureColumn("raw_packets", "game_year", "INTEGER");
-        EnsureColumn("raw_packets", "game_major_version", "INTEGER");
-        EnsureColumn("raw_packets", "game_minor_version", "INTEGER");
-        EnsureColumn("raw_packets", "packet_version", "INTEGER");
-        EnsureColumn("raw_packets", "overall_frame_identifier", "INTEGER");
-        EnsureColumn("raw_packets", "secondary_player_car_index", "INTEGER");
-        EnsureColumn("car_telemetry", "overall_frame_identifier", "INTEGER NOT NULL DEFAULT 0");
+        DatabaseSchemaMigrator.Apply(_connection);
     }
 
     public void SaveMetadata(SessionMetadata metadata)
@@ -200,8 +194,8 @@ public sealed class TelemetryDatabase : IDisposable
             INSERT INTO recording_quality(
                 id, packets_received, car_samples_written, invalid_headers, unsupported_packets,
                 duplicate_frames, out_of_order_frames, estimated_missing_frames, queue_drops,
-                queue_high_watermark, session_changes, rating, updated_at)
-            VALUES (1,$packets,$cars,$invalid,$unsupported,$duplicates,$out_of_order,$missing,$drops,$high,$changes,$rating,$updated)
+                queue_high_watermark, session_changes, rating, updated_at, missing_frames_estimated)
+            VALUES (1,$packets,$cars,$invalid,$unsupported,$duplicates,$out_of_order,$missing,$drops,$high,$changes,$rating,$updated,$missingEstimated)
             ON CONFLICT(id) DO UPDATE SET
                 packets_received=excluded.packets_received,
                 car_samples_written=excluded.car_samples_written,
@@ -214,7 +208,8 @@ public sealed class TelemetryDatabase : IDisposable
                 queue_high_watermark=excluded.queue_high_watermark,
                 session_changes=excluded.session_changes,
                 rating=excluded.rating,
-                updated_at=excluded.updated_at;
+                updated_at=excluded.updated_at,
+                missing_frames_estimated=excluded.missing_frames_estimated;
             """;
         cmd.Parameters.AddWithValue("$packets", quality.PacketsReceived);
         cmd.Parameters.AddWithValue("$cars", quality.CarSamplesWritten);
@@ -228,6 +223,7 @@ public sealed class TelemetryDatabase : IDisposable
         cmd.Parameters.AddWithValue("$changes", quality.SessionChanges);
         cmd.Parameters.AddWithValue("$rating", quality.Rating);
         cmd.Parameters.AddWithValue("$updated", DateTimeOffset.Now.ToString("O"));
+        cmd.Parameters.AddWithValue("$missingEstimated", quality.MissingFrameEstimateAvailable ? 1 : 0);
         cmd.ExecuteNonQuery();
     }
 
@@ -315,7 +311,11 @@ public sealed class TelemetryDatabase : IDisposable
             VALUES ($uid,$received,$received,$overall,$overall,1)
             ON CONFLICT(session_uid) DO UPDATE SET
                 last_received_at=excluded.last_received_at,
-                last_overall_frame=excluded.last_overall_frame,
+                last_overall_frame=CASE
+                    WHEN excluded.last_overall_frame > 0
+                    THEN MAX(session_segments.last_overall_frame, excluded.last_overall_frame)
+                    ELSE session_segments.last_overall_frame
+                END,
                 packet_count=session_segments.packet_count + 1;
             """;
         cmd.Parameters.AddWithValue("$uid", header.SessionUid.ToString());
@@ -332,21 +332,6 @@ public sealed class TelemetryDatabase : IDisposable
         cmd.Parameters.AddWithValue("$key", key);
         cmd.Parameters.AddWithValue("$value", value);
         cmd.ExecuteNonQuery();
-    }
-
-    private void EnsureColumn(string table, string column, string type)
-    {
-        using var info = _connection.CreateCommand();
-        info.CommandText = $"PRAGMA table_info({table})";
-        using var reader = info.ExecuteReader();
-        while (reader.Read())
-        {
-            if (string.Equals(reader.GetString(1), column, StringComparison.OrdinalIgnoreCase)) return;
-        }
-        reader.Close();
-        using var alter = _connection.CreateCommand();
-        alter.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {type}";
-        alter.ExecuteNonQuery();
     }
 
     private static void AddParameter(SqliteCommand command, string name, SqliteType type) => command.Parameters.Add(name, type);

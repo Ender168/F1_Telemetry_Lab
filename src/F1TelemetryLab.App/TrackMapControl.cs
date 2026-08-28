@@ -82,8 +82,8 @@ public sealed class TrackMapControl : Control
         }
         else
         {
-            var shadowPen = new Pen(new SolidColorBrush(Color.FromRgb(54, 62, 72)), 9);
-            var basePen = new Pen(new SolidColorBrush(Color.FromRgb(210, 215, 222)), 3.5);
+            var shadowPen = new Pen(new SolidColorBrush(Color.FromRgb(54, 62, 72)), 5);
+            var basePen = new Pen(new SolidColorBrush(Color.FromRgb(210, 215, 222)), 2);
             for (var i = 1; i < points.Count; i++) context.DrawLine(shadowPen, Map(points[i - 1]), Map(points[i]));
             for (var i = 1; i < points.Count; i++) context.DrawLine(basePen, Map(points[i - 1]), Map(points[i]));
         }
@@ -118,16 +118,7 @@ public sealed class TrackMapControl : Control
         DrawColorLegend(context, bounds, _data.Metric, _amplification, textBrush, dimBrush);
         DrawDirectionArrow(context, points, Map, textBrush);
 
-        var cornerBrush = new SolidColorBrush(Color.FromRgb(255, 255, 255));
-        var cornerBg = new SolidColorBrush(Color.FromArgb(190, 16, 19, 24));
-        foreach (var c in profile.Corners)
-        {
-            var nearest = NearestPoint(points, c.DistanceM);
-            var p = Map(nearest);
-            var labelPt = new Point(p.X + c.XOffset, p.Y + c.YOffset);
-            context.FillRectangle(cornerBg, new Rect(labelPt.X - 3, labelPt.Y - 2, Math.Max(42, c.Label.Length * 7.5), 18));
-            DrawText(context, c.Label, 11, cornerBrush, labelPt);
-        }
+        DrawCornerLabels(context, bounds, profile, points, Map);
 
         var start = Map(points[0]);
         context.FillRectangle(new SolidColorBrush(Color.FromRgb(86, 156, 214)), new Rect(start.X - 4, start.Y - 4, 8, 8));
@@ -285,6 +276,36 @@ public sealed class TrackMapControl : Control
     {
         DrawText(context, $"{profile.TrackName} Track Map", 17, textBrush, new Point(18, 12));
         DrawText(context, $"REF: {data.ReferenceLabel}    CMP: {data.CompareLabel}", 12, dimBrush, new Point(18, 32));
+    }
+
+    private static void DrawCornerLabels(
+        DrawingContext context,
+        Rect bounds,
+        TrackProfile profile,
+        List<TrackPoint> points,
+        Func<TrackPoint, Point> map)
+    {
+        var occupied = new List<Rect>();
+        var foreground = new SolidColorBrush(Color.FromRgb(255, 255, 255));
+        var background = new SolidColorBrush(Color.FromArgb(205, 16, 19, 24));
+        foreach (var corner in profile.Corners.OrderBy(c => c.DistanceM))
+        {
+            var anchor = map(NearestPoint(points, corner.DistanceM));
+            var width = Math.Max(42, corner.Label.Length * 7.5);
+            var x = Math.Clamp(anchor.X + corner.XOffset, 4, Math.Max(4, bounds.Width - width - 8));
+            var y = Math.Clamp(anchor.Y + corner.YOffset, 4, Math.Max(4, bounds.Height - 24));
+            var rect = new Rect(x - 3, y - 2, width, 18);
+            for (var attempt = 0; attempt < 8 && occupied.Any(existing => existing.Intersects(rect)); attempt++)
+            {
+                var direction = attempt % 2 == 0 ? 1 : -1;
+                var step = (attempt / 2 + 1) * 20 * direction;
+                y = Math.Clamp(anchor.Y + corner.YOffset + step, 4, Math.Max(4, bounds.Height - 24));
+                rect = new Rect(x - 3, y - 2, width, 18);
+            }
+            occupied.Add(rect);
+            context.FillRectangle(background, rect);
+            DrawText(context, corner.Label, 11, foreground, new Point(x, y));
+        }
     }
 
     private static void DrawColorLegend(DrawingContext context, Rect bounds, string metric, double amplification, IBrush textBrush, IBrush dimBrush)

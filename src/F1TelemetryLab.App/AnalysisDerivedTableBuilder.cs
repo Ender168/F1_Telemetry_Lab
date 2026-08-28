@@ -554,7 +554,7 @@ internal static class AnalysisDerivedTableBuilder
                 l.warnings,
                 l.result_status,
                 l.driver_status,
-                'provisional_lap_data' AS classification_source,
+                'provisional_latest_lap_data' AS classification_source,
                 NULL AS grid_position,
                 NULL AS points,
                 l.num_pit_stops,

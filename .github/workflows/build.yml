@@ -1,8 +1,15 @@
 name: build
 
 on:
+  workflow_dispatch:
+    inputs:
+      run_long_tests:
+        description: Run the opt-in long-session benchmark
+        required: false
+        default: false
+        type: boolean
   push:
-    branches: [main, codex/v0.6.0]
+    branches: [main, 'codex/**']
   pull_request:
 
 permissions:
@@ -32,12 +39,21 @@ jobs:
       - name: Run protocol and lap-quality self-tests
         run: dotnet run --project tests/F1TelemetryLab.SelfTest/F1TelemetryLab.SelfTest.csproj --configuration Release --no-build
 
+      - name: Run regression test suite
+        run: dotnet test tests/F1TelemetryLab.Tests/F1TelemetryLab.Tests.csproj --configuration Release --no-build --logger "console;verbosity=normal"
+
+      - name: Run long-session benchmark
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_long_tests }}
+        env:
+          F1TLAB_RUN_LONG_TESTS: '1'
+        run: dotnet test tests/F1TelemetryLab.Tests/F1TelemetryLab.Tests.csproj --configuration Release --no-build --filter LongSessionBenchmarkRemainsBoundedWhenExplicitlyEnabled
+
       - name: Publish Windows x64
         run: dotnet publish src/F1TelemetryLab.App/F1TelemetryLab.App.csproj --configuration Release --runtime win-x64 --self-contained true --output artifacts/F1TelemetryLab-win-x64
 
       - name: Upload Windows x64 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: F1TelemetryLab-v0.6.0-win-x64
+          name: F1TelemetryLab-v0.7.0-win-x64
           path: artifacts/F1TelemetryLab-win-x64
           if-no-files-found: error

@@ -7,49 +7,80 @@ flowchart TD
     UDP["F1 UDP :20777"] --> RX["Receive loop"]
     RX --> Q["Bounded channel 8192"]
     Q --> DB["Single SQLite writer"]
-    DB --> RAW["Raw packets + live telemetry"]
-    RAW --> AN["Deterministic analysis"]
-    AN --> VIEW["Reports, maps, CSV"]
-    AN --> PACK["Compact upload pack"]
+    DB --> RAW["Raw packets"]
+    RAW --> STAGE["Staging analysis DB"]
+    STAGE --> VIEW["Reports and UI"]
+    STAGE --> PACK["CSV + compact pack"]
 ```
 
-Receiver выполняет только проверку header, подсчёт качества и постановку неизменённого datagram в очередь. Один writer владеет SQLite connection, поэтому конкурентных записей в базу нет. Stop сначала останавливает receiver, затем закрывает channel, ожидает writer, фиксирует quality/metadata и только после этого запускает анализ.
+Receiver выполняет только проверку header, packet-aware quality counters и постановку неизменённого datagram в очередь. Один writer владеет SQLite connection. Stop закрывает receiver, дренирует channel, фиксирует metadata/quality, закрывает базу и только затем запускает анализ.
 
-## Analysis pipeline
+## Atomic analysis
 
-1. `AnalysisEngine` заново декодирует поддерживаемые raw packets.
-2. `LapQualityAnalyzer` определяет активную ветку после flashback и подтверждённость каждого круга.
-3. `AnalysisDerivedTableBuilder` выбирает последнюю логическую сессию с Lap Data.
-4. Нормализованные таблицы строятся только для выбранного UID.
-5. CSV и `analysis_manifest.json` генерируются из этой проекции.
+1. `AnalysisEngine` создаёт SQLite backup исходной базы во временный файл рядом с ней.
+2. Raw packets читаются вперёд-only reader, без загрузки всех payload в память.
+3. Packet 4 задаёт active car count, поэтому неактивные слоты не разворачиваются.
+4. Parser строит нормализованные таблицы и индексы в staging DB.
+5. `LapQualityAnalyzer` применяет official FLBK и только затем heuristic fallback.
+6. SQL projection строит summary/trace/classification внутри staging DB.
+7. После checkpoint успешный staging-файл атомарно заменяет `session.sqlite`.
+8. CSV, analysis manifest и session manifest обновляются из подтверждённого результата.
 
-Повторный Analyze детерминирован относительно `raw_packets`: вычисляемые таблицы очищаются и строятся заново.
+Сбой до шага 7 оставляет исходную базу пригодной для повторного анализа.
+
+## Car Setup pipeline
+
+```mermaid
+flowchart LR
+    P5["Packet 5"] --> PARSE["50-byte setup rows"]
+    PARSE --> DEDUP["Initial + changes"]
+    DEDUP --> DB["car_setups"]
+    DB --> UI["Car Setup view"]
+    DB --> OUT["CSV + chatgpt_pack + ZIP"]
+```
+
+`next_front_wing_value` является packet-level значением игрока и сохраняется только для строки player car. Остальные поля принадлежат каждой активной машине.
+
+## Quality model
+
+| Dimension | Назначение |
+|---|---|
+| Capture | queue drops, invalid/unsupported packet headers и packet-aware sequence integrity |
+| Session completeness | наличие начала/финиша, итогового packet 8 и достаточных данных |
+| Analysis confidence | пригодность подтверждённых кругов и источников для отчётов |
+
+Неизвестный cadence не превращается в нулевую потерю: `missing_frames_estimated = 0` имеет отдельный флаг рассчитанности.
+
+## UI composition
+
+Верхний shell содержит Live, Sessions, Analysis, Race и Settings. Выбранный `SessionListItem` является общим контекстом и запускает feature-level loaders. Analysis включает Lap Compare и Track Map с embedded detail. Race включает Overview, Car Setup, Driver Compare, Stints и Pits.
+
+`MainWindow` пока остаётся code-behind shell. Сервисы parser, analysis, reports, settings, summaries, retention и setup не зависят от UI-контролов и тестируются отдельно.
 
 ## Ключевые инварианты
 
-- `overall_frame_identifier` монотонен через flashback и является основной временной осью.
-- Никакой join телеметрии не выполняется только по `frame_identifier`.
+- Join никогда не опирается только на `frame_identifier`.
 - Данные разных `session_uid` не соединяются.
-- Незавершённый круг никогда не получает ненулевое аналитическое время.
-- Большой пробел телеметрии не интерполируется.
+- Official FLBK имеет приоритет над эвристикой.
+- Finish reset не является rewind.
+- Незавершённый круг не получает аналитическое время и не участвует в consumption aggregates.
+- Track distance и corner labels используют одну геометрическую шкалу.
 - Полная raw database не попадает в компактный ZIP.
+- Cleanup работает только внутри конкретной `<root>/telemetry_packs/`, только по preview и после подтверждения.
 
 ## Основные компоненты
 
 | Компонент | Ответственность |
 |---|---|
-| `UdpRecorder` | UDP lifecycle, bounded queue, live state, quality counters |
-| `TelemetryDatabase` | schema v2, WAL, batching, raw persistence |
-| `F12026Parser` | bounds-checked decoding packet format 2026 |
-| `LapQualityAnalyzer` | completion, invalid, partial and rewind semantics |
-| `AnalysisDerivedTableBuilder` | normalized SQLite projection |
-| `CompareDataService` | reference-based traces and deltas |
+| `UdpRecorder` | UDP lifecycle, bounded queue, live state, packet-aware quality |
+| `TelemetryDatabase` | schema v4, WAL, batching, raw persistence |
+| `DatabaseSchemaMigrator` | идемпотентные `user_version` migrations |
+| `F12026Parser` | bounds-checked packet format 2026, включая packet 5 |
+| `LapQualityAnalyzer` | official flashback, finish completion и lap states |
+| `AnalysisEngine` | streaming parse, staging DB и atomic replace |
+| `AnalysisDerivedTableBuilder` | normalized projection и classification source |
+| `CompareDataService` | reference traces and deltas |
 | `RaceStrategyAnalyzer` | canonical stints and pit stops |
+| `SessionSummaryService` | UI cards and global session context |
+| `CarSetupDataService` | setup history for the selected driver |
 | `SessionPackager` | compact database and upload ZIP |
-
-## Следующие архитектурные шаги
-
-- Разделить крупный `MainWindow` на feature-level partial views или MVVM view models.
-- Заменить console self-test harness стандартным test runner после стабилизации CI-зависимостей.
-- Добавить fixture-пакеты от реальной игры с разрешённым распространением.
-- Вычислять packet-loss только после калибровки ожидаемого cadence для каждого packet type.

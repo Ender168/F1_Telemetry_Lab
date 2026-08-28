@@ -8,8 +8,9 @@ public sealed record LapOption(int CarIndex, int LapNum, bool IsPlayer, bool Cle
 {
     public string DisplayName => IsPlayer ? "YOU" : CleanName(DriverName);
     public string Code => CleanShort(ShortName, CarIndex, IsPlayer);
-    public string Label => $"#{CarIndex:00} {Code} {DisplayName}  {(IsBestLap ? "★ " : "  ")}Lap {LapNum}  {FormatLapTime(LapTimeMs)}  {(CleanLap ? "clean" : "dirty")}  rew:{RewindCount}";
-    public string ShortLabel => $"#{CarIndex:00} {Code} {DisplayName} L{LapNum} {FormatLapTime(LapTimeMs)}";
+    public string Identity => CompactIdentity(CarIndex, IsPlayer, Code, DisplayName);
+    public string Label => $"#{CarIndex:00} {Identity}  {(IsBestLap ? "★ " : "  ")}Lap {LapNum}  {FormatLapTime(LapTimeMs)}  {(CleanLap ? "clean" : "dirty")}  rew:{RewindCount}";
+    public string ShortLabel => $"#{CarIndex:00} {Identity} L{LapNum} {FormatLapTime(LapTimeMs)}";
     public override string ToString() => Label;
 
     public static string FormatLapTime(double ms)
@@ -33,13 +34,22 @@ public sealed record LapOption(int CarIndex, int LapNum, bool IsPlayer, bool Cle
         if (clean.Length >= 2) return clean.Length > 4 ? clean[..4] : clean;
         return isPlayer ? "YOU" : $"C{carIndex:00}";
     }
+
+    internal static string CompactIdentity(int carIndex, bool isPlayer, string code, string displayName)
+    {
+        if (isPlayer) return "YOU";
+        if (string.Equals(code, $"C{carIndex:00}", StringComparison.OrdinalIgnoreCase)) return displayName;
+        if (string.Equals(code, displayName, StringComparison.OrdinalIgnoreCase)) return displayName;
+        return $"{code} {displayName}";
+    }
 }
 
 public sealed record DriverOption(int CarIndex, bool IsPlayer, string DriverName, string ShortName, double BestCleanLapMs, int CleanLapCount, int TotalLapCount)
 {
     public string DisplayName => IsPlayer ? "YOU" : CleanName(DriverName);
     public string Code => CleanShort(ShortName, CarIndex, IsPlayer);
-    public string Label => $"#{CarIndex:00} {Code} {DisplayName}  best {LapOption.FormatLapTime(BestCleanLapMs)}  clean:{CleanLapCount}/{TotalLapCount}";
+    public string Identity => LapOption.CompactIdentity(CarIndex, IsPlayer, Code, DisplayName);
+    public string Label => $"#{CarIndex:00} {Identity}  best {LapOption.FormatLapTime(BestCleanLapMs)}  clean:{CleanLapCount}/{TotalLapCount}";
     public override string ToString() => Label;
 
     private static string CleanName(string name)
@@ -384,7 +394,7 @@ public static class CompareDataService
     private static string SeriesName(LapOption lap, int index)
     {
         var role = index == 0 ? "REF" : "CMP";
-        return $"{role} | {lap.Code} | #{lap.CarIndex:00} {lap.DisplayName} | Lap {lap.LapNum} | {LapOption.FormatLapTime(lap.LapTimeMs)} | {(lap.CleanLap ? "clean" : "dirty")}";
+        return $"{role} | #{lap.CarIndex:00} {lap.Identity} | Lap {lap.LapNum} | {LapOption.FormatLapTime(lap.LapTimeMs)} | {(lap.CleanLap ? "clean" : "dirty")}";
     }
 
     private static bool TableExists(SqliteConnection con, string table)

@@ -13,6 +13,8 @@ public static class SessionPackager
         if (!File.Exists(databasePath))
             throw new FileNotFoundException("session.sqlite was not created. The archive would be useless, so packaging was stopped.", databasePath);
 
+        SessionManifestService.Refresh(sessionFolder);
+
         // Build the compact upload database in the session folder first. That way, even if zip creation
         // fails for some reason, the user still has a small chatgpt_pack.sqlite to send manually.
         var compactLocalDb = Path.Combine(sessionFolder, "chatgpt_pack.sqlite");
@@ -60,9 +62,10 @@ public static class SessionPackager
             File.WriteAllText(notePath,
                 "This archive intentionally contains chatgpt_pack.sqlite instead of the full raw session.sqlite.\n" +
                 "The full raw UDP database stays in the local session folder.\n" +
-                "chatgpt_pack.sqlite contains analysis tables and 10m telemetry bins for upload-friendly review.\n");
+                "chatgpt_pack.sqlite contains analysis tables, setup changes and 10m telemetry bins for upload-friendly review.\n");
 
             ZipFile.CreateFromDirectory(stagingRoot, zipPath, CompressionLevel.Optimal, includeBaseDirectory: false);
+            SessionManifestService.Refresh(sessionFolder, zipPath: zipPath);
             return zipPath;
         }
         finally
@@ -77,8 +80,7 @@ public static class SessionPackager
         Directory.CreateDirectory(Path.GetDirectoryName(targetDbPath)!);
         TryDelete(targetDbPath);
 
-        // Do not open the source with Mode=ReadOnly here. In Microsoft.Data.Sqlite/SQLite,
-        // that can make ATTACH unable to create the target DB. Yes, that is exactly as annoying as it sounds.
+        // ATTACH needs a writable primary connection even though the source data is not modified.
         using var con = new SqliteConnection($"Data Source={sourceDbPath};Default Timeout=30");
         con.Open();
 
@@ -96,9 +98,11 @@ public static class SessionPackager
             CopyTableIfExists(con, "session_metadata");
             CopyTableIfExists(con, "session_segments");
             CopyTableIfExists(con, "recording_quality");
+            CopyTableIfExists(con, "data_quality");
             CopyTableIfExists(con, "lap_summary");
             CopyTableIfExists(con, "lap_state_summary");
             CopyTableIfExists(con, "lap_quality");
+            CopyTableIfExists(con, "car_setups");
             CopyTableIfExists(con, "rewind_events");
             CopyTableIfExists(con, "events");
             CopyTableIfExists(con, "participants");
@@ -122,6 +126,7 @@ public static class SessionPackager
             InsertPackInfo(con, "created_at", DateTimeOffset.Now.ToString("O"));
             InsertPackInfo(con, "source_database", Path.GetFileName(sourceDbPath));
             InsertPackInfo(con, "note", "Compact ChatGPT upload DB. Raw packets are intentionally excluded.");
+            Execute(con, $"PRAGMA out.user_version = {AppInfo.DatabaseSchemaVersion};");
         }
         finally
         {

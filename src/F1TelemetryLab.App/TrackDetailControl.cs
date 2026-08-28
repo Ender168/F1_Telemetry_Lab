@@ -7,7 +7,7 @@ namespace F1TelemetryLab;
 
 public sealed class TrackDetailControl : Control
 {
-    private const double ApproxTrackWidthM = 12.0;
+    private const double ViewportPaddingM = 12.0;
 
     private TrackMapRenderData? _data;
     private TrackMapInsight? _selectedInsight;
@@ -90,7 +90,7 @@ public sealed class TrackDetailControl : Control
         var p90 = absValues.Count == 0 ? 1.0 : absValues[(int)Math.Clamp(Math.Floor(absValues.Count * 0.90), 0, absValues.Count - 1)];
         if (p90 < 1) p90 = 1;
 
-        var viewport = BuildViewport(points, boundaryPoints, refTrace, cmpTrace, ApproxTrackWidthM);
+        var viewport = BuildViewport(points, boundaryPoints, refTrace, cmpTrace, ViewportPaddingM);
         var plot = new Rect(40, 72, Math.Max(20, bounds.Width - 80), Math.Max(20, bounds.Height - 152));
         var focus = NearestPoint(allPoints, insight.PeakDistanceM);
         var transform = BuildTransformCentered(viewport, plot, focus.X, focus.Z);
@@ -109,7 +109,7 @@ public sealed class TrackDetailControl : Control
         DrawLegend(context, bounds, insight, hasBoundary);
 
         if (hasBoundary) DrawTrackBoundary(context, boundaryPoints, MapRaw);
-        else DrawTrackCorridor(context, points, transform, ApproxTrackWidthM);
+        else DrawGeometryReference(context, points, transform);
 
         for (var i = 1; i < points.Count; i++)
         {
@@ -214,7 +214,7 @@ public sealed class TrackDetailControl : Control
         var maxOffset = zoneDeviation.Count == 0 ? 0 : zoneDeviation.Max(p => p.OffsetMeters);
         var limitsText = hasBoundary
             ? "Track surface, white lines and limits are from the embedded Austria Racenet spline."
-            : $"No spline boundary loaded; using approximate {ApproxTrackWidthM:0.#}m corridor fallback.";
+            : "No verified spline boundary; only the geometric reference and measured trajectories are drawn.";
         var info = $"Actual path offset: avg {avgOffset:0.00}m, max {maxOffset:0.00}m. {limitsText}";
         DrawText(context, info, 12, dimBrush, new Point(18, bounds.Height - 34));
     }
@@ -239,7 +239,7 @@ public sealed class TrackDetailControl : Control
         }
         else
         {
-            DrawLegendLine(context, x, y + 25, Color.FromRgb(210, 215, 222), "approx track limits / asphalt");
+            DrawLegendLine(context, x, y + 25, Color.FromRgb(210, 215, 222), "geometry reference (not limits)");
             DrawLegendLine(context, x, y + 43, Color.FromArgb(245, 80, 170, 255), "Reference path");
             DrawLegendLine(context, x, y + 61, Color.FromArgb(245, 255, 216, 84), "Compare path");
             DrawLegendLine(context, x, y + 79, InsightColor(insight.Kind, 245), "selected top-zone");
@@ -350,6 +350,20 @@ public sealed class TrackDetailControl : Control
         DrawPolyline(context, right, edgeShadow);
         DrawPolyline(context, left, edge);
         DrawPolyline(context, right, edge);
+    }
+
+    private static void DrawGeometryReference(DrawingContext context, List<TrackPoint> points, ViewTransform transform)
+    {
+        if (points.Count < 2) return;
+        var shadow = new Pen(new SolidColorBrush(Color.FromArgb(180, 7, 10, 14)), 6.0);
+        var line = new Pen(new SolidColorBrush(Color.FromArgb(210, 210, 215, 222)), 2.0);
+        for (var i = 1; i < points.Count; i++)
+        {
+            var from = transform.Map(points[i - 1].X, points[i - 1].Z);
+            var to = transform.Map(points[i].X, points[i].Z);
+            context.DrawLine(shadow, from, to);
+            context.DrawLine(line, from, to);
+        }
     }
 
     private static List<Point> BuildOffsetPolyline(List<TrackPoint> points, ViewTransform transform, double offsetM)

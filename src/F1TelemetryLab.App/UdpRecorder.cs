@@ -12,7 +12,8 @@ public sealed class UdpRecorder : IAsyncDisposable
     private sealed record QueuedPacket(DateTimeOffset ReceivedAt, PacketHeader? Header, byte[] Payload);
 
     private readonly ConcurrentDictionary<int, LiveCarRow> _liveCars = new();
-    private readonly ConcurrentDictionary<(ulong SessionUid, byte PacketId), uint> _lastOverallFrames = new();
+    private readonly ConcurrentDictionary<ulong, int> _activeCarsBySession = new();
+    private readonly PacketSequenceTracker _sequenceTracker = new();
     private readonly object _lifecycleSync = new();
     private CancellationTokenSource? _cts;
     private UdpClient? _udp;
@@ -24,7 +25,6 @@ public sealed class UdpRecorder : IAsyncDisposable
     private SessionMetadata? _metadata;
     private DateTimeOffset _startedAt;
     private Exception? _backgroundError;
-    private ulong _activeSessionUid;
     private long _packetsSeen;
     private long _carSamplesSeen;
     private long _invalidHeaders;
@@ -294,9 +294,17 @@ public sealed class UdpRecorder : IAsyncDisposable
                 if (packet.Header is { PacketFormat: AppInfo.SupportedPacketFormat, PacketId: 1 })
                     UpdateSessionMetadata(packet);
 
-                if (packet.Header is { PacketFormat: AppInfo.SupportedPacketFormat, PacketId: 6 })
+                if (packet.Header is { PacketFormat: AppInfo.SupportedPacketFormat, PacketId: 4 } participantHeader)
                 {
-                    foreach (var sample in F12026Parser.ParseCarTelemetryPacket(packet.Payload, packet.ReceivedAt))
+                    var participant = F12026Parser.ParseParticipantsDebug(packet.Payload, packet.ReceivedAt);
+                    if (participant is { NumActiveCars: > 0 })
+                        _activeCarsBySession[participantHeader.SessionUid] = Math.Clamp(participant.NumActiveCars, 1, F12026Parser.MaxCars2026);
+                }
+
+                if (packet.Header is { PacketFormat: AppInfo.SupportedPacketFormat, PacketId: 6 } telemetryHeader)
+                {
+                    _activeCarsBySession.TryGetValue(telemetryHeader.SessionUid, out var activeCars);
+                    foreach (var sample in F12026Parser.ParseCarTelemetryPacket(packet.Payload, packet.ReceivedAt, activeCars > 0 ? activeCars : null))
                     {
                         _db?.InsertCarTelemetry(sample);
                         Interlocked.Increment(ref _carSamplesSeen);
@@ -340,29 +348,11 @@ public sealed class UdpRecorder : IAsyncDisposable
 
     private void TrackHeader(PacketHeader header)
     {
-        if (header.PacketFormat != AppInfo.SupportedPacketFormat)
-        {
-            Interlocked.Increment(ref _unsupportedPackets);
-            return;
-        }
-
-        if (header.SessionUid != 0 && _activeSessionUid == 0)
-            _activeSessionUid = header.SessionUid;
-        else if (header.SessionUid != 0 && _activeSessionUid != header.SessionUid)
-        {
-            _activeSessionUid = header.SessionUid;
-            Interlocked.Increment(ref _sessionChanges);
-        }
-
-        var key = (header.SessionUid, header.PacketId);
-        if (_lastOverallFrames.TryGetValue(key, out var previous))
-        {
-            if (header.OverallFrameIdentifier == previous)
-                Interlocked.Increment(ref _duplicateFrames);
-            else if (header.OverallFrameIdentifier < previous)
-                Interlocked.Increment(ref _outOfOrderFrames);
-        }
-        _lastOverallFrames[key] = header.OverallFrameIdentifier;
+        var observation = _sequenceTracker.Observe(header);
+        if (observation.Unsupported) Interlocked.Increment(ref _unsupportedPackets);
+        if (observation.Duplicate) Interlocked.Increment(ref _duplicateFrames);
+        if (observation.OutOfOrder) Interlocked.Increment(ref _outOfOrderFrames);
+        if (observation.SessionChanged) Interlocked.Increment(ref _sessionChanges);
     }
 
     private void UpdateLiveCar(CarTelemetrySample sample)
@@ -390,9 +380,9 @@ public sealed class UdpRecorder : IAsyncDisposable
         Interlocked.Exchange(ref _queueDepth, 0);
         Interlocked.Exchange(ref _queueHighWatermark, 0);
         Interlocked.Exchange(ref _sessionChanges, 0);
-        _activeSessionUid = 0;
         _backgroundError = null;
-        _lastOverallFrames.Clear();
+        _sequenceTracker.Reset();
+        _activeCarsBySession.Clear();
         _liveCars.Clear();
     }
 

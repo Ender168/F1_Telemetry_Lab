@@ -1,0 +1,17 @@
+{
+  "source_archive_sha256": "232445c24596579b46d1d7ff21e8aad369ef8a2b011f6abce4fd43675098888f",
+  "session_uid": 6583849157332813704,
+  "track_id": 0,
+  "track_name": "Melbourne",
+  "track_length_m": 5276,
+  "player_car_index": 21,
+  "official_flashbacks": 4,
+  "laps": [
+    { "lap": 1, "state": "Rewound", "clean": false, "rewinds": 4, "time_ms": 90000 },
+    { "lap": 2, "state": "Complete", "clean": true, "rewinds": 0, "time_ms": 84161 },
+    { "lap": 3, "state": "Complete", "clean": true, "rewinds": 0, "time_ms": 83559 }
+  ],
+  "reference": { "car_index": 8, "lap": 2, "time_ms": 81081 },
+  "expected_player_gap_ms": 2478,
+  "classification_source": "provisional_latest_lap_data"
+}

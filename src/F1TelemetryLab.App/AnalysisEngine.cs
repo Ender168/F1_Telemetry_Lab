@@ -7,7 +7,6 @@ namespace F1TelemetryLab;
 
 public static class AnalysisEngine
 {
-    private sealed record RawPacketRow(string ReceivedAt, int PacketId, byte[] Payload);
     private sealed record BestLapRow(int CarIndex, int LapNum, bool IsPlayer, uint LapTimeMs);
     private sealed record TelemetryBin(int Bin, double TimeMs, double Speed, double Throttle, double Brake, double Steer, double Gear);
 
@@ -33,25 +32,70 @@ public static class AnalysisEngine
         Directory.CreateDirectory(quality);
 
         SQLitePCL.Batteries_V2.Init();
-        using var con = new SqliteConnection($"Data Source={dbPath}");
+        var stagingDb = Path.Combine(sessionFolder, $"session.analysis.{Guid.NewGuid():N}.sqlite");
+        try
+        {
+            log?.Invoke("Creating an atomic analysis snapshot...");
+            CreateWorkingCopy(dbPath, stagingDb);
+            var result = AnalyzeWorkingCopy(
+                stagingDb,
+                sessionFolder,
+                exports,
+                playerOnly,
+                allCars,
+                comparison,
+                quality,
+                log);
+
+            ReplaceDatabaseAtomically(stagingDb, dbPath);
+            WriteAnalysisManifest(sessionFolder, result);
+            SessionManifestService.Refresh(sessionFolder, analyzedAt: DateTimeOffset.Now);
+            return result;
+        }
+        finally
+        {
+            TryDelete(stagingDb);
+            TryDelete(stagingDb + "-wal");
+            TryDelete(stagingDb + "-shm");
+        }
+    }
+
+    private static AnalysisResult AnalyzeWorkingCopy(
+        string dbPath,
+        string sessionFolder,
+        string exports,
+        string playerOnly,
+        string allCars,
+        string comparison,
+        string quality,
+        Action<string>? log)
+    {
+        using var con = new SqliteConnection($"Data Source={dbPath};Default Timeout=60");
         con.Open();
         CreateAnalysisSchema(con);
         ClearAnalysisTables(con);
+        DatabaseSchemaMigrator.Apply(con);
 
-        log?.Invoke("Reading raw UDP packets...");
-        var packets = LoadRawPackets(con);
-        log?.Invoke($"Raw packets for analysis: {packets.Count:N0}");
+        using var readCon = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly;Cache=Private;Default Timeout=60");
+        readCon.Open();
+        var rawPacketCount = CountRawPackets(readCon);
+        var activeCars = LoadActiveCarCounts(readCon);
+        log?.Invoke($"Streaming {rawPacketCount:N0} raw packets...");
 
-        var laps = new List<LapDataSample>(capacity: 500_000);
-        var stats = ProcessRawPackets(con, packets, laps, log);
+        var laps = new List<LapDataSample>(capacity: Math.Min(500_000, Math.Max(4_096, rawPacketCount * 3)));
+        var flashbacks = new List<FlashbackSignal>();
+        var eventCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var stats = ProcessRawPackets(readCon, con, laps, flashbacks, eventCodes, activeCars, log);
+        CreateAnalysisIndexes(con);
 
         log?.Invoke("Building lap quality...");
         var trackLength = ReadMetadataInt(con, "track_length_m");
-        var qualities = LapQualityAnalyzer.Analyze(laps, trackLength, out var rewindPoints);
+        var qualities = LapQualityAnalyzer.Analyze(laps, trackLength, flashbacks, out var rewindPoints);
         InsertLapQuality(con, qualities, rewindPoints);
 
         log?.Invoke("Building analysis samples and lap summaries...");
         BuildSqlDerivedTables(con);
+        UpdateDataQuality(con, qualities, stats.FinalClassificationRows, eventCodes);
 
         ExportCsv(con, Path.Combine(quality, "lap_quality.csv"), "SELECT * FROM lap_quality ORDER BY car_idx, lap_num");
         ExportCsv(con, Path.Combine(quality, "rewind_events.csv"), "SELECT * FROM rewind_events ORDER BY received_at, car_idx");
@@ -59,31 +103,36 @@ public static class AnalysisEngine
         ExportCsv(con, Path.Combine(allCars, "lap_state_summary_all_cars.csv"), "SELECT * FROM lap_state_summary ORDER BY car_idx, lap_num");
         ExportCsv(con, Path.Combine(allCars, "final_classification.csv"), "SELECT * FROM final_classification ORDER BY position, car_idx");
         ExportCsv(con, Path.Combine(allCars, "participants_debug.csv"), "SELECT * FROM participants_debug ORDER BY received_at");
+        ExportCsv(con, Path.Combine(allCars, "car_setups.csv"), "SELECT * FROM car_setups ORDER BY session_uid, car_idx, overall_frame_identifier, received_at");
         ExportCsv(con, Path.Combine(playerOnly, "lap_summary_player.csv"), "SELECT * FROM lap_summary WHERE is_player = 1 ORDER BY lap_num");
         ExportCsv(con, Path.Combine(comparison, "analysis_trace_10m.csv"), "SELECT * FROM analysis_trace_10m ORDER BY car_idx, lap_num, distance_bin_m");
         ExportBestLaps(con, Path.Combine(comparison, "best_laps_by_car.csv"));
         ExportPlayerVsFastest(con, Path.Combine(comparison, "player_vs_fastest_basic.csv"));
 
+        using (var checkpoint = con.CreateCommand())
+        {
+            checkpoint.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+            checkpoint.ExecuteNonQuery();
+        }
+
         var cleanCount = qualities.Count(x => x.CleanLap);
         var dirtyCount = qualities.Count(x => !x.CleanLap);
-        var result = new AnalysisResult(
+        return new AnalysisResult(
             sessionFolder,
             exports,
-            packets.Count,
+            rawPacketCount,
             stats.TelemetryRows,
             stats.LapRows,
             stats.MotionRows,
             stats.StatusRows,
             stats.DamageRows,
+            stats.SetupRows,
             stats.EventsRows,
             stats.ParticipantsRows,
             stats.FinalClassificationRows,
             cleanCount,
             dirtyCount,
-            $"Processed {packets.Count:N0} packets. Clean laps: {cleanCount}, dirty laps: {dirtyCount}. Exports: {exports}");
-
-        WriteAnalysisManifest(sessionFolder, result);
-        return result;
+            $"Processed {rawPacketCount:N0} packets. Clean laps: {cleanCount}, dirty laps: {dirtyCount}. Exports: {exports}");
     }
 
     private static void CreateAnalysisSchema(SqliteConnection con)
@@ -95,6 +144,7 @@ public static class AnalysisEngine
         DROP TABLE IF EXISTS motion_data;
         DROP TABLE IF EXISTS car_status;
         DROP TABLE IF EXISTS car_damage;
+        DROP TABLE IF EXISTS car_setups;
         DROP TABLE IF EXISTS events;
         DROP TABLE IF EXISTS participants;
         DROP TABLE IF EXISTS participants_debug;
@@ -131,6 +181,16 @@ public static class AnalysisEngine
             tyre_wear_rl REAL, tyre_wear_rr REAL, tyre_wear_fl REAL, tyre_wear_fr REAL, tyre_wear_avg REAL,
             tyre_damage_rl INTEGER, tyre_damage_rr INTEGER, tyre_damage_fl INTEGER, tyre_damage_fr INTEGER,
             front_left_wing_damage INTEGER, front_right_wing_damage INTEGER, rear_wing_damage INTEGER, floor_damage INTEGER, diffuser_damage INTEGER, sidepod_damage INTEGER
+        );
+        CREATE TABLE car_setups(
+            received_at TEXT, session_uid TEXT, session_time REAL, frame_identifier INTEGER, overall_frame_identifier INTEGER,
+            player_car_index INTEGER, car_idx INTEGER, is_player INTEGER,
+            front_wing INTEGER, rear_wing INTEGER, on_throttle INTEGER, off_throttle INTEGER,
+            front_camber REAL, rear_camber REAL, front_toe REAL, rear_toe REAL,
+            front_suspension INTEGER, rear_suspension INTEGER, front_anti_roll_bar INTEGER, rear_anti_roll_bar INTEGER,
+            front_ride_height INTEGER, rear_ride_height INTEGER, brake_pressure INTEGER, brake_bias INTEGER, engine_braking INTEGER,
+            rear_left_tyre_pressure REAL, rear_right_tyre_pressure REAL, front_left_tyre_pressure REAL, front_right_tyre_pressure REAL,
+            ballast INTEGER, fuel_load REAL, next_front_wing_value REAL
         );
         CREATE TABLE events(
             received_at TEXT, session_uid TEXT, session_time REAL, frame_identifier INTEGER, overall_frame_identifier INTEGER, player_car_index INTEGER,
@@ -181,6 +241,7 @@ public static class AnalysisEngine
         DELETE FROM motion_data;
         DELETE FROM car_status;
         DELETE FROM car_damage;
+        DELETE FROM car_setups;
         DELETE FROM events;
         DELETE FROM participants;
         DELETE FROM participants_debug;
@@ -196,62 +257,125 @@ public static class AnalysisEngine
         cmd.ExecuteNonQuery();
     }
 
-    private static List<RawPacketRow> LoadRawPackets(SqliteConnection con)
+    private static void CreateAnalysisIndexes(SqliteConnection connection)
     {
-        var rows = new List<RawPacketRow>();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            CREATE INDEX IF NOT EXISTS idx_lap_data_session_car_lap_frame
+                ON lap_data(session_uid, car_idx, lap_num, overall_frame_identifier);
+            CREATE INDEX IF NOT EXISTS idx_motion_data_session_car_frame
+                ON motion_data(session_uid, car_idx, overall_frame_identifier);
+            CREATE INDEX IF NOT EXISTS idx_car_status_session_car_frame
+                ON car_status(session_uid, car_idx, overall_frame_identifier);
+            CREATE INDEX IF NOT EXISTS idx_car_damage_session_car_frame
+                ON car_damage(session_uid, car_idx, overall_frame_identifier);
+            CREATE INDEX IF NOT EXISTS idx_car_setups_session_car_frame
+                ON car_setups(session_uid, car_idx, overall_frame_identifier);
+            CREATE INDEX IF NOT EXISTS idx_events_session_code_frame
+                ON events(session_uid, event_code, overall_frame_identifier);
+            CREATE INDEX IF NOT EXISTS idx_participants_session_car_frame
+                ON participants(session_uid, car_idx, overall_frame_identifier);
+            """;
+        command.ExecuteNonQuery();
+    }
+
+    private static int CountRawPackets(SqliteConnection con)
+    {
         using var cmd = con.CreateCommand();
         cmd.CommandText = """
-            SELECT received_at, packet_id, payload
+            SELECT COUNT(*)
             FROM raw_packets
-            WHERE packet_format = 2026 AND packet_id IN (0,2,3,4,6,7,8,10)
+            WHERE packet_format = 2026 AND packet_id IN (0,2,3,4,5,6,7,8,10)
+            """;
+        return Convert.ToInt32(cmd.ExecuteScalar(), CultureInfo.InvariantCulture);
+    }
+
+    private static Dictionary<ulong, int> LoadActiveCarCounts(SqliteConnection con)
+    {
+        var result = new Dictionary<ulong, int>();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = """
+            SELECT payload
+            FROM raw_packets
+            WHERE packet_format = 2026 AND packet_id = 4
             ORDER BY id
             """;
         using var reader = cmd.ExecuteReader();
         while (reader.Read())
         {
-            rows.Add(new RawPacketRow(reader.GetString(0), reader.GetInt32(1), (byte[])reader[2]));
+            var payload = (byte[])reader[0];
+            if (!F12026Parser.TryParseHeader(payload, out var header)) continue;
+            var debug = F12026Parser.ParseParticipantsDebug(payload, DateTimeOffset.UnixEpoch);
+            if (debug is not { NumActiveCars: > 0 }) continue;
+            result[header.SessionUid] = Math.Clamp(debug.NumActiveCars, 1, F12026Parser.MaxCars2026);
         }
-        return rows;
+        return result;
     }
 
-    private sealed record ParseStats(int TelemetryRows, int LapRows, int MotionRows, int StatusRows, int DamageRows, int EventsRows, int ParticipantsRows, int FinalClassificationRows);
+    private sealed record ParseStats(int TelemetryRows, int LapRows, int MotionRows, int StatusRows, int DamageRows, int SetupRows, int EventsRows, int ParticipantsRows, int FinalClassificationRows);
 
-    private static ParseStats ProcessRawPackets(SqliteConnection con, List<RawPacketRow> packets, List<LapDataSample> laps, Action<string>? log)
+    private static ParseStats ProcessRawPackets(
+        SqliteConnection readCon,
+        SqliteConnection writeCon,
+        List<LapDataSample> laps,
+        List<FlashbackSignal> flashbacks,
+        HashSet<string> eventCodes,
+        IReadOnlyDictionary<ulong, int> activeCarsBySession,
+        Action<string>? log)
     {
         var telemetryRows = 0;
         var lapRows = 0;
         var motionRows = 0;
         var statusRows = 0;
         var damageRows = 0;
+        var setupRows = 0;
         var eventRows = 0;
         var participantRows = 0;
         var finalRows = 0;
 
-        using var tx = con.BeginTransaction();
-        using var telemetryCmd = PrepareTelemetryInsert(con, tx);
-        using var lapCmd = PrepareLapInsert(con, tx);
-        using var motionCmd = PrepareMotionInsert(con, tx);
-        using var statusCmd = PrepareStatusInsert(con, tx);
-        using var damageCmd = PrepareDamageInsert(con, tx);
-        using var eventCmd = PrepareEventInsert(con, tx);
-        using var partCmd = PrepareParticipantInsert(con, tx);
-        using var partDebugCmd = PrepareParticipantDebugInsert(con, tx);
-        using var finalCmd = PrepareFinalClassificationInsert(con, tx);
+        using var tx = writeCon.BeginTransaction();
+        using var telemetryCmd = PrepareTelemetryInsert(writeCon, tx);
+        using var lapCmd = PrepareLapInsert(writeCon, tx);
+        using var motionCmd = PrepareMotionInsert(writeCon, tx);
+        using var statusCmd = PrepareStatusInsert(writeCon, tx);
+        using var damageCmd = PrepareDamageInsert(writeCon, tx);
+        using var setupCmd = PrepareSetupInsert(writeCon, tx);
+        using var eventCmd = PrepareEventInsert(writeCon, tx);
+        using var partCmd = PrepareParticipantInsert(writeCon, tx);
+        using var partDebugCmd = PrepareParticipantDebugInsert(writeCon, tx);
+        using var finalCmd = PrepareFinalClassificationInsert(writeCon, tx);
+        var previousSetups = new Dictionary<(ulong SessionUid, int CarIndex), CarSetupSample>();
 
-        foreach (var row in packets)
+        using var raw = readCon.CreateCommand();
+        raw.CommandText = """
+            SELECT received_at, packet_id, payload
+            FROM raw_packets
+            WHERE packet_format = 2026 AND packet_id IN (0,2,3,4,5,6,7,8,10)
+            ORDER BY id
+            """;
+        using var reader = raw.ExecuteReader();
+        var packetNumber = 0;
+        while (reader.Read())
         {
-            var receivedAt = ParseDate(row.ReceivedAt);
-            switch (row.PacketId)
+            packetNumber++;
+            var receivedAt = ParseDate(reader.GetString(0));
+            var packetId = reader.GetInt32(1);
+            var payload = (byte[])reader[2];
+            int? activeCars = null;
+            if (F12026Parser.TryParseHeader(payload, out var header) && activeCarsBySession.TryGetValue(header.SessionUid, out var count))
+                activeCars = count;
+
+            switch (packetId)
             {
                 case 6:
-                    foreach (var s in F12026Parser.ParseCarTelemetryPacket(row.Payload, receivedAt))
+                    foreach (var s in F12026Parser.ParseCarTelemetryPacket(payload, receivedAt, activeCars))
                     {
                         InsertTelemetry(telemetryCmd, s);
                         telemetryRows++;
                     }
                     break;
                 case 2:
-                    foreach (var s in F12026Parser.ParseLapDataPacket(row.Payload, receivedAt))
+                    foreach (var s in F12026Parser.ParseLapDataPacket(payload, receivedAt, activeCars))
                     {
                         InsertLap(lapCmd, s);
                         laps.Add(s);
@@ -259,56 +383,98 @@ public static class AnalysisEngine
                     }
                     break;
                 case 0:
-                    foreach (var s in F12026Parser.ParseMotionPacket(row.Payload, receivedAt))
+                    foreach (var s in F12026Parser.ParseMotionPacket(payload, receivedAt, activeCars))
                     {
                         InsertMotion(motionCmd, s);
                         motionRows++;
                     }
                     break;
                 case 7:
-                    foreach (var s in F12026Parser.ParseCarStatusPacket(row.Payload, receivedAt))
+                    foreach (var s in F12026Parser.ParseCarStatusPacket(payload, receivedAt, activeCars))
                     {
                         InsertStatus(statusCmd, s);
                         statusRows++;
                     }
                     break;
                 case 10:
-                    foreach (var s in F12026Parser.ParseCarDamagePacket(row.Payload, receivedAt))
+                    foreach (var s in F12026Parser.ParseCarDamagePacket(payload, receivedAt, activeCars))
                     {
                         InsertDamage(damageCmd, s);
                         damageRows++;
                     }
                     break;
+                case 5:
+                    foreach (var s in F12026Parser.ParseCarSetupPacket(payload, receivedAt, activeCars))
+                    {
+                        var key = (s.SessionUid, s.CarIndex);
+                        if (previousSetups.TryGetValue(key, out var previous) && SameSetup(previous, s)) continue;
+                        InsertSetup(setupCmd, s);
+                        previousSetups[key] = s;
+                        setupRows++;
+                    }
+                    break;
                 case 3:
-                    var ev = F12026Parser.ParseEventPacket(row.Payload, receivedAt);
+                    var ev = F12026Parser.ParseEventPacket(payload, receivedAt);
                     if (ev is not null)
                     {
                         InsertEvent(eventCmd, ev);
+                        eventCodes.Add(ev.EventCode);
+                        if (TryCreateFlashbackSignal(ev, out var signal)) flashbacks.Add(signal);
                         eventRows++;
                     }
                     break;
                 case 4:
-                    var dbg = F12026Parser.ParseParticipantsDebug(row.Payload, receivedAt);
+                    var dbg = F12026Parser.ParseParticipantsDebug(payload, receivedAt);
                     if (dbg is not null) InsertParticipantDebug(partDebugCmd, dbg);
-                    foreach (var p in F12026Parser.ParseParticipantsPacket(row.Payload, receivedAt))
+                    foreach (var p in F12026Parser.ParseParticipantsPacket(payload, receivedAt))
                     {
                         InsertParticipant(partCmd, p);
                         participantRows++;
                     }
                     break;
                 case 8:
-                    foreach (var s in F12026Parser.ParseFinalClassificationPacket(row.Payload, receivedAt))
+                    foreach (var s in F12026Parser.ParseFinalClassificationPacket(payload, receivedAt))
                     {
                         InsertFinalClassification(finalCmd, s);
                         finalRows++;
                     }
                     break;
             }
+
+            if (packetNumber % 10_000 == 0) log?.Invoke($"Parsed {packetNumber:N0} raw packets...");
         }
 
         tx.Commit();
-        log?.Invoke($"Parsed rows: telemetry {telemetryRows:N0}, lap {lapRows:N0}, motion {motionRows:N0}, status {statusRows:N0}, damage {damageRows:N0}, events {eventRows:N0}, participants {participantRows:N0}, final {finalRows:N0}");
-        return new ParseStats(telemetryRows, lapRows, motionRows, statusRows, damageRows, eventRows, participantRows, finalRows);
+        log?.Invoke($"Parsed rows: telemetry {telemetryRows:N0}, lap {lapRows:N0}, motion {motionRows:N0}, status {statusRows:N0}, damage {damageRows:N0}, setup changes {setupRows:N0}, events {eventRows:N0}, participants {participantRows:N0}, final {finalRows:N0}");
+        return new ParseStats(telemetryRows, lapRows, motionRows, statusRows, damageRows, setupRows, eventRows, participantRows, finalRows);
+    }
+
+    private static bool TryCreateFlashbackSignal(EventSample sample, out FlashbackSignal signal)
+    {
+        signal = default!;
+        if (!sample.EventCode.Equals("FLBK", StringComparison.OrdinalIgnoreCase)) return false;
+        try
+        {
+            using var json = JsonDocument.Parse(sample.DetailsJson);
+            if (!json.RootElement.TryGetProperty("flashback_frame_identifier", out var frameNode)) return false;
+            if (!json.RootElement.TryGetProperty("flashback_session_time", out var timeNode)) return false;
+            signal = new FlashbackSignal(
+                sample.SessionUid,
+                sample.ReceivedAt,
+                sample.SessionTime,
+                sample.OverallFrameIdentifier,
+                frameNode.GetUInt32(),
+                timeNode.GetSingle());
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
     }
 
     private static void InsertLapQuality(SqliteConnection con, IReadOnlyList<LapQualityResult> qualities, IReadOnlyList<RewindEventResult> rewindPoints)
@@ -491,6 +657,98 @@ public static class AnalysisEngine
         }
     }
 
+    private static void CreateWorkingCopy(string sourcePath, string destinationPath)
+    {
+        TryDelete(destinationPath);
+        using var source = new SqliteConnection($"Data Source={sourcePath};Mode=ReadOnly;Cache=Private;Default Timeout=60");
+        using var destination = new SqliteConnection($"Data Source={destinationPath};Mode=ReadWriteCreate;Cache=Private;Default Timeout=60");
+        source.Open();
+        destination.Open();
+        source.BackupDatabase(destination);
+    }
+
+    private static void ReplaceDatabaseAtomically(string stagingPath, string destinationPath)
+    {
+        SqliteConnection.ClearAllPools();
+        TryDelete(destinationPath + "-wal");
+        TryDelete(destinationPath + "-shm");
+        var backupPath = destinationPath + ".pre-analysis.bak";
+        TryDelete(backupPath);
+        File.Replace(stagingPath, destinationPath, backupPath, ignoreMetadataErrors: true);
+        TryDelete(backupPath);
+    }
+
+    private static void UpdateDataQuality(
+        SqliteConnection connection,
+        IReadOnlyList<LapQualityResult> qualities,
+        int finalClassificationRows,
+        IReadOnlySet<string> eventCodes)
+    {
+        var captureRating = "Not recorded";
+        using (var capture = connection.CreateCommand())
+        {
+            capture.CommandText = "SELECT rating FROM recording_quality WHERE id=1";
+            captureRating = Convert.ToString(capture.ExecuteScalar(), CultureInfo.InvariantCulture) ?? captureRating;
+        }
+
+        var playerLaps = qualities.Where(x => x.IsPlayer).ToList();
+        var completePlayerLaps = playerLaps.Count(x => x.LapTimeMs > 0);
+        var cleanPlayerLaps = playerLaps.Count(x => x.CleanLap);
+        var terminalEvent = eventCodes.Overlaps(new[] { "SEND", "CHQF", "RCWN" });
+        var completenessRating = finalClassificationRows > 0
+            ? "Complete"
+            : terminalEvent
+                ? "Provisional"
+                : "Partial";
+        var completenessSummary = finalClassificationRows > 0
+            ? $"Official UDP classification contains {finalClassificationRows:N0} rows."
+            : terminalEvent
+                ? "A terminal event was recorded, but packet 8 is absent; classification is derived from the latest lap data."
+                : "No official classification or terminal event was recorded.";
+
+        var confidenceRating = completePlayerLaps == 0
+            ? "Low"
+            : playerLaps.Any(x => x.State is LapState.PartialStart or LapState.PartialEnd)
+                ? "Medium"
+                : "High";
+        var confidenceSummary = $"Player laps with confirmed time: {completePlayerLaps}/{playerLaps.Count}; clean: {cleanPlayerLaps}. " +
+                                $"Official flashbacks are applied before heuristic fallback.";
+
+        UpsertQualityDimension(connection, "capture", captureRating, "Transport and write-path health from the recorder.");
+        UpsertQualityDimension(connection, "session_completeness", completenessRating, completenessSummary);
+        UpsertQualityDimension(connection, "analysis_confidence", confidenceRating, confidenceSummary);
+    }
+
+    private static void UpsertQualityDimension(SqliteConnection connection, string dimension, string rating, string summary)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO data_quality(dimension, rating, summary, updated_at)
+            VALUES ($dimension, $rating, $summary, $updated)
+            ON CONFLICT(dimension) DO UPDATE SET
+                rating=excluded.rating,
+                summary=excluded.summary,
+                updated_at=excluded.updated_at
+            """;
+        command.Parameters.AddWithValue("$dimension", dimension);
+        command.Parameters.AddWithValue("$rating", rating);
+        command.Parameters.AddWithValue("$summary", summary);
+        command.Parameters.AddWithValue("$updated", DateTimeOffset.Now.ToString("O"));
+        command.ExecuteNonQuery();
+    }
+
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+        catch
+        {
+            // Cleanup failure must not hide the original analysis result or exception.
+        }
+    }
+
     private static string Escape(string value)
     {
         if (value.Contains('"') || value.Contains(',') || value.Contains('\n') || value.Contains('\r'))
@@ -513,6 +771,7 @@ public static class AnalysisEngine
             motion_rows = result.MotionRows,
             status_rows = result.StatusRows,
             damage_rows = result.DamageRows,
+            setup_change_rows = result.SetupRows,
             events_rows = result.EventsRows,
             participants_rows = result.ParticipantsRows,
             final_classification_rows = result.FinalClassificationRows,
@@ -594,6 +853,40 @@ public static class AnalysisEngine
     {
         Set(c, "$received", s.ReceivedAt.ToString("O")); Set(c, "$uid", s.SessionUid.ToString()); Set(c, "$session", s.SessionTime); Set(c, "$frame", s.FrameIdentifier); Set(c, "$overall", s.OverallFrameIdentifier); Set(c, "$player", s.PlayerCarIndex); Set(c, "$car", s.CarIndex); Set(c, "$me", s.IsPlayer ? 1 : 0); Set(c, "$wrl", s.TyreWearRl); Set(c, "$wrr", s.TyreWearRr); Set(c, "$wfl", s.TyreWearFl); Set(c, "$wfr", s.TyreWearFr); Set(c, "$wavg", s.TyreWearAvg); Set(c, "$drl", s.TyreDamageRl); Set(c, "$drr", s.TyreDamageRr); Set(c, "$dfl", s.TyreDamageFl); Set(c, "$dfr", s.TyreDamageFr); Set(c, "$flwing", s.FrontLeftWingDamage); Set(c, "$frwing", s.FrontRightWingDamage); Set(c, "$rear", s.RearWingDamage); Set(c, "$floor", s.FloorDamage); Set(c, "$diff", s.DiffuserDamage); Set(c, "$side", s.SidepodDamage); c.ExecuteNonQuery();
     }
+
+    private static SqliteCommand PrepareSetupInsert(SqliteConnection con, SqliteTransaction tx)
+    {
+        var cmd = con.CreateCommand(); cmd.Transaction = tx;
+        cmd.CommandText = "INSERT INTO car_setups VALUES ($received,$uid,$session,$frame,$overall,$player,$car,$me,$fw,$rw,$on,$off,$fc,$rc,$ft,$rt,$fs,$rs,$farb,$rarb,$frh,$rrh,$bp,$bb,$eb,$rlp,$rrp,$flp,$frp,$ballast,$fuel,$nextWing)";
+        AddParams(cmd, "$received", "$uid", "$session", "$frame", "$overall", "$player", "$car", "$me", "$fw", "$rw", "$on", "$off", "$fc", "$rc", "$ft", "$rt", "$fs", "$rs", "$farb", "$rarb", "$frh", "$rrh", "$bp", "$bb", "$eb", "$rlp", "$rrp", "$flp", "$frp", "$ballast", "$fuel", "$nextWing");
+        return cmd;
+    }
+
+    private static void InsertSetup(SqliteCommand c, CarSetupSample s)
+    {
+        Set(c, "$received", s.ReceivedAt.ToString("O")); Set(c, "$uid", s.SessionUid.ToString()); Set(c, "$session", s.SessionTime);
+        Set(c, "$frame", s.FrameIdentifier); Set(c, "$overall", s.OverallFrameIdentifier); Set(c, "$player", s.PlayerCarIndex);
+        Set(c, "$car", s.CarIndex); Set(c, "$me", s.IsPlayer ? 1 : 0); Set(c, "$fw", s.FrontWing); Set(c, "$rw", s.RearWing);
+        Set(c, "$on", s.OnThrottle); Set(c, "$off", s.OffThrottle); Set(c, "$fc", s.FrontCamber); Set(c, "$rc", s.RearCamber);
+        Set(c, "$ft", s.FrontToe); Set(c, "$rt", s.RearToe); Set(c, "$fs", s.FrontSuspension); Set(c, "$rs", s.RearSuspension);
+        Set(c, "$farb", s.FrontAntiRollBar); Set(c, "$rarb", s.RearAntiRollBar); Set(c, "$frh", s.FrontRideHeight); Set(c, "$rrh", s.RearRideHeight);
+        Set(c, "$bp", s.BrakePressure); Set(c, "$bb", s.BrakeBias); Set(c, "$eb", s.EngineBraking); Set(c, "$rlp", s.RearLeftTyrePressure);
+        Set(c, "$rrp", s.RearRightTyrePressure); Set(c, "$flp", s.FrontLeftTyrePressure); Set(c, "$frp", s.FrontRightTyrePressure);
+        Set(c, "$ballast", s.Ballast); Set(c, "$fuel", s.FuelLoad); Set(c, "$nextWing", s.NextFrontWingValue); c.ExecuteNonQuery();
+    }
+
+    private static bool SameSetup(CarSetupSample left, CarSetupSample right) =>
+        left.FrontWing == right.FrontWing && left.RearWing == right.RearWing &&
+        left.OnThrottle == right.OnThrottle && left.OffThrottle == right.OffThrottle &&
+        left.FrontCamber.Equals(right.FrontCamber) && left.RearCamber.Equals(right.RearCamber) &&
+        left.FrontToe.Equals(right.FrontToe) && left.RearToe.Equals(right.RearToe) &&
+        left.FrontSuspension == right.FrontSuspension && left.RearSuspension == right.RearSuspension &&
+        left.FrontAntiRollBar == right.FrontAntiRollBar && left.RearAntiRollBar == right.RearAntiRollBar &&
+        left.FrontRideHeight == right.FrontRideHeight && left.RearRideHeight == right.RearRideHeight &&
+        left.BrakePressure == right.BrakePressure && left.BrakeBias == right.BrakeBias && left.EngineBraking == right.EngineBraking &&
+        left.RearLeftTyrePressure.Equals(right.RearLeftTyrePressure) && left.RearRightTyrePressure.Equals(right.RearRightTyrePressure) &&
+        left.FrontLeftTyrePressure.Equals(right.FrontLeftTyrePressure) && left.FrontRightTyrePressure.Equals(right.FrontRightTyrePressure) &&
+        left.Ballast == right.Ballast && left.FuelLoad.Equals(right.FuelLoad) && Nullable.Equals(left.NextFrontWingValue, right.NextFrontWingValue);
 
     private static SqliteCommand PrepareEventInsert(SqliteConnection con, SqliteTransaction tx)
     {
