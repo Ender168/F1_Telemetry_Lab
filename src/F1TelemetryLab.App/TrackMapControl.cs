@@ -37,7 +37,7 @@ public sealed class TrackMapControl : Control
         var dimBrush = new SolidColorBrush(Color.FromRgb(150, 160, 170));
         if (_data?.Profile is null || _data.Profile.Points.Count < 2)
         {
-            DrawText(context, "Track map data not loaded. Положи Tracks.zip contents в data\\tracks и выбери сессию.", 16, textBrush, new Point(24, 24));
+            DrawText(context, "Track map data not loaded. Analyze and select a recorded session.", 16, textBrush, new Point(24, 24));
             return;
         }
 

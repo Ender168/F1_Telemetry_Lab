@@ -32,6 +32,7 @@ public sealed class MainWindow : Window
     private TextBlock _packetsText = null!;
     private TextBlock _samplesText = null!;
     private TextBlock _sessionText = null!;
+    private TextBlock _qualityText = null!;
     private TextBox _portText = null!;
     private TextBox _rootText = null!;
     private CheckBox _autoZipCheck = null!;
@@ -78,10 +79,12 @@ public sealed class MainWindow : Window
     private bool _updatingTrackZoneSelection;
     private TrackMapRenderData? _lastTrackMapData;
     private bool _busy;
+    private bool _closingAfterStop;
+    private bool _closeStopInProgress;
 
     public MainWindow()
     {
-        Title = "F1 Telemetry Lab - C# MVP v0.5.3";
+        Title = $"{AppInfo.Name} v{AppInfo.Version}";
         Width = 1440;
         Height = 860;
         MinWidth = 1150;
@@ -98,6 +101,7 @@ public sealed class MainWindow : Window
         _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
         _timer.Tick += (_, _) => UpdateLiveUi();
         _timer.Start();
+        Closing += OnWindowClosing;
     }
 
 
@@ -240,17 +244,19 @@ public sealed class MainWindow : Window
     {
         var grid = new Grid
         {
-            ColumnDefinitions = new ColumnDefinitions("*,*,*,*"),
+            ColumnDefinitions = new ColumnDefinitions("*,*,*,*,*"),
             Margin = new Thickness(0, 0, 0, 8)
         };
         _statusText = Card("Status", "Idle");
         _packetsText = Card("Packets", "0");
         _samplesText = Card("Car samples", "0");
         _sessionText = Card("Session", "None");
+        _qualityText = Card("Data quality", "Good");
         AddCard(grid, _statusText, 0);
         AddCard(grid, _packetsText, 1);
         AddCard(grid, _samplesText, 2);
         AddCard(grid, _sessionText, 3);
+        AddCard(grid, _qualityText, 4);
         return grid;
     }
 
@@ -358,7 +364,7 @@ public sealed class MainWindow : Window
         details.Children.Add(classificationList);
         details.Children.Add(new TextBlock
         {
-            Text = "v0.5.3: Race Report summary, Driver Compare, charts, Stint Report and Pit Report.",
+            Text = $"v{AppInfo.Version}: Race Report summary, Driver Compare, charts, Stint Report and Pit Report.",
             Foreground = Brushes.LightGray,
             TextWrapping = TextWrapping.Wrap
         });
@@ -1369,14 +1375,46 @@ public sealed class MainWindow : Window
 
     private void UpdateLiveUi()
     {
+        var quality = _recorder.Quality;
         _statusText.Text = _recorder.Status;
         _packetsText.Text = _recorder.PacketsSeen.ToString("N0");
         _samplesText.Text = _recorder.CarSamplesSeen.ToString("N0");
         _sessionText.Text = _recorder.CurrentSession?.TrackName ?? "None";
+        _qualityText.Text = $"{quality.Rating}\nDrops {quality.QueueDrops:N0} | Queue {quality.QueueDepth:N0}/{quality.QueueHighWatermark:N0}";
 
         _liveRows.Clear();
         foreach (var row in _recorder.LiveCars)
             _liveRows.Add(row.Display);
+    }
+
+    private async void OnWindowClosing(object? sender, WindowClosingEventArgs e)
+    {
+        if (_closingAfterStop || !_recorder.IsRecording)
+        {
+            _timer.Stop();
+            return;
+        }
+
+        e.Cancel = true;
+        if (_closeStopInProgress) return;
+        _closeStopInProgress = true;
+        _startButton.IsEnabled = false;
+        _stopButton.IsEnabled = false;
+        AddLog("Window close requested. Finishing the active recording safely...");
+        try
+        {
+            await _recorder.StopAsync(_autoZipCheck.IsChecked == true);
+            _closingAfterStop = true;
+            _timer.Stop();
+            Close();
+        }
+        catch (Exception ex)
+        {
+            AddLog("Safe close failed: " + ex.Message);
+            _closeStopInProgress = false;
+            _startButton.IsEnabled = !_recorder.IsRecording;
+            _stopButton.IsEnabled = _recorder.IsRecording;
+        }
     }
 
     private void AddLog(string message)
@@ -1427,8 +1465,10 @@ public sealed class MainWindow : Window
             ? Directory.GetFiles(folder, "*.zip").OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault()
             : null;
         var preferred = ReadPreferredSessionName(folder) ?? name;
+        var quality = RecordingQualityService.Load(folder);
         _selectedSessionText.Text =
-            $"Session: {preferred}\nPhysical folder: {folder}\nSQLite: {Path.Combine(folder, "session.sqlite")}\nZip: {(zip is not null ? zip : "not created")}\n\nManifest:\n" +
+            $"Session: {preferred}\nPhysical folder: {folder}\nSQLite: {Path.Combine(folder, "session.sqlite")}\nZip: {(zip is not null ? zip : "not created")}\n" +
+            $"Data quality: {quality?.Summary ?? "not recorded by this version"}\n\nManifest:\n" +
             (File.Exists(manifest) ? File.ReadAllText(manifest) : "manifest.json not found");
         LoadFinalClassification(folder);
         LoadDriverAliasEditor();

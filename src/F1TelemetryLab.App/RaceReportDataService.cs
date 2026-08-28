@@ -158,7 +158,10 @@ public static class RaceReportDataService
         using var cmd = con.CreateCommand();
         cmd.CommandText = namesCte + """
         SELECT s.car_idx, MAX(s.is_player) AS is_player, COALESCE(n.name, '') AS name, COALESCE(n.short_name, '') AS short_name,
-               MIN(CASE WHEN s.lap_time_ms > 0 THEN s.lap_time_ms END) AS best_lap_ms,
+               COALESCE(
+                   MIN(CASE WHEN s.clean_lap = 1 AND s.pit_this_lap = 0 AND s.lap_time_ms > 0 THEN s.lap_time_ms END),
+                   MIN(CASE WHEN s.pit_this_lap = 0 AND s.lap_time_ms > 0 THEN s.lap_time_ms END)
+               ) AS best_lap_ms,
                COUNT(*) AS total_laps
         FROM lap_state_summary s
         LEFT JOIN names n ON n.car_idx = s.car_idx
@@ -216,7 +219,7 @@ public static class RaceReportDataService
         var rows = new List<RaceLapReportRow>();
         while (reader.Read()) rows.Add(ReadRow(reader));
 
-        var best = rows.Where(x => x.CleanLap && x.LapTimeMs > 0).OrderBy(x => x.LapTimeMs).FirstOrDefault()
+        var best = rows.Where(x => x.CleanLap && !x.PitThisLap && x.LapTimeMs > 0).OrderBy(x => x.LapTimeMs).FirstOrDefault()
                    ?? rows.Where(x => x.LapTimeMs > 0).OrderBy(x => x.LapTimeMs).FirstOrDefault();
         foreach (var row in rows)
         {
@@ -677,6 +680,6 @@ public static class RaceReportDataService
     private static void RequireTable(SqliteConnection con, string table)
     {
         if (TableExists(con, table)) return;
-        throw new InvalidOperationException($"Table '{table}' not found. Run Analyze selected session first so v0.5.3 can build the Race Report tables.");
+        throw new InvalidOperationException($"Table '{table}' not found. Run Analyze selected session first so v{AppInfo.Version} can build the Race Report tables.");
     }
 }

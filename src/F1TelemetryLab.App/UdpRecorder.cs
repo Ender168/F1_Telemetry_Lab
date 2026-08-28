@@ -235,13 +235,14 @@ public sealed class UdpRecorder : IAsyncDisposable
 
                 Interlocked.Increment(ref _packetsSeen);
                 var queued = new QueuedPacket(now, header, result.Buffer);
+                var depth = Interlocked.Increment(ref _queueDepth);
                 if (_packetQueue is null || !_packetQueue.Writer.TryWrite(queued))
                 {
+                    Interlocked.Decrement(ref _queueDepth);
                     Interlocked.Increment(ref _queueDrops);
                     continue;
                 }
 
-                var depth = Interlocked.Increment(ref _queueDepth);
                 UpdateHighWatermark(depth);
                 if (PacketsSeen % 100 == 0) Updated?.Invoke();
             }

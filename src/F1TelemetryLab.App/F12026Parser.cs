@@ -254,10 +254,12 @@ public static class F12026Parser
                 other = data[offset + 1];
                 details["vehicle1_idx"] = vehicle;
                 details["vehicle2_idx"] = other;
+                if (offset + 3 <= data.Length) details["severity"] = data[offset + 2];
             }
-            else if (code == "FLBK")
+            else if (code == "FLBK" && offset + 8 <= data.Length)
             {
-                details["note"] = "Flashback/Rewind event";
+                details["flashback_frame_identifier"] = U32(data, offset);
+                details["flashback_session_time"] = F32(data, offset + 4);
             }
         }
         catch
@@ -275,29 +277,33 @@ public static class F12026Parser
         if (!TryParseHeader(data, out var h)) return samples;
         if (h.PacketFormat != 2026 || h.PacketId != 4) return samples;
 
-        var offset = HeaderSize + 1; // m_numActiveCars
-        if (data.Length <= offset) return samples;
-
-        // F1 25 public spec uses 22 participant entries, while some 2026 packets use 24 car slots.
-        // Career/2026 modes may expose 24 participant rows. Read by actual packet length and validate names later,
-        // instead of worshipping a magic number like a spreadsheet cult.
+        if (data.Length <= HeaderSize) return samples;
+        var activeCars = data[HeaderSize];
+        var offset = HeaderSize + 1;
         var available = Math.Max(0, (data.Length - offset) / ParticipantSize2026);
-        var count = Math.Clamp(available, 0, MaxCars2026);
+        var count = Math.Clamp(Math.Min(activeCars, available), 0, MaxCars2026);
 
         for (var i = 0; i < count; i++)
         {
             if (offset + ParticipantSize2026 > data.Length) break;
             var c = data.Slice(offset, ParticipantSize2026);
-            var driverId = c[1];
-            var name = DecodeName(c.Slice(10, 48));
-            // Do not auto-map F1 Generic by driver_id here. In the 2026 Season Pack participant layout can differ
-            // between modes and our current parser may read driver_id from the wrong byte. Wrong famous names are
-            // worse than honest generic labels; aliases/short codes are the reliable layer.
-            // In the 2026 Season Pack the ParticipantData row observed in real packets is 60 bytes.
-            // The displayed driver name starts at byte 10 and uses 48 bytes.
-            // A previous 58-byte layout read shifted bytes and turned HULKENBERG/PIASTRI/etc into F1 Generic,
-            // which is exactly the sort of tiny offset error that makes humans blame the game.
-            samples.Add(new ParticipantSample(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.OverallFrameIdentifier, i, c[0], driverId, c[3], c[5], name, c[58], c[59]));
+            var driverId = U16(c, 1);
+            var teamId = U16(c, 5);
+            var name = DecodeName(c.Slice(10, 32));
+            samples.Add(new ParticipantSample(
+                receivedAt,
+                h.SessionUid,
+                h.SessionTime,
+                h.FrameIdentifier,
+                h.OverallFrameIdentifier,
+                i,
+                c[0],
+                driverId,
+                teamId,
+                c[8],
+                name,
+                c[42],
+                c[43]));
             offset += ParticipantSize2026;
         }
         return samples;
@@ -310,18 +316,18 @@ public static class F12026Parser
         if (h.PacketFormat != 2026 || h.PacketId != 4) return null;
         var active = data.Length > HeaderSize ? data[HeaderSize] : 0;
         var payload = Math.Max(0, data.Length - HeaderSize - 1);
-        var rows58 = payload / 60;
-        var rows57 = payload / 58;
+        var rows60 = payload / 60;
+        var rows58 = payload / 58;
         var firstNames = new List<string>();
         var offset = HeaderSize + 1;
-        for (var i = 0; i < Math.Min(rows58, 8); i++)
+        for (var i = 0; i < Math.Min(rows60, 8); i++)
         {
             if (offset + 60 > data.Length) break;
-            var raw = data.Slice(offset + 10, 48);
+            var raw = data.Slice(offset + 10, 32);
             firstNames.Add(DecodeName(raw));
             offset += 60;
         }
-        return new ParticipantPacketDebug(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.OverallFrameIdentifier, data.Length, active, rows58, rows57, string.Join(" | ", firstNames));
+        return new ParticipantPacketDebug(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.OverallFrameIdentifier, data.Length, active, rows60, rows58, string.Join(" | ", firstNames));
     }
 
     public static List<FinalClassificationSample> ParseFinalClassificationPacket(ReadOnlySpan<byte> data, DateTimeOffset receivedAt)
@@ -351,12 +357,12 @@ public static class F12026Parser
                 c[3],
                 c[4],
                 c[5],
-                U32(c, 6),
-                F64(c, 10),
-                c[18],
+                U32(c, 7),
+                F64(c, 11),
                 c[19],
                 c[20],
-                c[45]));
+                c[21],
+                c[6]));
             offset += FinalClassificationSize2026;
         }
 

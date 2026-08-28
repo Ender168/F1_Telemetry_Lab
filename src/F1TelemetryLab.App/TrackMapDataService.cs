@@ -255,7 +255,7 @@ public static class TrackMapDataService
         var values = BuildValues(refTrace, cmpTrace, metric);
         var insights = BuildInsights(values, metric, profile);
         var status = profile is null
-            ? $"Track profile not found for track_id={trackId}. Put Tracks.zip contents into data\\tracks."
+            ? $"Track profile unavailable for track_id={trackId}; telemetry trace fallback is active."
             : $"{profile.TrackName}: {profile.Points.Count:N0} map points, {profile.Corners.Count:N0} labels, {BoundaryStatus(profile)}. {reference.Code} vs {compare.Code}.";
 
         return new TrackMapRenderData(
@@ -470,26 +470,36 @@ public static class TrackMapDataService
 
     private static List<TrackMapValue> BuildValues(List<TracePoint> reference, List<TracePoint> compare, string metric)
     {
-        var refByD = reference.GroupBy(x => x.DistanceM).ToDictionary(g => g.Key, g => g.Last());
-        var cmpByD = compare.GroupBy(x => x.DistanceM).ToDictionary(g => g.Key, g => g.Last());
-        var common = refByD.Keys.Intersect(cmpByD.Keys).OrderBy(x => x).ToList();
+        var referencePoints = reference
+            .GroupBy(x => x.DistanceM)
+            .Select(g => g.Last())
+            .OrderBy(x => x.DistanceM)
+            .ToList();
+        var comparePoints = compare
+            .GroupBy(x => x.DistanceM)
+            .Select(g => g.Last())
+            .OrderBy(x => x.DistanceM)
+            .ToList();
         var values = new List<TrackMapValue>();
-        double? prevDelta = null;
-        foreach (var d in common)
+        var deltas = new List<(int DistanceM, double DeltaMs)>();
+        foreach (var r in referencePoints)
         {
-            var r = refByD[d];
-            var c = cmpByD[d];
-            var delta = c.TimeMs - r.TimeMs;
+            var compareTime = DistanceSeriesInterpolator.Linear(comparePoints, r.DistanceM, p => p.DistanceM, p => p.TimeMs);
+            var compareSpeed = DistanceSeriesInterpolator.Linear(comparePoints, r.DistanceM, p => p.DistanceM, p => p.Speed);
+            if (compareTime is null) continue;
+            var delta = compareTime.Value - r.TimeMs;
             if (Math.Abs(delta) > 10000) continue;
+            var segmentBaseline = deltas.LastOrDefault(x => x.DistanceM <= r.DistanceM - 30);
+            var hasSegmentBaseline = deltas.Any(x => x.DistanceM <= r.DistanceM - 30);
             var value = metric switch
             {
                 "cumulative_delta_ms" => delta,
-                "speed_loss_kmh" => r.Speed - c.Speed,
-                _ => prevDelta is null ? 0 : delta - prevDelta.Value
+                "speed_loss_kmh" => compareSpeed is null ? double.NaN : r.Speed - compareSpeed.Value,
+                _ => hasSegmentBaseline ? delta - segmentBaseline.DeltaMs : 0
             };
-            prevDelta = delta;
+            deltas.Add((r.DistanceM, delta));
             if (!double.IsNaN(value) && !double.IsInfinity(value) && Math.Abs(value) <= 5000)
-                values.Add(new TrackMapValue(d, value));
+                values.Add(new TrackMapValue(r.DistanceM, value));
         }
         return values;
     }

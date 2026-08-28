@@ -930,7 +930,7 @@ public static class AnalysisEngine
     }
     private static void InsertParticipantDebug(SqliteCommand c, ParticipantPacketDebug s)
     {
-        Set(c, "$received", s.ReceivedAt.ToString("O")); Set(c, "$uid", s.SessionUid.ToString()); Set(c, "$session", s.SessionTime); Set(c, "$frame", s.FrameIdentifier); Set(c, "$overall", s.OverallFrameIdentifier); Set(c, "$size", s.PacketSizeBytes); Set(c, "$active", s.NumActiveCars); Set(c, "$rows58", s.RowsIf58Bytes); Set(c, "$rows57", s.RowsIf57Bytes); Set(c, "$names", s.FirstNames); c.ExecuteNonQuery();
+        Set(c, "$received", s.ReceivedAt.ToString("O")); Set(c, "$uid", s.SessionUid.ToString()); Set(c, "$session", s.SessionTime); Set(c, "$frame", s.FrameIdentifier); Set(c, "$overall", s.OverallFrameIdentifier); Set(c, "$size", s.PacketSizeBytes); Set(c, "$active", s.NumActiveCars); Set(c, "$rows58", s.RowsIf60Bytes); Set(c, "$rows57", s.RowsIf58Bytes); Set(c, "$names", s.FirstNames); c.ExecuteNonQuery();
     }
 
     private static SqliteCommand PrepareParticipantInsert(SqliteConnection con, SqliteTransaction tx)

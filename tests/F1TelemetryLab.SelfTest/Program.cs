@@ -1,16 +1,23 @@
 using System.Buffers.Binary;
+using System.Text;
 using F1TelemetryLab;
 
 var tests = new (string Name, Action Run)[]
 {
     ("header carries overall frame", HeaderCarriesOverallFrame),
     ("telemetry carries overall frame", TelemetryCarriesOverallFrame),
+    ("participant layout follows 2026 spec", ParticipantLayoutFollows2026Spec),
     ("final classification layout", FinalClassificationLayout),
     ("completed lap is authoritative", CompletedLapIsAuthoritative),
     ("partial lap cannot become fastest", PartialLapCannotBecomeFastest),
     ("flashback abandons old branch", FlashbackAbandonsOldBranch),
     ("session UIDs stay isolated", SessionUidsStayIsolated),
-    ("invalid lap is never clean", InvalidLapIsNeverClean)
+    ("invalid lap is never clean", InvalidLapIsNeverClean),
+    ("pit lap closes the old stint", PitLapClosesOldStint),
+    ("one pit stop is not duplicated", OnePitStopIsNotDuplicated),
+    ("pit lap cannot become best clean", PitLapCannotBecomeBestClean),
+    ("short telemetry gaps are interpolated", ShortTelemetryGapsAreInterpolated),
+    ("long telemetry gaps are rejected", LongTelemetryGapsAreRejected)
 };
 
 var failed = 0;
@@ -76,12 +83,12 @@ static void FinalClassificationLayout()
     row[3] = 25;
     row[4] = 2;
     row[5] = 3;
-    BinaryPrimitives.WriteUInt32LittleEndian(row[6..], 81_234);
-    WriteDouble(row, 10, 5_432.125);
-    row[18] = 5;
-    row[19] = 2;
-    row[20] = 3;
-    row[45] = 4;
+    row[6] = 4;
+    BinaryPrimitives.WriteUInt32LittleEndian(row[7..], 81_234);
+    WriteDouble(row, 11, 5_432.125);
+    row[19] = 5;
+    row[20] = 2;
+    row[21] = 3;
 
     var samples = F12026Parser.ParseFinalClassificationPacket(packet, DateTimeOffset.UnixEpoch);
     Equal(1, samples.Count, "classification row count");
@@ -91,6 +98,31 @@ static void FinalClassificationLayout()
     Equal((uint)81_234, sample.BestLapTimeMs, "best lap");
     Near(5_432.125, sample.TotalRaceTimeSeconds, 0.00001, "race time");
     Equal(4, sample.ResultReason, "result reason");
+}
+
+static void ParticipantLayoutFollows2026Spec()
+{
+    const int rowSize = 60;
+    var packet = Packet(packetId: 4, payloadSize: 1 + rowSize * 24, sessionUid: 11, frame: 20, overall: 25, player: 0);
+    packet[F12026Parser.HeaderSize] = 1;
+    var row = packet.AsSpan(F12026Parser.HeaderSize + 1, rowSize);
+    row[0] = 1;
+    BinaryPrimitives.WriteUInt16LittleEndian(row[1..], 513);
+    BinaryPrimitives.WriteUInt16LittleEndian(row[5..], 1_025);
+    row[8] = 44;
+    Encoding.UTF8.GetBytes("TEST DRIVER", row[10..42]);
+    row[42] = 1;
+    row[43] = 1;
+
+    var samples = F12026Parser.ParseParticipantsPacket(packet, DateTimeOffset.UnixEpoch);
+    Equal(1, samples.Count, "active participant count");
+    var sample = samples[0];
+    Equal(513, sample.DriverId, "16-bit driver id");
+    Equal(1_025, sample.TeamId, "16-bit team id");
+    Equal(44, sample.RaceNumber, "race number");
+    Equal("TEST DRIVER", sample.Name, "participant name");
+    Equal(1, sample.YourTelemetry, "telemetry setting");
+    Equal(1, sample.ShowOnlineNames, "online-name setting");
 }
 
 static void CompletedLapIsAuthoritative()
@@ -168,6 +200,75 @@ static void InvalidLapIsNeverClean()
     Check(!lap.CleanLap, "invalid lap marked clean");
     Equal((uint)81_000, lap.LapTimeMs, "invalid completed lap time retained");
 }
+
+static void PitLapClosesOldStint()
+{
+    var rows = new[]
+    {
+        RaceLap(lap: 1, visualCompound: 16, tyreAge: 1),
+        RaceLap(lap: 2, visualCompound: 16, tyreAge: 2, pit: true),
+        RaceLap(lap: 3, visualCompound: 17, tyreAge: 1),
+        RaceLap(lap: 4, visualCompound: 17, tyreAge: 2)
+    };
+    var stints = RaceStrategyAnalyzer.BuildStints(rows);
+    Equal(2, stints.Count, "stint count");
+    Check(stints[0].Rows.Select(x => x.LapNum).SequenceEqual(new[] { 1, 2 }), "pit lap must close old stint");
+    Check(stints[1].Rows.Select(x => x.LapNum).SequenceEqual(new[] { 3, 4 }), "out lap must start new stint");
+}
+
+static void OnePitStopIsNotDuplicated()
+{
+    var rows = new[]
+    {
+        RaceLap(lap: 1, visualCompound: 16, tyreAge: 5),
+        RaceLap(lap: 2, visualCompound: 16, tyreAge: 6, pit: true),
+        RaceLap(lap: 3, visualCompound: 17, tyreAge: 1)
+    };
+    var stops = RaceStrategyAnalyzer.DetectPitStops(rows);
+    Equal(1, stops.Count, "pit stop count");
+    Equal(2, stops[0].LapNum, "canonical pit lap");
+}
+
+static void PitLapCannotBecomeBestClean()
+{
+    var rows = new[]
+    {
+        new RaceLapReportRow { LapNum = 1, CleanLap = true, LapTimeMs = 90_000 },
+        new RaceLapReportRow { LapNum = 2, CleanLap = true, PitThisLap = true, LapTimeMs = 50_000 }
+    };
+    var summary = RaceAnalysisDataService.BuildRaceSummary(rows);
+    Check(summary.Contains("Best clean 1:30.000", StringComparison.Ordinal), "pit lap selected as best clean");
+    Check(summary.Contains("Clean laps 1/2", StringComparison.Ordinal), "pit lap counted as clean pace lap");
+}
+
+static void ShortTelemetryGapsAreInterpolated()
+{
+    var points = new[] { (Distance: 0.0, Value: 100.0), (Distance: 80.0, Value: 180.0) };
+    var value = DistanceSeriesInterpolator.Linear(points, 40, p => p.Distance, p => p.Value);
+    Check(value is not null, "short gap was rejected");
+    Near(140, value.Value, 0.0001, "interpolated value");
+}
+
+static void LongTelemetryGapsAreRejected()
+{
+    var points = new[] { (Distance: 0.0, Value: 100.0), (Distance: 120.0, Value: 220.0) };
+    var value = DistanceSeriesInterpolator.Linear(points, 60, p => p.Distance, p => p.Value);
+    Check(value is null, "long gap was interpolated");
+}
+
+static RaceLapReportRow RaceLap(int lap, int visualCompound, int tyreAge, bool pit = false) => new()
+{
+    LapNum = lap,
+    VisualCompoundStart = visualCompound,
+    VisualCompoundEnd = visualCompound,
+    ActualCompoundStart = visualCompound,
+    ActualCompoundEnd = visualCompound,
+    TyreAgeStart = tyreAge,
+    TyreAgeEnd = tyreAge,
+    PitThisLap = pit,
+    CleanLap = !pit,
+    LapTimeMs = pit ? 110_000 : 90_000
+};
 
 static LapDataSample Lap(
     ulong uid,

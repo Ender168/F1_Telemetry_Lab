@@ -94,6 +94,8 @@ public static class SessionPackager
         try
         {
             CopyTableIfExists(con, "session_metadata");
+            CopyTableIfExists(con, "session_segments");
+            CopyTableIfExists(con, "recording_quality");
             CopyTableIfExists(con, "lap_summary");
             CopyTableIfExists(con, "lap_state_summary");
             CopyTableIfExists(con, "lap_quality");

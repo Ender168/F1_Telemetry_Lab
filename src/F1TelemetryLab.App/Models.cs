@@ -151,8 +151,8 @@ public sealed record ParticipantPacketDebug(
     uint OverallFrameIdentifier,
     int PacketSizeBytes,
     int NumActiveCars,
+    int RowsIf60Bytes,
     int RowsIf58Bytes,
-    int RowsIf57Bytes,
     string FirstNames);
 
 public sealed record ParticipantSample(
