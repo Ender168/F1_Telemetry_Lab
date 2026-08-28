@@ -40,7 +40,7 @@ public sealed class MelbourneRegressionTests
         }
 
         Assert.Equal(golden.GetProperty("official_flashbacks").GetInt32(), rewindEvents.Count);
-        Assert.All(rewindEvents, x => Assert.True(x.Reason.StartsWith("official_flbk:", StringComparison.Ordinal)));
+        Assert.All(rewindEvents, x => Assert.StartsWith("official_flbk:", x.Reason, StringComparison.Ordinal));
         Assert.True(result[2].CompletionEvidence.Contains("finish_last_lap_time", StringComparison.Ordinal));
 
         var referenceMs = golden.GetProperty("reference").GetProperty("time_ms").GetInt32();
@@ -61,7 +61,7 @@ public sealed class MelbourneRegressionTests
         Assert.Equal(profile.Points[0].X, profile.Points[^1].X, 6);
         Assert.Equal(profile.Points[0].Z, profile.Points[^1].Z, 6);
 
-        var prost = Assert.Single(profile.Corners.Where(x => x.Label.Contains("Prost", StringComparison.OrdinalIgnoreCase)));
+        var prost = Assert.Single(profile.Corners, x => x.Label.Contains("Prost", StringComparison.OrdinalIgnoreCase));
         Assert.InRange(prost.DistanceM, 4_750, 4_900);
         var zoneStart = Nearest(profile.Points, 4_450);
         var zoneEnd = Nearest(profile.Points, 5_260);
