@@ -49,7 +49,6 @@ public static class AnalysisPackFeature
             return;
         }
 
-        var normalCaption = russian ? "Подготовить архив для анализа" : "Prepare analysis pack";
         button.IsEnabled = false;
         button.Content = russian ? "Подготовка архива..." : "Preparing pack...";
 
@@ -67,8 +66,6 @@ public static class AnalysisPackFeature
         {
             button.IsEnabled = true;
         }
-
-        _ = normalCaption;
     }
 
     private static bool IsAnalyzeButton(string? text) =>
