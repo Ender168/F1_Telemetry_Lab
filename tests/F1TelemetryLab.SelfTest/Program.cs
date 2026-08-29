@@ -15,7 +15,7 @@ var tests = new (string Name, Action Run)[]
     ("final classification layout", FinalClassificationLayout),
     ("completed lap is authoritative", CompletedLapIsAuthoritative),
     ("partial lap cannot become fastest", PartialLapCannotBecomeFastest),
-    ("flashback abandons old branch", FlashbackAbandonsOldBranch),
+    ("state reset abandons old branch without confirming rewind", StateResetAbandonsOldBranch),
     ("session UIDs stay isolated", SessionUidsStayIsolated),
     ("invalid lap is never clean", InvalidLapIsNeverClean),
     ("pit lap closes the old stint", PitLapClosesOldStint),
@@ -264,7 +264,7 @@ static void PartialLapCannotBecomeFastest()
     Check(!result.CleanLap, "partial lap marked clean");
 }
 
-static void FlashbackAbandonsOldBranch()
+static void StateResetAbandonsOldBranch()
 {
     var samples = new[]
     {
@@ -275,13 +275,19 @@ static void FlashbackAbandonsOldBranch()
         Lap(uid: 1, overall: 104, frame: 91, lap: 1, distance: 950, currentMs: 81_500, sessionTime: 82),
         Lap(uid: 1, overall: 105, frame: 92, lap: 2, distance: 0, currentMs: 50, lastMs: 82_000, sessionTime: 83)
     };
-    var result = LapQualityAnalyzer.Analyze(samples, 1_000, out var rewinds);
+    var result = LapQualityAnalyzer.Analyze(
+        samples,
+        1_000,
+        Array.Empty<FlashbackSignal>(),
+        out var confirmedRewinds,
+        out var suspectedStateResets);
     var lap = result.Single(x => x.LapNum == 1);
-    Equal(LapState.Rewound, lap.State, "rewound state");
-    Check(!lap.CleanLap, "rewound lap marked clean");
+    Equal(LapState.Complete, lap.State, "reset branch state");
+    Check(lap.CleanLap, "reset-only lap should remain clean");
     Equal((uint)82_000, lap.LapTimeMs, "active branch time");
     Equal((uint)103, lap.ActiveFromOverallFrame, "active branch start");
-    Check(rewinds.Count >= 1, "rewind event missing");
+    Equal(0, confirmedRewinds.Count, "unconfirmed rewind count");
+    Check(suspectedStateResets.Count >= 1, "suspected state reset missing");
 }
 
 static void SessionUidsStayIsolated()
