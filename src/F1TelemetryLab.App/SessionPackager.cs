@@ -69,14 +69,16 @@ public static class SessionPackager
             DataSource = sourceDbPath,
             Mode = SqliteOpenMode.ReadOnly,
             Cache = SqliteCacheMode.Private,
-            DefaultTimeout = 30
+            DefaultTimeout = 30,
+            Pooling = false
         };
         var targetBuilder = new SqliteConnectionStringBuilder
         {
             DataSource = targetDbPath,
             Mode = SqliteOpenMode.ReadWriteCreate,
             Cache = SqliteCacheMode.Private,
-            DefaultTimeout = 30
+            DefaultTimeout = 30,
+            Pooling = false
         };
 
         using var source = new SqliteConnection(sourceBuilder.ToString());
@@ -129,7 +131,8 @@ public static class SessionPackager
             DataSource = databasePath,
             Mode = SqliteOpenMode.ReadOnly,
             Cache = SqliteCacheMode.Private,
-            DefaultTimeout = 30
+            DefaultTimeout = 30,
+            Pooling = false
         }.ToString());
         connection.Open();
 
@@ -221,7 +224,15 @@ public static class SessionPackager
         Directory.CreateDirectory(Path.GetDirectoryName(targetDbPath)!);
         TryDelete(targetDbPath);
 
-        using var con = new SqliteConnection($"Data Source={sourceDbPath};Default Timeout=30");
+        var sourceBuilder = new SqliteConnectionStringBuilder
+        {
+            DataSource = sourceDbPath,
+            Mode = SqliteOpenMode.ReadWrite,
+            Cache = SqliteCacheMode.Private,
+            DefaultTimeout = 30,
+            Pooling = false
+        };
+        using var con = new SqliteConnection(sourceBuilder.ToString());
         con.Open();
 
         Execute(con, "PRAGMA busy_timeout = 10000;");
@@ -270,7 +281,15 @@ public static class SessionPackager
             try { Execute(con, "DETACH DATABASE out"); } catch { }
         }
 
-        using var compact = new SqliteConnection($"Data Source={targetDbPath};Default Timeout=30");
+        var compactBuilder = new SqliteConnectionStringBuilder
+        {
+            DataSource = targetDbPath,
+            Mode = SqliteOpenMode.ReadWrite,
+            Cache = SqliteCacheMode.Private,
+            DefaultTimeout = 30,
+            Pooling = false
+        };
+        using var compact = new SqliteConnection(compactBuilder.ToString());
         compact.Open();
         Execute(compact, "PRAGMA journal_mode = DELETE;");
         Execute(compact, "VACUUM;");
