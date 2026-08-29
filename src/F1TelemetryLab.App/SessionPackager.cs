@@ -223,6 +223,7 @@ public static class SessionPackager
         SQLitePCL.Batteries_V2.Init();
         Directory.CreateDirectory(Path.GetDirectoryName(targetDbPath)!);
         TryDelete(targetDbPath);
+        CreateEmptyDatabase(targetDbPath);
 
         var sourceBuilder = new SqliteConnectionStringBuilder
         {
@@ -293,6 +294,20 @@ public static class SessionPackager
         compact.Open();
         Execute(compact, "PRAGMA journal_mode = DELETE;");
         Execute(compact, "VACUUM;");
+    }
+
+    private static void CreateEmptyDatabase(string path)
+    {
+        var builder = new SqliteConnectionStringBuilder
+        {
+            DataSource = path,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Cache = SqliteCacheMode.Private,
+            DefaultTimeout = 30,
+            Pooling = false
+        };
+        using var connection = new SqliteConnection(builder.ToString());
+        connection.Open();
     }
 
     private static List<Dictionary<string, object?>> ReadRowsSafe(SqliteConnection connection, string sql)
