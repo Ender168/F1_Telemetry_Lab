@@ -39,8 +39,18 @@ public static class SessionManifestService
                 connection.Open();
                 manifest["database_user_version"] = DatabaseSchemaMigrator.ReadUserVersion(connection);
                 ApplyMetadata(connection, manifest);
-                manifest["classification_source"] = ReadClassificationSource(connection);
+                var classificationSource = ReadClassificationSource(connection);
+                manifest["classification_source"] = classificationSource;
+                manifest["classification_status"] = classificationSource switch
+                {
+                    "official_udp" => "official",
+                    "provisional_latest_lap_data" => "provisional",
+                    _ => "unavailable"
+                };
+                manifest["classification_note"] = ReadClassificationNote(connection, classificationSource);
                 manifest["car_setup_snapshots"] = CountRows(connection, "car_setups");
+                manifest["confirmed_rewinds"] = CountRows(connection, "rewind_events");
+                manifest["suspected_state_resets"] = CountRows(connection, "suspected_state_reset_events");
             }
             catch (SqliteException)
             {
@@ -99,6 +109,24 @@ public static class SessionManifestService
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT classification_source FROM final_classification LIMIT 1";
         return Convert.ToString(command.ExecuteScalar(), CultureInfo.InvariantCulture) ?? "unavailable";
+    }
+
+    private static string ReadClassificationNote(SqliteConnection connection, string source)
+    {
+        if (TableExists(connection, "final_classification") && ColumnExists(connection, "final_classification", "classification_note"))
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT classification_note FROM final_classification WHERE classification_note IS NOT NULL AND classification_note <> '' LIMIT 1";
+            var note = Convert.ToString(command.ExecuteScalar(), CultureInfo.InvariantCulture);
+            if (!string.IsNullOrWhiteSpace(note)) return note;
+        }
+
+        return source switch
+        {
+            "official_udp" => "Official final classification from UDP packet 8.",
+            "provisional_latest_lap_data" => "UDP packet 8 is absent. Positions are reconstructed from the latest Lap Data and may be incomplete.",
+            _ => "Classification has not been built or no usable classification rows were found."
+        };
     }
 
     private static long CountRows(SqliteConnection connection, string table)

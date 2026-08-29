@@ -19,9 +19,9 @@ Receiver выполняет только проверку header, packet-aware q
 
 1. `AnalysisEngine` создаёт SQLite backup исходной базы во временный файл рядом с ней.
 2. Raw packets читаются вперёд-only reader, без загрузки всех payload в память.
-3. Packet 4 задаёт active car count, поэтому неактивные слоты не разворачиваются.
+3. Packet 0/2/5/6/7/10 содержит фиксированные массивы по 24 vehicle slots. Они всегда разбираются полностью: `m_numActiveCars` является количеством, а не верхней границей индекса, и online grid может иметь разрывы.
 4. Parser строит нормализованные таблицы и индексы в staging DB.
-5. `LapQualityAnalyzer` применяет official FLBK и только затем heuristic fallback.
+5. `LapQualityAnalyzer` считает rewind подтверждённым только при official FLBK. Обратные счётчики без FLBK отделяют новую ветвь как `suspected_state_reset`, не загрязняя rewind-метрики.
 6. SQL projection строит summary/trace/classification внутри staging DB.
 7. После checkpoint успешный staging-файл атомарно заменяет `session.sqlite`.
 8. CSV, analysis manifest и session manifest обновляются из подтверждённого результата.

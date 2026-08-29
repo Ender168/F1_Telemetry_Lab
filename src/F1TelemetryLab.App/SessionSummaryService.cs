@@ -53,7 +53,7 @@ public static class SessionSummaryService
         var stopped = ParseDate(Text(root, "stopped_at"));
         var duration = started is not null && stopped is not null && stopped >= started ? stopped - started : null;
         var totalLaps = Int32(root, "total_laps");
-        var classificationSource = Text(root, "classification_source") ?? "not analyzed";
+        var classificationSource = FormatClassificationSource(Text(root, "classification_source"));
         var setupSnapshots = Int64(root, "car_setup_snapshots");
         var database = Path.Combine(folder, "session.sqlite");
         var analysisState = File.Exists(database) && HasTable(database, "lap_summary") ? "Analyzed" : "Recording only";
@@ -102,6 +102,14 @@ public static class SessionSummaryService
 
     private static long Int64(JsonElement? root, string property) =>
         long.TryParse(Text(root, property), NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) ? value : 0;
+
+    private static string FormatClassificationSource(string? source) => source switch
+    {
+        "official_udp" => "Official (UDP packet 8)",
+        "provisional_latest_lap_data" => "Provisional (packet 8 absent; latest Lap Data)",
+        "not_analyzed" or null or "" => "Not analyzed",
+        _ => source.Replace('_', ' ')
+    };
 
     private static DateTimeOffset? ParseDate(string? value) =>
         DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsed) ? parsed : null;

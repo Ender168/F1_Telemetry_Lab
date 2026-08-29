@@ -79,7 +79,7 @@ public static class AnalysisEngine
         using var readCon = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly;Cache=Private;Default Timeout=60");
         readCon.Open();
         var rawPacketCount = CountRawPackets(readCon);
-        var activeCars = LoadActiveCarCounts(readCon);
+        var activeCars = LoadMaximumCarCounts(readCon);
         log?.Invoke($"Streaming {rawPacketCount:N0} raw packets...");
 
         var laps = new List<LapDataSample>(capacity: Math.Min(500_000, Math.Max(4_096, rawPacketCount * 3)));
@@ -90,8 +90,13 @@ public static class AnalysisEngine
 
         log?.Invoke("Building lap quality...");
         var trackLength = ReadMetadataInt(con, "track_length_m");
-        var qualities = LapQualityAnalyzer.Analyze(laps, trackLength, flashbacks, out var rewindPoints);
-        InsertLapQuality(con, qualities, rewindPoints);
+        var qualities = LapQualityAnalyzer.Analyze(
+            laps,
+            trackLength,
+            flashbacks,
+            out var confirmedRewinds,
+            out var suspectedStateResets);
+        InsertLapQuality(con, qualities, confirmedRewinds, suspectedStateResets);
 
         log?.Invoke("Building analysis samples and lap summaries...");
         BuildSqlDerivedTables(con);
@@ -99,6 +104,7 @@ public static class AnalysisEngine
 
         ExportCsv(con, Path.Combine(quality, "lap_quality.csv"), "SELECT * FROM lap_quality ORDER BY car_idx, lap_num");
         ExportCsv(con, Path.Combine(quality, "rewind_events.csv"), "SELECT * FROM rewind_events ORDER BY received_at, car_idx");
+        ExportCsv(con, Path.Combine(quality, "suspected_state_reset_events.csv"), "SELECT * FROM suspected_state_reset_events ORDER BY received_at, car_idx");
         ExportCsv(con, Path.Combine(allCars, "lap_summary_all_cars.csv"), "SELECT * FROM lap_summary ORDER BY car_idx, lap_num");
         ExportCsv(con, Path.Combine(allCars, "lap_state_summary_all_cars.csv"), "SELECT * FROM lap_state_summary ORDER BY car_idx, lap_num");
         ExportCsv(con, Path.Combine(allCars, "final_classification.csv"), "SELECT * FROM final_classification ORDER BY position, car_idx");
@@ -130,6 +136,8 @@ public static class AnalysisEngine
             stats.EventsRows,
             stats.ParticipantsRows,
             stats.FinalClassificationRows,
+            confirmedRewinds.Count,
+            suspectedStateResets.Count,
             cleanCount,
             dirtyCount,
             $"Processed {rawPacketCount:N0} packets. Clean laps: {cleanCount}, dirty laps: {dirtyCount}. Exports: {exports}");
@@ -151,6 +159,7 @@ public static class AnalysisEngine
         DROP TABLE IF EXISTS final_classification_packet;
         DROP TABLE IF EXISTS lap_quality;
         DROP TABLE IF EXISTS rewind_events;
+        DROP TABLE IF EXISTS suspected_state_reset_events;
 
         CREATE TABLE car_telemetry(
             received_at TEXT, session_uid TEXT, session_time REAL, frame_identifier INTEGER, overall_frame_identifier INTEGER,
@@ -228,6 +237,10 @@ public static class AnalysisEngine
             session_uid TEXT, car_idx INTEGER, lap_num INTEGER, received_at TEXT, session_time REAL,
             overall_frame_identifier INTEGER, lap_distance REAL, current_lap_time_ms INTEGER, reason TEXT
         );
+        CREATE TABLE suspected_state_reset_events(
+            session_uid TEXT, car_idx INTEGER, lap_num INTEGER, received_at TEXT, session_time REAL,
+            overall_frame_identifier INTEGER, lap_distance REAL, current_lap_time_ms INTEGER, reason TEXT
+        );
         """;
         cmd.ExecuteNonQuery();
     }
@@ -248,6 +261,7 @@ public static class AnalysisEngine
         DELETE FROM final_classification_packet;
         DELETE FROM lap_quality;
         DELETE FROM rewind_events;
+        DELETE FROM suspected_state_reset_events;
         DROP TABLE IF EXISTS analysis_samples;
         DROP TABLE IF EXISTS analysis_trace_10m;
         DROP TABLE IF EXISTS lap_summary;
@@ -273,6 +287,8 @@ public static class AnalysisEngine
                 ON car_setups(session_uid, car_idx, overall_frame_identifier);
             CREATE INDEX IF NOT EXISTS idx_events_session_code_frame
                 ON events(session_uid, event_code, overall_frame_identifier);
+            CREATE INDEX IF NOT EXISTS idx_suspected_state_resets_session_frame
+                ON suspected_state_reset_events(session_uid, overall_frame_identifier, car_idx);
             CREATE INDEX IF NOT EXISTS idx_participants_session_car_frame
                 ON participants(session_uid, car_idx, overall_frame_identifier);
             """;
@@ -290,7 +306,7 @@ public static class AnalysisEngine
         return Convert.ToInt32(cmd.ExecuteScalar(), CultureInfo.InvariantCulture);
     }
 
-    private static Dictionary<ulong, int> LoadActiveCarCounts(SqliteConnection con)
+    private static Dictionary<ulong, int> LoadMaximumCarCounts(SqliteConnection con)
     {
         var result = new Dictionary<ulong, int>();
         using var cmd = con.CreateCommand();
@@ -307,7 +323,13 @@ public static class AnalysisEngine
             if (!F12026Parser.TryParseHeader(payload, out var header)) continue;
             var debug = F12026Parser.ParseParticipantsDebug(payload, DateTimeOffset.UnixEpoch);
             if (debug is not { NumActiveCars: > 0 }) continue;
-            result[header.SessionUid] = Math.Clamp(debug.NumActiveCars, 1, F12026Parser.MaxCars2026);
+            var observedExtent = debug.NumActiveCars;
+            if (header.PlayerCarIndex < F12026Parser.MaxCars2026)
+                observedExtent = Math.Max(observedExtent, header.PlayerCarIndex + 1);
+            if (header.SecondaryPlayerCarIndex < F12026Parser.MaxCars2026)
+                observedExtent = Math.Max(observedExtent, header.SecondaryPlayerCarIndex + 1);
+            observedExtent = Math.Clamp(observedExtent, 1, F12026Parser.MaxCars2026);
+            result[header.SessionUid] = Math.Max(result.GetValueOrDefault(header.SessionUid), observedExtent);
         }
         return result;
     }
@@ -477,7 +499,11 @@ public static class AnalysisEngine
         }
     }
 
-    private static void InsertLapQuality(SqliteConnection con, IReadOnlyList<LapQualityResult> qualities, IReadOnlyList<RewindEventResult> rewindPoints)
+    private static void InsertLapQuality(
+        SqliteConnection con,
+        IReadOnlyList<LapQualityResult> qualities,
+        IReadOnlyList<RewindEventResult> confirmedRewinds,
+        IReadOnlyList<SuspectedStateResetResult> suspectedStateResets)
     {
         using var tx = con.BeginTransaction();
         using var q = con.CreateCommand();
@@ -510,7 +536,7 @@ public static class AnalysisEngine
         r.Transaction = tx;
         r.CommandText = "INSERT INTO rewind_events VALUES ($uid,$car,$lap,$received,$session,$overall,$distance,$lapTime,$reason)";
         foreach (var name in new[] { "$uid", "$car", "$lap", "$received", "$session", "$overall", "$distance", "$lapTime", "$reason" }) r.Parameters.AddWithValue(name, 0);
-        foreach (var row in rewindPoints)
+        foreach (var row in confirmedRewinds)
         {
             r.Parameters["$uid"].Value = row.SessionUid.ToString();
             r.Parameters["$car"].Value = row.CarIndex;
@@ -522,6 +548,24 @@ public static class AnalysisEngine
             r.Parameters["$lapTime"].Value = row.CurrentLapTimeMs;
             r.Parameters["$reason"].Value = row.Reason;
             r.ExecuteNonQuery();
+        }
+
+        using var s = con.CreateCommand();
+        s.Transaction = tx;
+        s.CommandText = "INSERT INTO suspected_state_reset_events VALUES ($uid,$car,$lap,$received,$session,$overall,$distance,$lapTime,$reason)";
+        foreach (var name in new[] { "$uid", "$car", "$lap", "$received", "$session", "$overall", "$distance", "$lapTime", "$reason" }) s.Parameters.AddWithValue(name, 0);
+        foreach (var row in suspectedStateResets)
+        {
+            s.Parameters["$uid"].Value = row.SessionUid.ToString();
+            s.Parameters["$car"].Value = row.CarIndex;
+            s.Parameters["$lap"].Value = row.LapNum;
+            s.Parameters["$received"].Value = row.ReceivedAt.ToString("O");
+            s.Parameters["$session"].Value = row.SessionTime;
+            s.Parameters["$overall"].Value = row.OverallFrameIdentifier;
+            s.Parameters["$distance"].Value = row.LapDistance;
+            s.Parameters["$lapTime"].Value = row.CurrentLapTimeMs;
+            s.Parameters["$reason"].Value = row.Reason;
+            s.ExecuteNonQuery();
         }
         tx.Commit();
     }
@@ -712,7 +756,7 @@ public static class AnalysisEngine
                 ? "Medium"
                 : "High";
         var confidenceSummary = $"Player laps with confirmed time: {completePlayerLaps}/{playerLaps.Count}; clean: {cleanPlayerLaps}. " +
-                                $"Official flashbacks are applied before heuristic fallback.";
+                                "Only an FLBK event confirms a rewind; backwards counters without FLBK are reported separately as suspected state resets.";
 
         UpsertQualityDimension(connection, "capture", captureRating, "Transport and write-path health from the recorder.");
         UpsertQualityDimension(connection, "session_completeness", completenessRating, completenessSummary);
@@ -775,6 +819,8 @@ public static class AnalysisEngine
             events_rows = result.EventsRows,
             participants_rows = result.ParticipantsRows,
             final_classification_rows = result.FinalClassificationRows,
+            confirmed_rewind_rows = result.ConfirmedRewindRows,
+            suspected_state_reset_rows = result.SuspectedStateResetRows,
             clean_lap_count = result.CleanLapCount,
             dirty_lap_count = result.DirtyLapCount,
             exports = "exports"

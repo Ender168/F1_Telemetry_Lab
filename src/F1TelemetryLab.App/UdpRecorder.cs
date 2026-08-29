@@ -298,7 +298,18 @@ public sealed class UdpRecorder : IAsyncDisposable
                 {
                     var participant = F12026Parser.ParseParticipantsDebug(packet.Payload, packet.ReceivedAt);
                     if (participant is { NumActiveCars: > 0 })
-                        _activeCarsBySession[participantHeader.SessionUid] = Math.Clamp(participant.NumActiveCars, 1, F12026Parser.MaxCars2026);
+                    {
+                        var observedExtent = participant.NumActiveCars;
+                        if (participantHeader.PlayerCarIndex < F12026Parser.MaxCars2026)
+                            observedExtent = Math.Max(observedExtent, participantHeader.PlayerCarIndex + 1);
+                        if (participantHeader.SecondaryPlayerCarIndex < F12026Parser.MaxCars2026)
+                            observedExtent = Math.Max(observedExtent, participantHeader.SecondaryPlayerCarIndex + 1);
+                        observedExtent = Math.Clamp(observedExtent, 1, F12026Parser.MaxCars2026);
+                        _activeCarsBySession.AddOrUpdate(
+                            participantHeader.SessionUid,
+                            observedExtent,
+                            (_, existing) => Math.Max(existing, observedExtent));
+                    }
                 }
 
                 if (packet.Header is { PacketFormat: AppInfo.SupportedPacketFormat, PacketId: 6 } telemetryHeader)

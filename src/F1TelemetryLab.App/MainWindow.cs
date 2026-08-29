@@ -46,6 +46,7 @@ public sealed class MainWindow : Window
     private TextBlock _technicalManifestText = null!;
     private TextBlock _globalSessionContext = null!;
     private TextBlock _classificationHeading = null!;
+    private TextBlock _classificationNote = null!;
     private ComboBox _compareMetric = null!;
     private CheckBox _compareCleanOnly = null!;
     private TextBlock _compareStatus = null!;
@@ -457,7 +458,7 @@ public sealed class MainWindow : Window
 
         var details = new Grid
         {
-            RowDefinitions = new RowDefinitions("Auto,Auto,Auto,*,Auto"),
+            RowDefinitions = new RowDefinitions("Auto,Auto,Auto,Auto,*,Auto"),
             RowSpacing = 10,
             Margin = new Thickness(16, 0, 0, 0)
         };
@@ -491,6 +492,14 @@ public sealed class MainWindow : Window
         _classificationHeading = new TextBlock { Text = "Classification", Foreground = Brushes.White, FontSize = 18, FontWeight = FontWeight.Bold };
         Grid.SetRow(_classificationHeading, 2);
         details.Children.Add(_classificationHeading);
+        _classificationNote = new TextBlock
+        {
+            Text = "Classification source has not been evaluated.",
+            Foreground = Brushes.LightGray,
+            TextWrapping = TextWrapping.Wrap
+        };
+        Grid.SetRow(_classificationNote, 3);
+        details.Children.Add(_classificationNote);
         var classificationList = new ListBox
         {
             ItemsSource = _classificationRows,
@@ -508,7 +517,7 @@ public sealed class MainWindow : Window
         };
         ScrollViewer.SetHorizontalScrollBarVisibility(classificationList, ScrollBarVisibility.Disabled);
         ScrollViewer.SetVerticalScrollBarVisibility(classificationList, ScrollBarVisibility.Auto);
-        Grid.SetRow(classificationList, 3);
+        Grid.SetRow(classificationList, 4);
         details.Children.Add(classificationList);
 
         _technicalManifestText = new TextBlock
@@ -529,7 +538,7 @@ public sealed class MainWindow : Window
                 VerticalScrollBarVisibility = ScrollBarVisibility.Auto
             }
         };
-        Grid.SetRow(technical, 4);
+        Grid.SetRow(technical, 5);
         details.Children.Add(technical);
         Grid.SetRow(details, 1);
         Grid.SetColumn(details, 1);
@@ -1272,7 +1281,7 @@ public sealed class MainWindow : Window
                 var rows = CarSetupDataService.LoadChanges(folder, selected.CarIndex);
                 changes.ItemsSource = rows;
                 changes.SelectedItem = rows.LastOrDefault();
-                detail.Text = rows.LastOrDefault()?.Detail ?? "No Car Setup rows were found. Re-analyze the session with v0.7.0; the original raw packet 5 data is retained.";
+                detail.Text = rows.LastOrDefault()?.Detail ?? "No Car Setup rows were found. Re-analyze the session with v0.7.1; the original raw packet 5 data is retained.";
                 status.Text = rows.Count == 0
                     ? "No setup snapshots for this driver. Re-analyze the session if it was recorded by an older version."
                     : $"{rows.Count:N0} initial/change snapshot(s). Unchanged 2 Hz packets are intentionally deduplicated; all fields are included in chatgpt_pack.sqlite and car_setups.csv.";
@@ -2057,6 +2066,7 @@ public sealed class MainWindow : Window
         if (!File.Exists(db))
         {
             if (_classificationHeading is not null) _classificationHeading.Text = "Classification unavailable";
+            if (_classificationNote is not null) _classificationNote.Text = "session.sqlite not found.";
             _classificationRows.Add("session.sqlite not found");
             return;
         }
@@ -2067,6 +2077,7 @@ public sealed class MainWindow : Window
             if (!TableExists(con, "final_classification"))
             {
                 if (_classificationHeading is not null) _classificationHeading.Text = "Classification unavailable";
+                if (_classificationNote is not null) _classificationNote.Text = "Run analysis to determine whether UDP packet 8 was recorded.";
                 _classificationRows.Add("Run Analyze selected session to build final_classification.");
                 return;
             }
@@ -2090,7 +2101,22 @@ public sealed class MainWindow : Window
             {
                 _classificationHeading.Text = string.Equals(source, "official_udp", StringComparison.OrdinalIgnoreCase)
                     ? $"Official classification (UDP packet 8, last packet {lastPacket})"
-                    : $"Provisional classification (latest Lap Data fallback, last packet {lastPacket})";
+                    : $"PROVISIONAL classification (UDP packet 8 absent, last packet {lastPacket})";
+            }
+            var classificationIsOfficial = string.Equals(source, "official_udp", StringComparison.OrdinalIgnoreCase);
+            var classificationNote = classificationIsOfficial
+                ? "Official final positions and result fields were read from UDP packet 8."
+                : "UDP packet 8 was not recorded. Positions are reconstructed from the latest Lap Data and may be incomplete. Official points, result reasons, total race time and tyre stints are unavailable.";
+            if (ColumnExists(con, "final_classification", "classification_note"))
+            {
+                using var noteCommand = con.CreateCommand();
+                noteCommand.CommandText = "SELECT classification_note FROM final_classification WHERE classification_note IS NOT NULL AND classification_note <> '' LIMIT 1";
+                classificationNote = Convert.ToString(noteCommand.ExecuteScalar(), CultureInfo.InvariantCulture) ?? classificationNote;
+            }
+            if (_classificationNote is not null)
+            {
+                _classificationNote.Text = classificationNote;
+                _classificationNote.Foreground = classificationIsOfficial ? Brushes.LightGreen : Brushes.Orange;
             }
             using var cmd = con.CreateCommand();
             var nameColumn = ColumnExists(con, "final_classification", "display_name") ? "display_name" : "name";
@@ -2098,7 +2124,7 @@ public sealed class MainWindow : Window
             cmd.CommandText = $"""
             SELECT position, car_idx, is_player, {nameColumn}, {shortColumn}, lap_num, last_lap_time_ms, best_lap_ms, penalties, warnings
             FROM final_classification
-            ORDER BY position, car_idx
+            ORDER BY CASE WHEN position IS NULL OR position <= 0 THEN 1 ELSE 0 END, position, car_idx
             """;
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
@@ -2114,7 +2140,8 @@ public sealed class MainWindow : Window
                 var best = reader.IsDBNull(7) ? 0 : Convert.ToDouble(reader.GetValue(7), CultureInfo.InvariantCulture);
                 var pen = reader.IsDBNull(8) ? 0 : reader.GetInt32(8);
                 var warn = reader.IsDBNull(9) ? 0 : reader.GetInt32(9);
-                _classificationRows.Add($"P{pos,2}  #{car:00}  {code,-4}  {name,-22}  Lap {lap}  Best {LapOption.FormatLapTime(best)}  Last {LapOption.FormatLapTime(last)}  Pen {pen}s  W {warn}");
+                var position = pos > 0 ? $"P{pos,2}" : "P ?";
+                _classificationRows.Add($"{position}  #{car:00}  {code,-4}  {name,-22}  Lap {lap}  Best {LapOption.FormatLapTime(best)}  Last {LapOption.FormatLapTime(last)}  Pen {pen}s  W {warn}");
             }
             if (_classificationRows.Count == 0) _classificationRows.Add("No classification rows found.");
         }

@@ -52,6 +52,36 @@ public static class DatabaseSchemaMigrator
                 """);
         }
 
+        if (version < 5)
+        {
+            Execute(connection, """
+                CREATE TABLE IF NOT EXISTS suspected_state_reset_events(
+                    session_uid TEXT, car_idx INTEGER, lap_num INTEGER, received_at TEXT, session_time REAL,
+                    overall_frame_identifier INTEGER, lap_distance REAL, current_lap_time_ms INTEGER, reason TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_suspected_state_resets_session_frame
+                    ON suspected_state_reset_events(session_uid, overall_frame_identifier, car_idx);
+                """);
+            EnsureColumn(connection, "final_classification", "classification_source", "TEXT");
+            EnsureColumn(connection, "final_classification", "classification_is_official", "INTEGER");
+            EnsureColumn(connection, "final_classification", "classification_note", "TEXT");
+            if (TableExists(connection, "final_classification"))
+            {
+                Execute(connection, """
+                    UPDATE final_classification
+                    SET classification_is_official = CASE WHEN classification_source = 'official_udp' THEN 1 ELSE 0 END
+                    WHERE classification_is_official IS NULL;
+                    UPDATE final_classification
+                    SET classification_note = CASE
+                        WHEN classification_source = 'official_udp'
+                            THEN 'Official final classification from UDP packet 8.'
+                        ELSE 'UDP packet 8 is absent. Positions are reconstructed from the latest Lap Data and may be incomplete.'
+                    END
+                    WHERE classification_note IS NULL OR classification_note = '';
+                    """);
+            }
+        }
+
         Execute(connection, $"PRAGMA user_version = {AppInfo.DatabaseSchemaVersion};");
     }
 

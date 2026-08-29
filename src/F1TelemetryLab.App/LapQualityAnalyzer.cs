@@ -8,15 +8,24 @@ public static class LapQualityAnalyzer
         IReadOnlyList<LapDataSample> samples,
         int trackLengthMeters,
         out List<RewindEventResult> rewindEvents)
-        => Analyze(samples, trackLengthMeters, Array.Empty<FlashbackSignal>(), out rewindEvents);
+        => Analyze(samples, trackLengthMeters, Array.Empty<FlashbackSignal>(), out rewindEvents, out _);
 
     public static IReadOnlyList<LapQualityResult> Analyze(
         IReadOnlyList<LapDataSample> samples,
         int trackLengthMeters,
         IReadOnlyList<FlashbackSignal> flashbacks,
         out List<RewindEventResult> rewindEvents)
+        => Analyze(samples, trackLengthMeters, flashbacks, out rewindEvents, out _);
+
+    public static IReadOnlyList<LapQualityResult> Analyze(
+        IReadOnlyList<LapDataSample> samples,
+        int trackLengthMeters,
+        IReadOnlyList<FlashbackSignal> flashbacks,
+        out List<RewindEventResult> rewindEvents,
+        out List<SuspectedStateResetResult> suspectedStateResets)
     {
         rewindEvents = new List<RewindEventResult>();
+        suspectedStateResets = new List<SuspectedStateResetResult>();
         var completions = new Dictionary<(ulong SessionUid, int CarIndex, int LapNum), Completion>();
         var activeFrom = new Dictionary<(ulong SessionUid, int CarIndex, int LapNum), uint>();
         var rewindCounts = new Dictionary<(ulong SessionUid, int CarIndex, int LapNum), int>();
@@ -78,20 +87,20 @@ public static class LapQualityAnalyzer
                     if (!finishReset && sameLap && sample.CurrentLapTimeMs + 750 < previous.CurrentLapTimeMs)
                         reasons.Add("lap_time_backwards");
 
-                    // An official FLBK event is authoritative. The heuristic remains only for
-                    // recordings where the game event packet is missing.
+                    // Only FLBK confirms a rewind. Backwards counters without FLBK are retained
+                    // as state-reset diagnostics and may delimit a new active branch, but they do
+                    // not dirty the lap as a flashback.
                     if (reasons.Count > 0 && !officialRollbackHandled)
                     {
                         var rollbackLap = Math.Max(1, sample.LapNum);
-                        RegisterRollback(
+                        RegisterSuspectedStateReset(
                             rollbackLap,
                             sample.OverallFrameIdentifier,
                             sample,
-                            "heuristic:" + string.Join(';', reasons),
+                            "suspected_state_reset:" + string.Join(';', reasons),
                             activeFrom,
-                            rewindCounts,
                             completions,
-                            rewindEvents);
+                            suspectedStateResets);
                     }
 
                     if (sample.LapNum == previous.LapNum + 1 && sample.LastLapTimeMs > 0)
@@ -226,6 +235,39 @@ public static class LapQualityAnalyzer
             sample.SessionUid,
             sample.CarIndex,
             rollbackLap,
+            sample.ReceivedAt,
+            sample.SessionTime,
+            activeOverallFrame,
+            sample.LapDistance,
+            sample.CurrentLapTimeMs,
+            reason));
+    }
+
+    private static void RegisterSuspectedStateReset(
+        int resetLap,
+        uint activeOverallFrame,
+        LapDataSample sample,
+        string reason,
+        Dictionary<(ulong SessionUid, int CarIndex, int LapNum), uint> activeFrom,
+        Dictionary<(ulong SessionUid, int CarIndex, int LapNum), Completion> completions,
+        List<SuspectedStateResetResult> stateResetEvents)
+    {
+        var affectedKeys = activeFrom.Keys
+            .Where(x => x.SessionUid == sample.SessionUid && x.CarIndex == sample.CarIndex && x.LapNum >= resetLap)
+            .ToList();
+        foreach (var affected in affectedKeys)
+        {
+            activeFrom[affected] = activeOverallFrame;
+            completions.Remove(affected);
+        }
+
+        var targetKey = (sample.SessionUid, sample.CarIndex, resetLap);
+        activeFrom[targetKey] = activeOverallFrame;
+        completions.Remove(targetKey);
+        stateResetEvents.Add(new SuspectedStateResetResult(
+            sample.SessionUid,
+            sample.CarIndex,
+            resetLap,
             sample.ReceivedAt,
             sample.SessionTime,
             activeOverallFrame,

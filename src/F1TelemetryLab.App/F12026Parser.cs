@@ -53,7 +53,7 @@ public static class F12026Parser
         if (h.PacketFormat != 2026 || h.PacketId != 6) return samples;
 
         var offset = HeaderSize;
-        for (var i = 0; i < ParseCarCount(activeCars); i++)
+        for (var i = 0; i < ParseCarCount(activeCars, h); i++)
         {
             if (offset + CarTelemetrySize2026 > data.Length) break;
             var c = data.Slice(offset, CarTelemetrySize2026);
@@ -89,7 +89,7 @@ public static class F12026Parser
             : (float?)null;
 
         var offset = HeaderSize;
-        for (var i = 0; i < ParseCarCount(activeCars); i++)
+        for (var i = 0; i < ParseCarCount(activeCars, h); i++)
         {
             if (offset + CarSetupSize2026 > data.Length) break;
             var c = data.Slice(offset, CarSetupSize2026);
@@ -139,7 +139,7 @@ public static class F12026Parser
         if (h.PacketFormat != 2026 || h.PacketId != 2) return samples;
 
         var offset = HeaderSize;
-        for (var i = 0; i < ParseCarCount(activeCars); i++)
+        for (var i = 0; i < ParseCarCount(activeCars, h); i++)
         {
             if (offset + LapDataSize2026 > data.Length) break;
             var c = data.Slice(offset, LapDataSize2026);
@@ -187,7 +187,7 @@ public static class F12026Parser
         if (h.PacketFormat != 2026 || h.PacketId != 0) return samples;
 
         var offset = HeaderSize;
-        for (var i = 0; i < ParseCarCount(activeCars); i++)
+        for (var i = 0; i < ParseCarCount(activeCars, h); i++)
         {
             if (offset + MotionSize2026 > data.Length) break;
             var c = data.Slice(offset, MotionSize2026);
@@ -211,7 +211,7 @@ public static class F12026Parser
         if (h.PacketFormat != 2026 || h.PacketId != 7) return samples;
 
         var offset = HeaderSize;
-        for (var i = 0; i < ParseCarCount(activeCars); i++)
+        for (var i = 0; i < ParseCarCount(activeCars, h); i++)
         {
             if (offset + CarStatusSize2026 > data.Length) break;
             var c = data.Slice(offset, CarStatusSize2026);
@@ -245,7 +245,7 @@ public static class F12026Parser
         if (h.PacketFormat != 2026 || h.PacketId != 10) return samples;
 
         var offset = HeaderSize;
-        for (var i = 0; i < ParseCarCount(activeCars); i++)
+        for (var i = 0; i < ParseCarCount(activeCars, h); i++)
         {
             if (offset + CarDamageSize2026 > data.Length) break;
             var c = data.Slice(offset, CarDamageSize2026);
@@ -338,7 +338,7 @@ public static class F12026Parser
         var activeCars = data[HeaderSize];
         var offset = HeaderSize + 1;
         var available = Math.Max(0, (data.Length - offset) / ParticipantSize2026);
-        var count = Math.Clamp(Math.Min(activeCars, available), 0, MaxCars2026);
+        var count = Math.Min(MaxCars2026, available);
 
         for (var i = 0; i < count; i++)
         {
@@ -347,6 +347,13 @@ public static class F12026Parser
             var driverId = U16(c, 1);
             var teamId = U16(c, 5);
             var name = DecodeName(c.Slice(10, 32));
+            var expectedActive = i < activeCars;
+            var isPlayerSlot = h.PlayerCarIndex == i || h.SecondaryPlayerCarIndex == i;
+            if (!expectedActive && !isPlayerSlot && !HasAnyNonZero(c))
+            {
+                offset += ParticipantSize2026;
+                continue;
+            }
             samples.Add(new ParticipantSample(
                 receivedAt,
                 h.SessionUid,
@@ -396,10 +403,15 @@ public static class F12026Parser
 
         var numCars = Math.Min(data[HeaderSize], (byte)MaxCars2026);
         var offset = HeaderSize + 1;
-        for (var i = 0; i < numCars; i++)
+        for (var i = 0; i < MaxCars2026; i++)
         {
             if (offset + FinalClassificationSize2026 > data.Length) break;
             var c = data.Slice(offset, FinalClassificationSize2026);
+            if (i >= numCars && i != h.PlayerCarIndex && c[0] == 0 && c[5] <= 1)
+            {
+                offset += FinalClassificationSize2026;
+                continue;
+            }
             samples.Add(new FinalClassificationSample(
                 receivedAt,
                 h.SessionUid,
@@ -452,7 +464,22 @@ public static class F12026Parser
     }
 
     private static int SectorMs(ushort msPart, byte minPart) => minPart * 60000 + msPart;
-    private static int ParseCarCount(int? activeCars) => Math.Clamp(activeCars ?? MaxCars2026, 0, MaxCars2026);
+    private static int ParseCarCount(int? activeCars, PacketHeader header)
+    {
+        // 2026 packets contain fixed 24-element arrays. m_numActiveCars is a count,
+        // not the highest vehicle index: online grids can have holes after disconnects,
+        // so a player at index 21 may remain active while the count is only 20.
+        _ = activeCars;
+        _ = header;
+        return MaxCars2026;
+    }
+
+    private static bool HasAnyNonZero(ReadOnlySpan<byte> value)
+    {
+        foreach (var item in value)
+            if (item != 0) return true;
+        return false;
+    }
     private static ushort U16(ReadOnlySpan<byte> s, int o) => BinaryPrimitives.ReadUInt16LittleEndian(s.Slice(o, 2));
     private static short I16(ReadOnlySpan<byte> s, int o) => BinaryPrimitives.ReadInt16LittleEndian(s.Slice(o, 2));
     private static uint U32(ReadOnlySpan<byte> s, int o) => BinaryPrimitives.ReadUInt32LittleEndian(s.Slice(o, 4));

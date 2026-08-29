@@ -104,6 +104,7 @@ public static class SessionPackager
             CopyTableIfExists(con, "lap_quality");
             CopyTableIfExists(con, "car_setups");
             CopyTableIfExists(con, "rewind_events");
+            CopyTableIfExists(con, "suspected_state_reset_events");
             CopyTableIfExists(con, "events");
             CopyTableIfExists(con, "participants");
             CopyTableIfExists(con, "analysis_trace_10m");

@@ -6,6 +6,58 @@ namespace F1TelemetryLab.Tests;
 
 public sealed class QualityAndSchemaTests
 {
+    [Theory]
+    [InlineData(0, 54)]
+    [InlineData(2, 57)]
+    [InlineData(5, 50)]
+    [InlineData(6, 59)]
+    [InlineData(7, 59)]
+    [InlineData(10, 46)]
+    public void Fixed2026ArraysAlwaysExposeAllTwentyFourVehicleSlots(byte packetId, int rowSize)
+    {
+        var trailing = packetId == 5 ? 4 : 0;
+        var packet = Packet(packetId, rowSize * F12026Parser.MaxCars2026 + trailing, playerCarIndex: 21);
+
+        var slots = packetId switch
+        {
+            0 => F12026Parser.ParseMotionPacket(packet, DateTimeOffset.UnixEpoch, activeCars: 20).Select(x => (x.CarIndex, x.IsPlayer)).ToList(),
+            2 => F12026Parser.ParseLapDataPacket(packet, DateTimeOffset.UnixEpoch, activeCars: 20).Select(x => (x.CarIndex, x.IsPlayer)).ToList(),
+            5 => F12026Parser.ParseCarSetupPacket(packet, DateTimeOffset.UnixEpoch, activeCars: 20).Select(x => (x.CarIndex, x.IsPlayer)).ToList(),
+            6 => F12026Parser.ParseCarTelemetryPacket(packet, DateTimeOffset.UnixEpoch, activeCars: 20).Select(x => (x.CarIndex, x.IsPlayer)).ToList(),
+            7 => F12026Parser.ParseCarStatusPacket(packet, DateTimeOffset.UnixEpoch, activeCars: 20).Select(x => (x.CarIndex, x.IsPlayer)).ToList(),
+            10 => F12026Parser.ParseCarDamagePacket(packet, DateTimeOffset.UnixEpoch, activeCars: 20).Select(x => (x.CarIndex, x.IsPlayer)).ToList(),
+            _ => throw new ArgumentOutOfRangeException(nameof(packetId))
+        };
+
+        Assert.Equal(24, slots.Count);
+        Assert.Contains(slots, x => x.CarIndex == 21 && x.IsPlayer);
+        Assert.Contains(slots, x => x.CarIndex == 23);
+    }
+
+    [Fact]
+    public void SparseParticipantAndClassificationArraysRetainHighPlayerIndex()
+    {
+        var participants = Packet(4, 1 + 60 * F12026Parser.MaxCars2026, playerCarIndex: 21);
+        participants[F12026Parser.HeaderSize] = 20;
+        var playerParticipant = participants.AsSpan(F12026Parser.HeaderSize + 1 + 21 * 60, 60);
+        BinaryPrimitives.WriteUInt16LittleEndian(playerParticipant[1..], 65535);
+        BinaryPrimitives.WriteUInt16LittleEndian(playerParticipant[5..], 10);
+        System.Text.Encoding.UTF8.GetBytes("STROLL", playerParticipant[10..42]);
+
+        var participantRows = F12026Parser.ParseParticipantsPacket(participants, DateTimeOffset.UnixEpoch);
+        Assert.Contains(participantRows, x => x.CarIndex == 21 && x.Name == "STROLL");
+
+        var classification = Packet(8, 1 + 46 * F12026Parser.MaxCars2026, playerCarIndex: 21);
+        classification[F12026Parser.HeaderSize] = 20;
+        var playerClassification = classification.AsSpan(F12026Parser.HeaderSize + 1 + 21 * 46, 46);
+        playerClassification[0] = 20;
+        playerClassification[1] = 3;
+        playerClassification[5] = 3;
+
+        var classificationRows = F12026Parser.ParseFinalClassificationPacket(classification, DateTimeOffset.UnixEpoch);
+        Assert.Contains(classificationRows, x => x.CarIndex == 21 && x.IsPlayer && x.Position == 20);
+    }
+
     [Fact]
     public void FinalClassificationPreservesPenaltyDnfAndTyreStints()
     {
@@ -82,7 +134,7 @@ public sealed class QualityAndSchemaTests
         BinaryPrimitives.WriteSingleLittleEndian(packet.AsSpan(F12026Parser.HeaderSize + 24 * 50), 30f);
 
         var setups = F12026Parser.ParseCarSetupPacket(packet, DateTimeOffset.UnixEpoch, activeCars: 22);
-        Assert.Equal(22, setups.Count);
+        Assert.Equal(24, setups.Count);
         var setup = setups[21];
         Assert.True(setup.IsPlayer);
         Assert.Equal((28, 22, 70, 50), (setup.FrontWing, setup.RearWing, setup.OnThrottle, setup.OffThrottle));
@@ -150,6 +202,7 @@ public sealed class QualityAndSchemaTests
             Assert.Contains("overall_frame_identifier", Columns(connection, "raw_packets"));
             Assert.Contains("missing_frames_estimated", Columns(connection, "recording_quality"));
             Assert.Equal(1L, ScalarLong(connection, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='data_quality'"));
+            Assert.Equal(1L, ScalarLong(connection, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='suspected_state_reset_events'"));
         }
         finally
         {
@@ -196,8 +249,120 @@ public sealed class QualityAndSchemaTests
         }
     }
 
+    [Fact]
+    public void AnalysisPersistsTwentyFourSlotsAndMarksFallbackClassificationProvisional()
+    {
+        SQLitePCL.Batteries_V2.Init();
+        var folder = Path.Combine(Path.GetTempPath(), $"f1tlab-24cars-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(folder);
+        var source = Path.Combine(folder, "session.sqlite");
+        const ulong sessionUid = 4242;
+        try
+        {
+            using (var database = new TelemetryDatabase(source))
+            {
+                database.SaveMetadata(new SessionMetadata
+                {
+                    SessionUid = sessionUid,
+                    SessionName = "TwentyFourCarRegression",
+                    TrackId = 0,
+                    TrackName = "Melbourne",
+                    SessionType = 10,
+                    TotalLaps = 3,
+                    TrackLengthMeters = 5_276,
+                    StartedAt = DateTimeOffset.UnixEpoch
+                });
+
+                var packets = BuildSparseTwentyCarOnlineFrame(sessionUid, playerCarIndex: 21);
+                for (var index = 0; index < packets.Count; index++)
+                {
+                    Assert.True(F12026Parser.TryParseHeader(packets[index], out var header));
+                    database.InsertRaw(DateTimeOffset.UnixEpoch.AddMilliseconds(index), header, packets[index]);
+                }
+            }
+
+            AnalysisEngine.AnalyzeSession(folder);
+            using var analyzed = new SqliteConnection($"Data Source={source};Mode=ReadOnly");
+            analyzed.Open();
+            foreach (var table in new[] { "lap_data", "car_status", "car_telemetry", "car_damage", "car_setups" })
+            {
+                Assert.Equal(24L, ScalarLong(analyzed, $"SELECT COUNT(DISTINCT car_idx) FROM {table}"));
+                Assert.Equal(1L, ScalarLong(analyzed, $"SELECT COUNT(*) FROM {table} WHERE car_idx=21 AND is_player=1"));
+            }
+
+            Assert.Equal(1L, ScalarLong(analyzed, "SELECT COUNT(*) FROM final_classification WHERE car_idx=21 AND classification_source='provisional_latest_lap_data' AND classification_is_official=0"));
+            Assert.Equal(0L, ScalarLong(analyzed, "SELECT COUNT(*) FROM final_classification_packet"));
+            Assert.Contains("packet 8 is absent", ScalarText(analyzed, "SELECT classification_note FROM final_classification LIMIT 1"), StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(folder)) Directory.Delete(folder, recursive: true);
+        }
+    }
+
     private static PacketHeader Header(byte packetId, uint overall, ulong sessionUid = 1) =>
         new(2026, 26, 1, 0, 1, packetId, sessionUid, 1, overall, overall, 0, 255);
+
+    private static byte[] Packet(byte packetId, int payloadSize, byte playerCarIndex, ulong sessionUid = 1, uint frame = 1)
+    {
+        var packet = new byte[F12026Parser.HeaderSize + payloadSize];
+        BinaryPrimitives.WriteUInt16LittleEndian(packet, 2026);
+        packet[2] = 26;
+        packet[3] = 1;
+        packet[5] = 1;
+        packet[6] = packetId;
+        BinaryPrimitives.WriteUInt64LittleEndian(packet.AsSpan(7), sessionUid);
+        BinaryPrimitives.WriteSingleLittleEndian(packet.AsSpan(15), frame);
+        BinaryPrimitives.WriteUInt32LittleEndian(packet.AsSpan(19), frame);
+        BinaryPrimitives.WriteUInt32LittleEndian(packet.AsSpan(23), frame);
+        packet[27] = playerCarIndex;
+        packet[28] = 255;
+        return packet;
+    }
+
+    private static List<byte[]> BuildSparseTwentyCarOnlineFrame(ulong sessionUid, byte playerCarIndex)
+    {
+        var participants = Packet(4, 1 + 60 * 24, playerCarIndex, sessionUid, frame: 1);
+        participants[F12026Parser.HeaderSize] = 20;
+        for (var car = 0; car < 24; car++)
+        {
+            if (car >= 19 && car != playerCarIndex) continue;
+            var row = participants.AsSpan(F12026Parser.HeaderSize + 1 + car * 60, 60);
+            BinaryPrimitives.WriteUInt16LittleEndian(row[1..], (ushort)(100 + car));
+            BinaryPrimitives.WriteUInt16LittleEndian(row[5..], (ushort)(10 + car));
+            System.Text.Encoding.UTF8.GetBytes(car == playerCarIndex ? "STROLL" : $"DRIVER {car}", row[10..42]);
+        }
+
+        var telemetry = Packet(6, 59 * 24 + 3, playerCarIndex, sessionUid, frame: 2);
+        var lap = Packet(2, 57 * 24 + 2, playerCarIndex, sessionUid, frame: 2);
+        var motion = Packet(0, 54 * 24, playerCarIndex, sessionUid, frame: 2);
+        var status = Packet(7, 59 * 24, playerCarIndex, sessionUid, frame: 2);
+        var damage = Packet(10, 46 * 24, playerCarIndex, sessionUid, frame: 2);
+        var setup = Packet(5, 50 * 24 + 4, playerCarIndex, sessionUid, frame: 2);
+
+        for (var car = 0; car < 24; car++)
+        {
+            var telemetryRow = telemetry.AsSpan(F12026Parser.HeaderSize + car * 59, 59);
+            BinaryPrimitives.WriteUInt16LittleEndian(telemetryRow, (ushort)(200 + car));
+            BinaryPrimitives.WriteSingleLittleEndian(telemetryRow[2..], 0.5f);
+            BinaryPrimitives.WriteSingleLittleEndian(telemetryRow[6..], 0f);
+            BinaryPrimitives.WriteSingleLittleEndian(telemetryRow[10..], 0.1f);
+
+            var isActive = car < 19 || car == playerCarIndex;
+            if (!isActive) continue;
+            var lapRow = lap.AsSpan(F12026Parser.HeaderSize + car * 57, 57);
+            BinaryPrimitives.WriteUInt32LittleEndian(lapRow[4..], 10_000);
+            BinaryPrimitives.WriteSingleLittleEndian(lapRow[20..], 500f);
+            BinaryPrimitives.WriteSingleLittleEndian(lapRow[24..], 500f);
+            lapRow[32] = (byte)(car == playerCarIndex ? 20 : car + 1);
+            lapRow[33] = 1;
+            lapRow[44] = 4;
+            lapRow[45] = 2;
+        }
+
+        return new List<byte[]> { participants, telemetry, lap, motion, status, damage, setup };
+    }
 
     private static IReadOnlyList<string> Columns(SqliteConnection connection, string table)
     {
@@ -214,6 +379,13 @@ public sealed class QualityAndSchemaTests
         using var command = connection.CreateCommand();
         command.CommandText = sql;
         return Convert.ToInt64(command.ExecuteScalar());
+    }
+
+    private static string ScalarText(SqliteConnection connection, string sql)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        return Convert.ToString(command.ExecuteScalar()) ?? "";
     }
 
     private static void Execute(SqliteConnection connection, string sql)

@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.7.1
+
+### Online telemetry correctness
+
+- Фиксированные массивы packet 0/2/5/6/7/10 разбираются по всем 24 vehicle slots независимо от `m_numActiveCars`.
+- `m_numActiveCars` больше не используется как верхняя граница vehicle index: online grid может иметь разрывы после disconnect, включая player в `car_idx 21-23`.
+- Participants и Final Classification сохраняют заполненные высокие индексы даже при меньшем active count.
+- Добавлен интеграционный тест sparse online grid: 20 active cars, player `car_idx 21`, 24 строки во всех основных производных таблицах.
+
+### Timeline semantics
+
+- `rewind_events` теперь содержит только подтверждённые события с официальным `FLBK`.
+- Обратный session/frame/lap/distance counter без `FLBK` сохраняется отдельно в `suspected_state_reset_events` и не делает круг `Rewound`.
+- Formation-to-race reset может отделить новую ветвь круга, не создавая ложный Flashback.
+
+### Classification
+
+- При отсутствии packet 8 `final_classification` содержит явные `classification_is_official=0` и `classification_note`.
+- Интерфейс прямо сообщает, что позиции восстановлены из последнего Lap Data и какие официальные поля недоступны.
+- Schema version повышена до 5.
+
 ## 0.7.0
 
 ### Interface

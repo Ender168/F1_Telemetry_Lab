@@ -69,6 +69,36 @@ public sealed class MelbourneRegressionTests
             "The final 800m of Melbourne must not collapse into one map point.");
     }
 
+    [Fact]
+    public void SessionTimeResetWithoutFlbkIsDiagnosticNotConfirmedRewind()
+    {
+        const ulong sessionUid = 8080;
+        const int car = 11;
+        const int trackLength = 5_276;
+        var samples = new[]
+        {
+            Lap(sessionUid, car, 100, 100, 1, 5_200, 90_000, sessionTime: 100),
+            Lap(sessionUid, car, 101, 1, 1, 0, 0, sessionTime: 0),
+            Lap(sessionUid, car, 102, 2, 1, 5_275, 81_000, sessionTime: 81),
+            Lap(sessionUid, car, 103, 3, 2, 1, 100, lastMs: 81_100, sessionTime: 82)
+        };
+
+        var result = LapQualityAnalyzer.Analyze(
+            samples,
+            trackLength,
+            Array.Empty<FlashbackSignal>(),
+            out var confirmedRewinds,
+            out var suspectedStateResets);
+
+        Assert.Empty(confirmedRewinds);
+        var reset = Assert.Single(suspectedStateResets);
+        Assert.StartsWith("suspected_state_reset:", reset.Reason, StringComparison.Ordinal);
+        var lap = Assert.Single(result, x => x.LapNum == 1);
+        Assert.Equal(LapState.Complete, lap.State);
+        Assert.True(lap.CleanLap);
+        Assert.Equal(0, lap.RewindCount);
+    }
+
     private static IReadOnlyList<LapDataSample> BuildThreeLapRace(ulong uid, int car, int trackLength)
     {
         return new[]

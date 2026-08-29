@@ -272,6 +272,17 @@ public sealed record RewindEventResult(
     uint CurrentLapTimeMs,
     string Reason);
 
+public sealed record SuspectedStateResetResult(
+    ulong SessionUid,
+    int CarIndex,
+    int LapNum,
+    DateTimeOffset ReceivedAt,
+    float SessionTime,
+    uint OverallFrameIdentifier,
+    float LapDistance,
+    uint CurrentLapTimeMs,
+    string Reason);
+
 public sealed record RecordingQualitySnapshot(
     long PacketsReceived,
     long CarSamplesWritten,
@@ -354,6 +365,8 @@ public sealed record AnalysisResult(
     int EventsRows,
     int ParticipantsRows,
     int FinalClassificationRows,
+    int ConfirmedRewindRows,
+    int SuspectedStateResetRows,
     int CleanLapCount,
     int DirtyLapCount,
     string Summary);

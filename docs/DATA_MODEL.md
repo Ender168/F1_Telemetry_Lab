@@ -7,10 +7,10 @@
 | Raw | `raw_packets`, `car_telemetry` | Lossless UDP history и live read model |
 | Recording metadata | `session_metadata`, `session_segments`, `recording_quality`, `data_quality` | Schema, UID segments и три измерения качества |
 | Parsed | `lap_data`, `motion_data`, `car_status`, `car_damage`, `car_setups`, `events`, `participants`, `final_classification_packet` | Декодированные packet rows |
-| Quality | `lap_quality`, `rewind_events` | Active branch, состояние круга и rollback |
+| Quality | `lap_quality`, `rewind_events`, `suspected_state_reset_events` | Active branch, подтверждённый FLBK и неподтверждённые reset-переходы |
 | Projection | `analysis_context`, `analysis_samples`, `lap_summary`, `lap_state_summary`, `analysis_trace_10m`, `final_classification` | UI, reports и export |
 
-Текущий `PRAGMA user_version = 4`.
+Текущий `PRAGMA user_version = 5`.
 
 ## Идентичность и время
 

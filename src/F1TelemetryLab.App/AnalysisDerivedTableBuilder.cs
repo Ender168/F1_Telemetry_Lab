@@ -527,7 +527,9 @@ internal static class AnalysisDerivedTableBuilder
                 f.total_race_time_seconds,
                 f.num_penalties,
                 f.num_tyre_stints,
-                f.result_reason
+                f.result_reason,
+                1 AS classification_is_official,
+                'Official final classification from UDP packet 8.' AS classification_note
             FROM official f
             LEFT JOIN latest_names n ON n.session_uid = f.session_uid AND n.car_idx = f.car_idx
             LEFT JOIN latest_lap l ON l.session_uid = f.session_uid AND l.car_idx = f.car_idx
@@ -536,7 +538,7 @@ internal static class AnalysisDerivedTableBuilder
         ),
         provisional_rows AS (
             SELECT
-                l.position,
+                NULLIF(l.position, 0) AS position,
                 l.car_idx,
                 l.is_player,
                 COALESCE(n.name, CASE WHEN l.is_player = 1 THEN 'YOU' ELSE 'F1 Generic' END) AS name,
@@ -561,12 +563,15 @@ internal static class AnalysisDerivedTableBuilder
                 NULL AS total_race_time_seconds,
                 NULL AS num_penalties,
                 NULL AS num_tyre_stints,
-                NULL AS result_reason
+                NULL AS result_reason,
+                0 AS classification_is_official,
+                'UDP packet 8 is absent. Positions are reconstructed from the latest Lap Data and may be incomplete; official points, result reasons, total race time and tyre stints are unavailable.' AS classification_note
             FROM latest_lap l
             LEFT JOIN latest_names n ON n.session_uid = l.session_uid AND n.car_idx = l.car_idx
             LEFT JOIN driver_aliases a ON a.car_idx = l.car_idx
             LEFT JOIN best_laps b ON b.session_uid = l.session_uid AND b.car_idx = l.car_idx
-            WHERE l.position > 0 AND NOT EXISTS (SELECT 1 FROM official)
+            WHERE NOT EXISTS (SELECT 1 FROM official)
+              AND (l.position > 0 OR l.is_player = 1 OR l.result_status NOT IN (0, 1))
         )
         SELECT * FROM official_rows
         UNION ALL
