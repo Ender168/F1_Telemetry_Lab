@@ -1,3 +1,4 @@
+using F1TelemetryLab;
 using Microsoft.Data.Sqlite;
 using System.IO.Compression;
 
