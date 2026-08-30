@@ -54,6 +54,6 @@ jobs:
       - name: Upload Windows x64 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: F1TelemetryLab-v0.9.0-win-x64
+          name: F1TelemetryLab-v0.9.1-win-x64
           path: artifacts/F1TelemetryLab-win-x64
           if-no-files-found: error

@@ -201,6 +201,46 @@ public sealed class ErsAutopilotTests
     }
 
     [Fact]
+    public void ExpiredRuleDoesNotFalselyConfirmAnUnobservedModeChange()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), $"f1tlab-ers-feedback-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(folder);
+        try
+        {
+            var input = new FakeInputSink();
+            var profiles = new ErsProfileLoadResult(folder, new[] { ChinaProfile() }, Array.Empty<string>());
+            var start = DateTimeOffset.UtcNow;
+            using (var service = new ErsAutopilotService(
+                       new ErsAutopilotOptions { OperatingMode = ErsAutopilotOperatingMode.Live },
+                       profiles,
+                       input,
+                       folder))
+            {
+                service.ProcessPacket(SessionPacket(isNetworkGame: false, ersAssist: 0), start);
+                service.ProcessPacket(LapPacket(distance: 3_500), start.AddMilliseconds(10));
+                service.ProcessPacket(TelemetryPacket(), start.AddMilliseconds(20));
+                service.ProcessPacket(StatusPacket(ErsDeployMode.Medium), start.AddMilliseconds(30));
+
+                Assert.Equal(1, input.TapCount);
+                Assert.Equal("Key sent", service.Status.State);
+
+                service.ProcessPacket(LapPacket(distance: 4_500), start.AddMilliseconds(100));
+
+                Assert.Equal("Holding", service.Status.State);
+                Assert.Equal(ErsDeployMode.Medium, service.Status.CurrentMode);
+            }
+
+            var audit = File.ReadAllText(Path.Combine(folder, "ers_control_log.csv"));
+            Assert.Contains("feedback-superseded:expected-Hotlap", audit);
+            Assert.DoesNotContain("\"telemetry-confirmed\"", audit);
+        }
+        finally
+        {
+            if (Directory.Exists(folder)) Directory.Delete(folder, recursive: true);
+        }
+    }
+
+    [Fact]
     public void ProfileStoreLoadsStringEnumsAndSelectsTrackSpecificProfile()
     {
         var folder = Path.Combine(Path.GetTempPath(), $"f1tlab-ers-profile-{Guid.NewGuid():N}");
@@ -379,6 +419,42 @@ public sealed class ErsAutopilotTests
         return packet;
     }
 
+    private static byte[] LapPacket(float distance)
+    {
+        const int rowSize = 57;
+        var packet = Packet(2, rowSize * F12026Parser.MaxCars2026 + 2, sessionUid: 91, playerCarIndex: 0);
+        var row = packet.AsSpan(F12026Parser.HeaderSize, rowSize);
+        BinaryPrimitives.WriteSingleLittleEndian(row[20..], distance);
+        BinaryPrimitives.WriteSingleLittleEndian(row[24..], distance);
+        row[32] = 1;
+        row[33] = 1;
+        row[44] = 4;
+        row[45] = 2;
+        return packet;
+    }
+
+    private static byte[] TelemetryPacket()
+    {
+        const int rowSize = 59;
+        var packet = Packet(6, rowSize * F12026Parser.MaxCars2026 + 3, sessionUid: 91, playerCarIndex: 0);
+        var row = packet.AsSpan(F12026Parser.HeaderSize, rowSize);
+        BinaryPrimitives.WriteUInt16LittleEndian(row, 220);
+        BinaryPrimitives.WriteSingleLittleEndian(row[2..], 1f);
+        row[15] = 6;
+        BinaryPrimitives.WriteUInt16LittleEndian(row[16..], 11_000);
+        return packet;
+    }
+
+    private static byte[] StatusPacket(ErsDeployMode mode)
+    {
+        const int rowSize = 59;
+        var packet = Packet(7, rowSize * F12026Parser.MaxCars2026, sessionUid: 91, playerCarIndex: 0);
+        var row = packet.AsSpan(F12026Parser.HeaderSize, rowSize);
+        BinaryPrimitives.WriteSingleLittleEndian(row[37..], 3_500_000f);
+        row[41] = (byte)mode;
+        return packet;
+    }
+
     private static void WithService(FakeInputSink input, Action<ErsAutopilotService, FakeInputSink> test)
     {
         var folder = Path.Combine(Path.GetTempPath(), $"f1tlab-ers-service-{Guid.NewGuid():N}");
@@ -404,13 +480,17 @@ public sealed class ErsAutopilotTests
         public bool EmergencyStop { get; set; }
         public int TapCount { get; private set; }
 
-        public ErsInputResult Tap(ErsInputDirection direction, ErsAutopilotOptions options)
+        public ErsInputResult Tap(ErsInputDirection direction, ErsAutopilotOptions options, DateTimeOffset now)
         {
             TapCount++;
             return ErsInputResult.Ok(direction.ToString());
         }
 
+        public ErsInputResult? Poll(DateTimeOffset now) => null;
+
         public bool EmergencyStopRequested(ErsAutopilotOptions options) => EmergencyStop;
+
+        public void Dispose() { }
     }
 
     private static byte[] Packet(byte packetId, int payloadSize, ulong sessionUid, byte playerCarIndex)

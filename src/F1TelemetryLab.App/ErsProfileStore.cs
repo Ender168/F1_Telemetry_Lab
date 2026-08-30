@@ -94,6 +94,8 @@ public static class ErsProfileStore
             decrease_key = VirtualKeyName(options.DecreaseVirtualKey),
             increase_key = VirtualKeyName(options.IncreaseVirtualKey),
             emergency_stop_key = VirtualKeyName(options.EmergencyStopVirtualKey),
+            input_backend = "windows-scan-code",
+            key_hold_ms = options.KeyHoldMilliseconds,
             profile
         };
         File.WriteAllText(

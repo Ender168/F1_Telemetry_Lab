@@ -60,14 +60,14 @@ public sealed class ErsAutopilotService : IDisposable
         try
         {
             if (!F12026Parser.TryParseHeader(payload, out var header) || header.PacketFormat != AppInfo.SupportedPacketFormat) return;
+            if (_options.OperatingMode == ErsAutopilotOperatingMode.Live && !PollInputRelease(receivedAt)) return;
             if (_sessionUid != 0 && header.SessionUid != _sessionUid) ResetForSession(header.SessionUid);
             _sessionUid = header.SessionUid;
             if (_options.OperatingMode == ErsAutopilotOperatingMode.Live && _inputSink.EmergencyStopRequested(_options))
             {
                 if (!_inputFault)
                 {
-                    _inputFault = true;
-                    _inputFaultReason = "Emergency stop F12 was pressed. Live ERS input is disabled until the next recording.";
+                    LatchInputFault("Emergency stop F12 was pressed. Live ERS input is disabled until the next recording.");
                     _log?.Invoke(_inputFaultReason);
                 }
                 SetStatus("Emergency stop", "", null, null, null, _inputFaultReason);
@@ -102,8 +102,7 @@ public sealed class ErsAutopilotService : IDisposable
             var detail = "ERS controller error: " + ex.Message;
             if (_options.OperatingMode == ErsAutopilotOperatingMode.Live)
             {
-                _inputFault = true;
-                _inputFaultReason = detail + " Live input is disabled until the next recording.";
+                LatchInputFault(detail + " Live input is disabled until the next recording.");
                 detail = _inputFaultReason;
             }
             SetStatus("Blocked", "", null, null, null, detail);
@@ -115,7 +114,11 @@ public sealed class ErsAutopilotService : IDisposable
         }
     }
 
-    public void Dispose() => _audit.Dispose();
+    public void Dispose()
+    {
+        _inputSink.Dispose();
+        _audit.Dispose();
+    }
 
     private void UpdateLapRows(byte[] payload, DateTimeOffset receivedAt)
     {
@@ -250,23 +253,21 @@ public sealed class ErsAutopilotService : IDisposable
 
     private void ReconcileLiveInput(ErsControlDecision decision, DateTimeOffset now)
     {
-        if (decision.CurrentMode == decision.TargetMode)
-        {
-            if (_pendingExpectedMode is not null)
-                _audit.Write(decision, "telemetry-confirmed");
-            ClearPendingCommand();
-            SetStatus("Holding", decision.Segment, decision.CurrentMode, decision.TargetMode, decision.BatteryPct, decision.Reason);
-            return;
-        }
-
         if (_pendingExpectedMode is not null)
         {
             if (decision.CurrentMode == _pendingExpectedMode)
             {
+                _audit.Write(decision, "telemetry-confirmed");
                 ClearPendingCommand();
             }
             else if (_pendingFromMode is not null && decision.CurrentMode != _pendingFromMode)
             {
+                _audit.Write(decision, $"feedback-unexpected:{_pendingExpectedMode}->{decision.CurrentMode}");
+                ClearPendingCommand();
+            }
+            else if (PendingDirection() != ErsModeTransition.Next(decision.CurrentMode, decision.TargetMode))
+            {
+                _audit.Write(decision, $"feedback-superseded:expected-{_pendingExpectedMode}");
                 ClearPendingCommand();
             }
             else if (now - _pendingSince < TimeSpan.FromMilliseconds(_options.ConfirmationTimeoutMs))
@@ -282,8 +283,7 @@ public sealed class ErsAutopilotService : IDisposable
                 _retryCount++;
                 if (_retryCount > _options.MaximumRetries)
                 {
-                    _inputFault = true;
-                    _inputFaultReason = "No ERS mode confirmation after repeated key taps. Check the F7/F8 bindings.";
+                    LatchInputFault("F1 did not confirm the ERS mode after repeated held scan-code inputs. Live input is disabled until the next recording.");
                     _audit.Write(decision, "feedback-timeout-blocked");
                     SetStatus("Blocked", decision.Segment, decision.CurrentMode, decision.TargetMode, decision.BatteryPct,
                         _inputFaultReason);
@@ -292,17 +292,21 @@ public sealed class ErsAutopilotService : IDisposable
             }
         }
 
+        if (decision.CurrentMode == decision.TargetMode)
+        {
+            SetStatus("Holding", decision.Segment, decision.CurrentMode, decision.TargetMode, decision.BatteryPct, decision.Reason);
+            return;
+        }
+
         if (now - _lastCommandAt < TimeSpan.FromMilliseconds(_options.MinimumCommandIntervalMs)) return;
         var direction = ErsModeTransition.Next(decision.CurrentMode, decision.TargetMode);
         if (direction is null) return;
-        var result = _inputSink.Tap(direction.Value, _options);
-        _lastCommandAt = now;
+        var result = _inputSink.Tap(direction.Value, _options, now);
         if (!result.Success)
         {
             if (!result.Retryable)
             {
-                _inputFault = true;
-                _inputFaultReason = result.Message;
+                LatchInputFault(result.Message);
             }
             _audit.Write(decision, result.Retryable ? "input-wait: " + result.Message : "input-error: " + result.Message);
             SetStatus(result.Retryable ? "Waiting for game" : "Blocked", decision.Segment,
@@ -310,12 +314,69 @@ public sealed class ErsAutopilotService : IDisposable
             return;
         }
 
+        _lastCommandAt = now;
         _pendingFromMode = decision.CurrentMode;
         _pendingExpectedMode = ErsModeTransition.ExpectedAfter(decision.CurrentMode, direction.Value);
         _pendingSince = now;
         _audit.Write(decision, result.Message);
         SetStatus("Key sent", decision.Segment, decision.CurrentMode, decision.TargetMode, decision.BatteryPct,
             $"{result.Message} Waiting for {_pendingExpectedMode}. {decision.Reason}");
+    }
+
+    private bool PollInputRelease(DateTimeOffset now)
+    {
+        var result = _inputSink.Poll(now);
+        if (result is null) return true;
+        _audit.Write(InputLifecycleDecision(now), result.Success ? result.Message : "input-error: " + result.Message);
+        if (result.Success)
+        {
+            _log?.Invoke("ERS input: " + result.Message);
+            return true;
+        }
+
+        LatchInputFault(result.Message);
+        SetStatus("Blocked", "", null, null, null, _inputFaultReason);
+        return false;
+    }
+
+    private ErsControlDecision InputLifecycleDecision(DateTimeOffset now)
+    {
+        var current = _carStatus is { ErsDeployMode: >= 0 and <= 3 }
+            ? (ErsDeployMode)_carStatus.ErsDeployMode
+            : ErsDeployMode.Medium;
+        var target = _pendingExpectedMode ?? current;
+        var battery = _profile is null || _carStatus is null
+            ? 0
+            : Math.Clamp(_carStatus.ErsStoreEnergy / _profile.BatteryCapacityJ * 100d, 0, 100);
+        return new ErsControlDecision(
+            now,
+            false,
+            current,
+            target,
+            "input-pulse",
+            "",
+            "Windows scan-code pulse lifecycle.",
+            battery,
+            _playerLap?.LapNum ?? 0,
+            _playerLap?.LapDistance ?? 0,
+            ValidGap(_playerLap?.DeltaToCarInFrontMs),
+            null);
+    }
+
+    private ErsInputDirection? PendingDirection()
+    {
+        if (_pendingFromMode is null || _pendingExpectedMode is null) return null;
+        return _pendingExpectedMode.Value > _pendingFromMode.Value
+            ? ErsInputDirection.Increase
+            : ErsInputDirection.Decrease;
+    }
+
+    private void LatchInputFault(string message)
+    {
+        _inputFault = true;
+        _inputFaultReason = message;
+        try { _inputSink.Dispose(); }
+        catch (Exception ex) { _log?.Invoke("ERS input release warning: " + ex.Message); }
     }
 
     private void AuditDecisionTransition(ErsControlDecision decision)

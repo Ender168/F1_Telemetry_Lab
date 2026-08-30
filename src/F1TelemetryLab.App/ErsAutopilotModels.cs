@@ -39,6 +39,7 @@ public sealed class ErsAutopilotOptions
     public int DecreaseVirtualKey { get; init; } = 0x76; // F7
     public int IncreaseVirtualKey { get; init; } = 0x77; // F8
     public int EmergencyStopVirtualKey { get; init; } = 0x7B; // F12
+    public int KeyHoldMilliseconds { get; init; } = 80;
     public int MinimumCommandIntervalMs { get; init; } = 350;
     public int ConfirmationTimeoutMs { get; init; } = 900;
     public int MaximumRetries { get; init; } = 3;

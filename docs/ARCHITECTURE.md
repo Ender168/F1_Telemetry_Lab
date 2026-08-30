@@ -89,7 +89,7 @@ flowchart LR
 - `chatgpt_pack.sqlite` не содержит raw packets, но analysis ZIP также включает полный согласованный snapshot `session.sqlite`.
 - ERS Live никогда не выполняется для online session или при включённом игровом ERS Assist.
 - Каждая команда ERS является одним шагом и требует UDP-подтверждения перед следующим шагом.
-- Overtake Mode 2026 не входит в ERS controller v0.9.0.
+- Overtake Mode 2026 не входит в ERS controller v0.9.1.
 - Cleanup работает только внутри конкретной `<root>/telemetry_packs/`, только по preview и после подтверждения.
 
 ## Основные компоненты
