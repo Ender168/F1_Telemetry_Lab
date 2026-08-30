@@ -15,6 +15,16 @@ The storage policy now avoids known low-value duplication:
 - unchanged packet 5 Car Setup payloads are deduplicated after the first stored copy;
 - packet 6 is no longer simultaneously expanded into `car_telemetry` during live recording. Live display rows stay in RAM and the derived table is rebuilt from raw packet 6 during analysis.
 
+### Additional 2026 telemetry
+
+Previously retained-but-unparsed 2026 packets are now exposed as queryable projections:
+
+- packet 11 Session History -> `session_history_laps` and `session_history_stints`;
+- packet 12 Tyre Sets -> `tyre_sets`, retaining the latest 20-set snapshot for each car;
+- packet 16 Car Telemetry 2 -> `car_telemetry_2_player`, exposing player active-aero mode/availability/activation distance, overtake availability/activity/activation distance, 2026-regulations flag and wrong-way state.
+
+Session History and Tyre Sets are stored as compact latest snapshots for all cars. Packet 16 remains complete for all 24 cars in `raw_packets`, while only the player-car high-frequency projection is materialized to avoid recreating the storage problem v0.8.2 is intended to solve.
+
 ### Post-analysis compaction
 
 After a successful analysis and telemetry-completeness pass, the database adopts the storage profile `raw_plus_summaries_plus_player_detail`.
@@ -27,7 +37,7 @@ Detailed frame-level tables keep only player-car rows:
 - `car_status`;
 - `car_damage`.
 
-All-car analytical information remains available through compact products such as `lap_summary`, `lap_state_summary`, `analysis_trace_10m`, `final_classification`, `participants`, events and setup snapshots. `motion_ex_player` and `lap_positions` remain available because they are compact and directly useful for post-race analysis.
+All-car analytical information remains available through compact products such as `lap_summary`, `lap_state_summary`, `analysis_trace_10m`, `final_classification`, `participants`, events, setup snapshots, session history and tyre-set snapshots. `motion_ex_player`, `lap_positions` and `car_telemetry_2_player` remain available because they are directly useful for post-race analysis.
 
 Temporary/rebuildable tables are removed after analysis:
 
@@ -43,4 +53,4 @@ No removed frame-level data is unique. Running the analysis pipeline again recon
 
 ### Diagnostics
 
-The manifest and `session_metadata` record the active storage profile, rows pruned, transient tables removed, database size before/after optimization and bytes saved.
+The manifest and `session_metadata` record the active storage profile, rows pruned, transient tables removed, database size before/after optimization and bytes saved. They also expose row counts for Session History, tyre sets and player Car Telemetry 2.
