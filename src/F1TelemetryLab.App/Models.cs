@@ -137,7 +137,8 @@ public sealed record CarStatusSample(
     float ErsHarvestedThisLapMguk,
     float ErsHarvestedThisLapMguh,
     float ErsHarvestLimitPerLap,
-    float ErsDeployedThisLap);
+    float ErsDeployedThisLap,
+    bool NetworkPaused);
 
 public sealed record CarDamageSample(
     DateTimeOffset ReceivedAt,

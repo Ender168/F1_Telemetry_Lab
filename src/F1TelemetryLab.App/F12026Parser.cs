@@ -231,8 +231,9 @@ public static class F12026Parser
             var harvestMguh = F32(c, 46);
             var harvestLimit = F32(c, 50);
             var deployed = F32(c, 54);
+            var networkPaused = c[58] != 0;
             samples.Add(new CarStatusSample(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.OverallFrameIdentifier, h.PlayerCarIndex, i, h.PlayerCarIndex == i,
-                frontBrakeBias, fuelInTank, fuelRemainingLaps, actualTyreCompound, visualTyreCompound, tyreAge, ice, mguk, ers, ersMode, harvestMguk, harvestMguh, harvestLimit, deployed));
+                frontBrakeBias, fuelInTank, fuelRemainingLaps, actualTyreCompound, visualTyreCompound, tyreAge, ice, mguk, ers, ersMode, harvestMguk, harvestMguh, harvestLimit, deployed, networkPaused));
             offset += CarStatusSize2026;
         }
         return samples;
@@ -461,6 +462,36 @@ public static class F12026Parser
             TrackLengthMeters = trackLength,
             SessionName = $"{Sanitize(trackName)}_{Sanitize(sessionName)}_{startedAt:yyyyMMdd_HHmmss}"
         };
+    }
+
+    public static SessionControlSample? TryParseSessionControl(ReadOnlySpan<byte> data, DateTimeOffset receivedAt)
+    {
+        if (!TryParseHeader(data, out var h)) return null;
+        if (h.PacketFormat != AppInfo.SupportedPacketFormat || h.PacketId != 1) return null;
+
+        // PacketSessionData 2026 keeps the safety-car and network flags after the fixed
+        // 21-element marshal-zone array: payload offsets 124 and 125 respectively.
+        // The ERS assist flag follows 64 eight-byte weather forecast samples and the
+        // intervening fixed fields at payload offset 661. A short diagnostic fixture
+        // can omit that tail, in which case -1 means "not observed".
+        const int minimumPayloadSize = 126;
+        if (data.Length < HeaderSize + minimumPayloadSize) return null;
+        var payload = data.Slice(HeaderSize);
+        return new SessionControlSample(
+            receivedAt,
+            h.SessionUid,
+            h.SessionTime,
+            payload[0],
+            payload[3],
+            U16(payload, 4),
+            payload[6],
+            unchecked((sbyte)payload[7]),
+            payload[8],
+            payload[14] != 0,
+            payload[15] != 0,
+            payload[124],
+            payload[125] != 0,
+            payload.Length > 661 ? payload[661] : -1);
     }
 
     private static int SectorMs(ushort msPart, byte minPart) => minPart * 60000 + msPart;

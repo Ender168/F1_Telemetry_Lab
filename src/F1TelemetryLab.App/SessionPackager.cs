@@ -7,7 +7,7 @@ namespace F1TelemetryLab;
 
 public static class SessionPackager
 {
-    private const int AnalysisPackVersion = 1;
+    private const int AnalysisPackVersion = 2;
 
     public static string CreateZip(string sessionFolder, string databasePath, string? preferredSessionName = null)
     {
@@ -215,6 +215,8 @@ public static class SessionPackager
             "events.json          Race events, confirmed flashbacks and suspected state resets.\n" +
             "data_quality.json    Capture and analysis quality diagnostics.\n" +
             "track.json           Track/session identifiers used by the game.\n\n" +
+            "ers_profile_used.json Exact track-specific ERS profile selected for this recording, when available.\n" +
+            "ers_control_log.csv   ERS decisions, safety blocks, key taps and telemetry confirmations.\n\n" +
             "The full database is intentionally included. Compact data alone can hide parser defects that are recoverable from raw packets.\n");
     }
 

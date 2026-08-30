@@ -6,7 +6,10 @@
 flowchart TD
     UDP["F1 UDP :20777"] --> RX["Receive loop"]
     RX --> Q["Bounded channel 8192"]
-    Q --> DB["Single SQLite writer"]
+    Q --> ERS["ERS decision service"]
+    ERS --> DB["Single SQLite writer"]
+    ERS --> AUDIT["Profile snapshot + audit"]
+    ERS --> INPUT["Foreground key input"]
     DB --> RAW["Raw packets"]
     RAW --> STAGE["Staging analysis DB"]
     STAGE --> VIEW["Reports and UI"]
@@ -14,6 +17,24 @@ flowchart TD
 ```
 
 Receiver выполняет только проверку header, packet-aware quality counters и постановку неизменённого datagram в очередь. Один writer владеет SQLite connection. Stop закрывает receiver, дренирует channel, фиксирует metadata/quality, закрывает базу и только затем запускает анализ.
+
+ERS service вызывается из того же последовательного consumer после извлечения пакета из очереди. Ошибка контроллера изолируется и не останавливает запись или сохранение raw UDP.
+
+## ERS control pipeline
+
+```mermaid
+flowchart TD
+    P["Packets 1, 2, 6, 7"] --> SAFE["Safety gate"]
+    SAFE --> RULE["Track JSON profile"]
+    RULE --> TARGET["Target deploy mode"]
+    TARGET --> TAP["One F7/F8 step"]
+    TAP --> CONFIRM["UDP confirmation"]
+    CONFIRM --> TARGET
+```
+
+`ErsDecisionEngine` не зависит от Windows input и тестируется как чистый state machine. `ErsAutopilotService` соединяет parser, safety gate, выбранный профиль, feedback state и audit. `WindowsKeyboardErsInputSink` является единственным компонентом с Win32 `SendInput` и проверяет foreground process перед каждым нажатием.
+
+Профиль выбирается по `track_id + session_type`. Внутренние `start_m/end_m` используются только как координаты триггеров; UI и audit показывают человекочитаемый `segment`. Порог восстановления имеет гистерезис. Правило `once_per_lap` резервирует активацию при входе и переносит активное wrap-around правило через линию старта без повторного запуска.
 
 ## Atomic analysis
 
@@ -65,7 +86,10 @@ flowchart LR
 - Finish reset не является rewind.
 - Незавершённый круг не получает аналитическое время и не участвует в consumption aggregates.
 - Track distance и corner labels используют одну геометрическую шкалу.
-- Полная raw database не попадает в компактный ZIP.
+- `chatgpt_pack.sqlite` не содержит raw packets, но analysis ZIP также включает полный согласованный snapshot `session.sqlite`.
+- ERS Live никогда не выполняется для online session или при включённом игровом ERS Assist.
+- Каждая команда ERS является одним шагом и требует UDP-подтверждения перед следующим шагом.
+- Overtake Mode 2026 не входит в ERS controller v0.9.0.
 - Cleanup работает только внутри конкретной `<root>/telemetry_packs/`, только по preview и после подтверждения.
 
 ## Основные компоненты
@@ -73,7 +97,7 @@ flowchart LR
 | Компонент | Ответственность |
 |---|---|
 | `UdpRecorder` | UDP lifecycle, bounded queue, live state, packet-aware quality |
-| `TelemetryDatabase` | schema v4, WAL, batching, raw persistence |
+| `TelemetryDatabase` | schema v5, WAL, batching, raw persistence |
 | `DatabaseSchemaMigrator` | идемпотентные `user_version` migrations |
 | `F12026Parser` | bounds-checked packet format 2026, включая packet 5 |
 | `LapQualityAnalyzer` | official flashback, finish completion и lap states |
@@ -83,4 +107,8 @@ flowchart LR
 | `RaceStrategyAnalyzer` | canonical stints and pit stops |
 | `SessionSummaryService` | UI cards and global session context |
 | `CarSetupDataService` | setup history for the selected driver |
-| `SessionPackager` | compact database and upload ZIP |
+| `ErsProfileStore` | seed, validation and deterministic selection of per-track profiles |
+| `ErsDecisionEngine` | battery hysteresis, rule priority and per-lap activation state |
+| `ErsAutopilotService` | packet state, safety blocks, feedback loop and audit |
+| `WindowsKeyboardErsInputSink` | foreground-only F7/F8 injection and F12 emergency stop |
+| `SessionPackager` | consistent full database, compact database and analysis ZIP |

@@ -39,6 +39,8 @@ public sealed class MainWindow : Window
     private TextBox _portText = null!;
     private TextBox _rootText = null!;
     private CheckBox _autoZipCheck = null!;
+    private ComboBox _ersModeCombo = null!;
+    private TextBlock _ersStatusText = null!;
     private Button _startButton = null!;
     private Button _stopButton = null!;
     private ListBox _sessionList = null!;
@@ -93,6 +95,11 @@ public sealed class MainWindow : Window
     private bool _busy;
     private bool _closingAfterStop;
     private bool _closeStopInProgress;
+
+    private sealed record ErsModeChoice(ErsAutopilotOperatingMode Mode, string Label)
+    {
+        public override string ToString() => Label;
+    }
 
     public MainWindow()
     {
@@ -185,7 +192,10 @@ public sealed class MainWindow : Window
         ["Delete previewed"] = "Удалить показанные",
         ["Copy logs"] = "Копировать журнал",
         ["Cars"] = "Болиды",
-        ["Log"] = "Журнал"
+        ["Log"] = "Журнал",
+        ["ERS Autopilot"] = "Автопилот ERS",
+        ["Open ERS profiles"] = "Открыть профили ERS",
+        ["ERS mode"] = "Режим ERS"
     };
 
     private static IBrush Hex(uint rgb)
@@ -306,6 +316,10 @@ public sealed class MainWindow : Window
         _portText = new TextBox { Text = _settings.Port.ToString(CultureInfo.InvariantCulture), Width = 80, PlaceholderText = "Port" };
         _rootText = new TextBox { Text = _settings.RootFolder, Width = 320, PlaceholderText = "Root folder" };
         _autoZipCheck = new CheckBox { Content = "Auto ZIP after Stop", IsChecked = _settings.AutoZip, Foreground = Brushes.White, VerticalAlignment = VerticalAlignment.Center };
+        var ersChoices = ErsModeChoices();
+        _ersModeCombo = new ComboBox { ItemsSource = ersChoices, Width = 145, HorizontalAlignment = HorizontalAlignment.Left };
+        var configuredErsMode = ErsAutopilotOptions.ParseOperatingMode(_settings.ErsAutopilotMode);
+        _ersModeCombo.SelectedItem = ersChoices.First(choice => choice.Mode == configuredErsMode);
         _startButton = new Button { Content = "Start Recording", Width = 150 };
         _stopButton = new Button { Content = "Stop", Width = 100, IsEnabled = false };
         _startButton.Click += (_, _) => StartRecording();
@@ -316,6 +330,8 @@ public sealed class MainWindow : Window
         controls.Children.Add(new TextBlock { Text = "Root", Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center });
         controls.Children.Add(_rootText);
         controls.Children.Add(_autoZipCheck);
+        controls.Children.Add(new TextBlock { Text = "ERS mode", Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center });
+        controls.Children.Add(_ersModeCombo);
         controls.Children.Add(_startButton);
         controls.Children.Add(_stopButton);
         grid.Children.Add(controls);
@@ -370,7 +386,53 @@ public sealed class MainWindow : Window
         logPanel.Children.Add(logList);
         grid.Children.Add(logPanel);
 
+        var openProfiles = new Button { Content = "Open ERS profiles", Width = 170, VerticalAlignment = VerticalAlignment.Center };
+        openProfiles.Click += (_, _) => OpenErsProfilesFolder();
+        _ersStatusText = new TextBlock
+        {
+            Text = ErsAutopilotStatus.Initial(configuredErsMode).Display,
+            Foreground = Hex(0xC7D4E8),
+            TextWrapping = TextWrapping.Wrap,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        var ersPanel = new Border
+        {
+            Background = Hex(0x1D2630),
+            BorderBrush = Hex(0x354255),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(12),
+            Margin = new Thickness(0, 12, 0, 0),
+            Child = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto"),
+                ColumnSpacing = 14,
+                Children =
+                {
+                    new TextBlock { Text = "ERS Autopilot", FontSize = 17, FontWeight = FontWeight.Bold, Foreground = Brushes.White, VerticalAlignment = VerticalAlignment.Center },
+                    _ersStatusText,
+                    openProfiles
+                }
+            }
+        };
+        Grid.SetColumn(_ersStatusText, 1);
+        Grid.SetColumn(openProfiles, 2);
+        Grid.SetRow(ersPanel, 3);
+        Grid.SetColumnSpan(ersPanel, 2);
+        grid.Children.Add(ersPanel);
+
         return grid;
+    }
+
+    private IReadOnlyList<ErsModeChoice> ErsModeChoices()
+    {
+        var russian = string.Equals(_settings.Language, "ru", StringComparison.OrdinalIgnoreCase);
+        return new[]
+        {
+            new ErsModeChoice(ErsAutopilotOperatingMode.Off, russian ? "Выключен" : "Off"),
+            new ErsModeChoice(ErsAutopilotOperatingMode.DryRun, russian ? "Тест без ввода" : "Dry-run"),
+            new ErsModeChoice(ErsAutopilotOperatingMode.Live, russian ? "Управление" : "Live control")
+        };
     }
 
     private Control BuildCards()
@@ -1668,6 +1730,14 @@ public sealed class MainWindow : Window
             Foreground = Brushes.LightGray,
             TextWrapping = TextWrapping.Wrap
         });
+        panel.Children.Add(new TextBlock
+        {
+            Text = string.Equals(_settings.Language, "ru", StringComparison.OrdinalIgnoreCase)
+                ? "Прототип ERS: выключите ERS Assist в игре, назначьте уменьшение стандартного режима ERS на F7, увеличение на F8. Начните с теста без ввода. Управление заблокировано в онлайне, отправляет клавиши только при активном окне F1 25, аварийная остановка - F12."
+                : "ERS prototype: turn the in-game ERS Assist off, bind standard ERS mode decrease to F7 and increase to F8. Start with Dry-run. Live control is blocked online, sends keys only while F1 25 is foreground, and F12 is the emergency stop.",
+            Foreground = Hex(0xF4BF75),
+            TextWrapping = TextWrapping.Wrap
+        });
 
         var form = new Grid
         {
@@ -1808,7 +1878,7 @@ public sealed class MainWindow : Window
         panel.Children.Add(_settingsStatus);
         panel.Children.Add(new TextBlock
         {
-            Text = $"v{AppInfo.Version} | schema {AppInfo.DatabaseSchemaVersion} | compact packages include lap reports, data-quality dimensions, telemetry bins and Car Setup changes.",
+            Text = $"v{AppInfo.Version} | schema {AppInfo.DatabaseSchemaVersion} | analysis packs include full/compact telemetry plus ERS profile and audit sidecars.",
             Foreground = Hex(0xA8B3C7),
             TextWrapping = TextWrapping.Wrap
         });
@@ -1877,11 +1947,14 @@ public sealed class MainWindow : Window
             _settings.Port = port;
             _settings.RootFolder = root;
             _settings.AutoZip = _autoZipCheck.IsChecked == true;
+            var ersMode = (_ersModeCombo.SelectedItem as ErsModeChoice)?.Mode ?? ErsAutopilotOperatingMode.DryRun;
+            _settings.ErsAutopilotMode = ErsAutopilotOptions.ToSettingValue(ersMode);
             try { AppSettingsService.Save(_settings); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { AddLog("Settings persistence warning: " + ex.Message); }
-            _recorder.Start(port, root);
+            _recorder.Start(port, root, ErsAutopilotOptions.FromSettings(_settings));
             _startButton.IsEnabled = false;
             _stopButton.IsEnabled = true;
+            _ersModeCombo.IsEnabled = false;
         }
         catch (Exception ex)
         {
@@ -1914,6 +1987,7 @@ public sealed class MainWindow : Window
             _busy = false;
             _startButton.IsEnabled = true;
             _stopButton.IsEnabled = _recorder.IsRecording;
+            _ersModeCombo.IsEnabled = !_recorder.IsRecording;
         }
     }
 
@@ -1925,6 +1999,7 @@ public sealed class MainWindow : Window
         _samplesText.Text = _recorder.CarSamplesSeen.ToString("N0");
         _sessionText.Text = _recorder.CurrentSession?.TrackName ?? "None";
         _qualityText.Text = $"{quality.Rating}\nDrops {quality.QueueDrops:N0} | Queue {quality.QueueDepth:N0}/{quality.QueueHighWatermark:N0}";
+        _ersStatusText.Text = _recorder.ErsStatus.Display;
 
         _liveRows.Clear();
         foreach (var row in _recorder.LiveCars)
@@ -1976,6 +2051,20 @@ public sealed class MainWindow : Window
     {
         _logRows.Insert(0, $"{DateTime.Now:HH:mm:ss}  {message}");
         while (_logRows.Count > 200) _logRows.RemoveAt(_logRows.Count - 1);
+    }
+
+    private void OpenErsProfilesFolder()
+    {
+        try
+        {
+            var root = string.IsNullOrWhiteSpace(_rootText.Text) ? DefaultRootFolder() : _rootText.Text.Trim();
+            var folder = ErsProfileStore.EnsureDefaultProfiles(root);
+            Process.Start(new ProcessStartInfo("explorer.exe", folder) { UseShellExecute = true });
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException)
+        {
+            AddLog("Open ERS profiles failed: " + ex.Message);
+        }
     }
 
 

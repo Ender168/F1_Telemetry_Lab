@@ -88,3 +88,14 @@ Packet 3 допускает несколько событий одного ка�
 ## Compact pack
 
 `chatgpt_pack.sqlite` исключает `raw_packets`, но включает metadata, quality dimensions, lap summaries, setup changes, rewinds/events, participants, 10 m trace, classification и aliases. `PRAGMA user_version` compact DB совпадает с основной схемой.
+
+## ERS sidecars
+
+ERS Autopilot не меняет schema 5. Управляющие данные хранятся рядом с сессией и автоматически копируются в analysis pack:
+
+| Файл | Содержание |
+|---|---|
+| `ers_profile_used.json` | Полный снимок выбранного track profile, operating mode и назначенных клавиш |
+| `ers_control_log.csv` | Решение, участок, заряд, текущий и целевой режим, интервалы до соперников, действие и причина |
+
+Пользовательские алгоритмы находятся вне сессий в `<root>/ers_profiles/*.json`. Встроенные profiles копируются только при отсутствии, поэтому обновление приложения не меняет накопленные настройки.

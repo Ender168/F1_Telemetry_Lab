@@ -43,6 +43,9 @@ public sealed class UdpRecorder : IAsyncDisposable
     private int _raceStartObserved;
     private int _raceFinishObserved;
     private int _finalClassificationObserved;
+    private ErsAutopilotService? _ersAutopilot;
+    private ErsAutopilotOptions _ersOptions = new() { OperatingMode = ErsAutopilotOperatingMode.Off };
+    private ErsAutopilotStatus _lastErsStatus = ErsAutopilotStatus.Initial(ErsAutopilotOperatingMode.Off);
 
     public bool IsRecording => _cts is not null;
     public bool IsStopping
@@ -58,6 +61,7 @@ public sealed class UdpRecorder : IAsyncDisposable
     public long PacketsSeen => Interlocked.Read(ref _packetsSeen);
     public long CarSamplesSeen => Interlocked.Read(ref _carSamplesSeen);
     public IReadOnlyList<LiveCarRow> LiveCars => _liveCars.Values.OrderBy(x => x.CarIndex).ToList();
+    public ErsAutopilotStatus ErsStatus => _ersAutopilot?.Status ?? _lastErsStatus;
     public RecordingQualitySnapshot Quality => new(
         PacketsSeen,
         CarSamplesSeen,
@@ -74,7 +78,7 @@ public sealed class UdpRecorder : IAsyncDisposable
     public event Action? Updated;
     public event Action<string>? Log;
 
-    public void Start(int port, string rootFolder)
+    public void Start(int port, string rootFolder, ErsAutopilotOptions? ersOptions = null)
     {
         if (IsActive) return;
 
@@ -103,6 +107,34 @@ public sealed class UdpRecorder : IAsyncDisposable
             database = new TelemetryDatabase(dbPath);
             database.SaveMetadata(_metadata);
 
+            _ersOptions = ersOptions ?? new ErsAutopilotOptions { OperatingMode = ErsAutopilotOperatingMode.Off };
+            _lastErsStatus = ErsAutopilotStatus.Initial(_ersOptions.OperatingMode);
+            if (_ersOptions.OperatingMode == ErsAutopilotOperatingMode.Off)
+            {
+                _ersAutopilot = null;
+            }
+            else
+            {
+                try
+                {
+                    var profiles = ErsProfileStore.Load(rootFolder);
+                    _ersAutopilot = new ErsAutopilotService(
+                        _ersOptions,
+                        profiles,
+                        new WindowsKeyboardErsInputSink(),
+                        sessionFolder,
+                        message => Log?.Invoke(message));
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or ArgumentException)
+                {
+                    _ersAutopilot = null;
+                    _lastErsStatus = new ErsAutopilotStatus(
+                        _ersOptions.OperatingMode, "Blocked", "", "", null, null, null,
+                        "ERS autopilot initialization failed: " + ex.Message);
+                    Log?.Invoke("ERS autopilot initialization failed; telemetry recording will continue: " + ex.Message);
+                }
+            }
+
             _packetQueue = Channel.CreateBounded<QueuedPacket>(new BoundedChannelOptions(PacketQueueCapacity)
             {
                 SingleReader = true,
@@ -125,6 +157,8 @@ public sealed class UdpRecorder : IAsyncDisposable
         }
         catch
         {
+            try { _ersAutopilot?.Dispose(); } catch { }
+            _ersAutopilot = null;
             database?.Dispose();
             udp?.Dispose();
             _cts?.Dispose();
@@ -178,6 +212,10 @@ public sealed class UdpRecorder : IAsyncDisposable
             catch (Exception ex) { RegisterBackgroundError("Database writer", ex); }
             _writerTask = null;
         }
+        _lastErsStatus = _ersAutopilot?.Status ?? _lastErsStatus;
+        try { _ersAutopilot?.Dispose(); }
+        catch (Exception ex) { Log?.Invoke("ERS audit close warning: " + ex.Message); }
+        _ersAutopilot = null;
         cts.Dispose();
 
         if (_metadata is not null)
@@ -202,7 +240,7 @@ public sealed class UdpRecorder : IAsyncDisposable
         Status = _backgroundError is null ? "Stopped" : "Stopped with errors";
         if (_metadata is not null)
         {
-            try { WriteManifest(_metadata, Quality, _backgroundError); }
+            try { WriteManifest(_metadata, Quality, _backgroundError, _lastErsStatus); }
             catch (Exception ex) { Log?.Invoke("Manifest warning: " + ex.Message); }
 
             try
@@ -317,6 +355,7 @@ public sealed class UdpRecorder : IAsyncDisposable
             await foreach (var packet in queue.Reader.ReadAllAsync())
             {
                 Interlocked.Decrement(ref _queueDepth);
+                _ersAutopilot?.ProcessPacket(packet.Payload, packet.ReceivedAt);
 
                 var storageDecision = _rawStoragePolicy.Evaluate(packet.Header, packet.Payload, _metadata?.SessionType ?? -1);
                 if (storageDecision == RawPacketStorageDecision.Store)
@@ -490,7 +529,11 @@ public sealed class UdpRecorder : IAsyncDisposable
         return cleaned.Replace(' ', '_');
     }
 
-    private static void WriteManifest(SessionMetadata metadata, RecordingQualitySnapshot quality, Exception? backgroundError)
+    private static void WriteManifest(
+        SessionMetadata metadata,
+        RecordingQualitySnapshot quality,
+        Exception? backgroundError,
+        ErsAutopilotStatus ersStatus)
     {
         var dbExists = File.Exists(metadata.DatabasePath);
         var dbSize = dbExists ? new FileInfo(metadata.DatabasePath).Length : 0L;
@@ -514,6 +557,10 @@ public sealed class UdpRecorder : IAsyncDisposable
             database_exists = dbExists,
             database_size_bytes = dbSize,
             recording_quality = quality,
+            ers_autopilot_mode = ErsAutopilotOptions.ToSettingValue(ersStatus.OperatingMode),
+            ers_autopilot_state = ersStatus.State,
+            ers_profile_id = string.IsNullOrWhiteSpace(ersStatus.ProfileId) ? null : ersStatus.ProfileId,
+            ers_final_detail = ersStatus.Detail,
             background_error = backgroundError?.Message
         };
         File.WriteAllText(
