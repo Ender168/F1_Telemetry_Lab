@@ -8,6 +8,7 @@ namespace F1TelemetryLab;
 public sealed class UdpRecorder : IAsyncDisposable
 {
     private const int PacketQueueCapacity = 8192;
+    private static readonly TimeSpan FinalClassificationGracePeriod = TimeSpan.FromSeconds(8);
 
     private sealed record QueuedPacket(DateTimeOffset ReceivedAt, PacketHeader? Header, byte[] Payload);
 
@@ -35,6 +36,9 @@ public sealed class UdpRecorder : IAsyncDisposable
     private int _queueDepth;
     private int _queueHighWatermark;
     private int _sessionChanges;
+    private int _raceStartObserved;
+    private int _raceFinishObserved;
+    private int _finalClassificationObserved;
 
     public bool IsRecording => _cts is not null;
     public bool IsStopping
@@ -144,6 +148,9 @@ public sealed class UdpRecorder : IAsyncDisposable
     {
         var cts = _cts;
         if (cts is null) return _metadata;
+
+        await WaitForFinalClassificationIfNeededAsync();
+
         _cts = null;
         Status = "Stopping";
         Updated?.Invoke();
@@ -209,7 +216,7 @@ public sealed class UdpRecorder : IAsyncDisposable
             {
                 try
                 {
-                    _metadata.ZipPath = SessionPackager.CreateZip(_metadata.SessionFolder, _metadata.DatabasePath, _metadata.SessionName);
+                    _metadata.ZipPath = await Task.Run(() => SessionPackager.CreateZip(_metadata.SessionFolder, _metadata.DatabasePath, _metadata.SessionName));
                     Log?.Invoke("Zip created: " + _metadata.ZipPath);
                 }
                 catch (Exception ex)
@@ -227,6 +234,22 @@ public sealed class UdpRecorder : IAsyncDisposable
         }
         Updated?.Invoke();
         return _metadata;
+    }
+
+    private async Task WaitForFinalClassificationIfNeededAsync()
+    {
+        if (Volatile.Read(ref _raceFinishObserved) == 0 || Volatile.Read(ref _finalClassificationObserved) != 0) return;
+
+        Status = "Post-race capture: waiting for final classification";
+        Updated?.Invoke();
+        Log?.Invoke($"Race finish detected. Keeping UDP recording alive for up to {FinalClassificationGracePeriod.TotalSeconds:0} seconds to capture packet 8.");
+        var deadline = DateTimeOffset.UtcNow + FinalClassificationGracePeriod;
+        while (DateTimeOffset.UtcNow < deadline && Volatile.Read(ref _finalClassificationObserved) == 0 && _backgroundError is null)
+            await Task.Delay(200);
+
+        Log?.Invoke(Volatile.Read(ref _finalClassificationObserved) != 0
+            ? "Final classification packet 8 captured during post-race grace period."
+            : "Packet 8 was not captured during the post-race grace period; analysis will mark the result provisional.");
     }
 
     private async Task ReceiveLoop(CancellationToken token)
@@ -249,6 +272,7 @@ public sealed class UdpRecorder : IAsyncDisposable
                 {
                     header = parsed;
                     TrackHeader(parsed);
+                    TrackPostRaceSignals(parsed, result.Buffer, now);
                 }
                 else
                 {
@@ -350,9 +374,11 @@ public sealed class UdpRecorder : IAsyncDisposable
         _metadata.SessionType = sessionMeta.SessionType;
         _metadata.TotalLaps = sessionMeta.TotalLaps;
         _metadata.TrackLengthMeters = sessionMeta.TrackLengthMeters;
+        var officialSessionName = TelemetryCompletenessService.GetOfficialSessionTypeName(sessionMeta.SessionType);
+        var correctedSessionName = $"{SanitizeName(sessionMeta.TrackName)}_{SanitizeName(officialSessionName)}_{_startedAt:yyyyMMdd_HHmmss}";
         _metadata.SessionName = sessionChanged
-            ? $"{sessionMeta.SessionName}_segment_{_sessionChanges + 1}"
-            : sessionMeta.SessionName;
+            ? $"{correctedSessionName}_segment_{_sessionChanges + 1}"
+            : correctedSessionName;
         _db?.SaveMetadata(_metadata);
         if (sessionChanged) Log?.Invoke($"New session UID detected: {packet.Header.SessionUid}. Data is kept in a separate logical segment.");
     }
@@ -364,6 +390,25 @@ public sealed class UdpRecorder : IAsyncDisposable
         if (observation.Duplicate) Interlocked.Increment(ref _duplicateFrames);
         if (observation.OutOfOrder) Interlocked.Increment(ref _outOfOrderFrames);
         if (observation.SessionChanged) Interlocked.Increment(ref _sessionChanges);
+    }
+
+    private void TrackPostRaceSignals(PacketHeader header, byte[] payload, DateTimeOffset receivedAt)
+    {
+        if (header.PacketFormat != AppInfo.SupportedPacketFormat) return;
+        if (header.PacketId == 8)
+        {
+            Interlocked.Exchange(ref _finalClassificationObserved, 1);
+            return;
+        }
+        if (header.PacketId != 3) return;
+
+        var ev = F12026Parser.ParseEventPacket(payload, receivedAt);
+        if (ev is null) return;
+        if (ev.EventCode.Equals("LGOT", StringComparison.OrdinalIgnoreCase))
+            Interlocked.Exchange(ref _raceStartObserved, 1);
+        if (ev.EventCode.Equals("RCWN", StringComparison.OrdinalIgnoreCase) ||
+            (ev.EventCode.Equals("CHQF", StringComparison.OrdinalIgnoreCase) && Volatile.Read(ref _raceStartObserved) != 0))
+            Interlocked.Exchange(ref _raceFinishObserved, 1);
     }
 
     private void UpdateLiveCar(CarTelemetrySample sample)
@@ -391,6 +436,9 @@ public sealed class UdpRecorder : IAsyncDisposable
         Interlocked.Exchange(ref _queueDepth, 0);
         Interlocked.Exchange(ref _queueHighWatermark, 0);
         Interlocked.Exchange(ref _sessionChanges, 0);
+        Interlocked.Exchange(ref _raceStartObserved, 0);
+        Interlocked.Exchange(ref _raceFinishObserved, 0);
+        Interlocked.Exchange(ref _finalClassificationObserved, 0);
         _backgroundError = null;
         _sequenceTracker.Reset();
         _activeCarsBySession.Clear();
@@ -414,6 +462,13 @@ public sealed class UdpRecorder : IAsyncDisposable
         Log?.Invoke($"{source}: {exception.Message}");
     }
 
+    private static string SanitizeName(string value)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var cleaned = new string(value.Select(ch => invalid.Contains(ch) ? '_' : ch).ToArray());
+        return cleaned.Replace(' ', '_');
+    }
+
     private static void WriteManifest(SessionMetadata metadata, RecordingQualitySnapshot quality, Exception? backgroundError)
     {
         var dbExists = File.Exists(metadata.DatabasePath);
@@ -428,6 +483,8 @@ public sealed class UdpRecorder : IAsyncDisposable
             track_name = metadata.TrackName,
             track_id = metadata.TrackId,
             session_type = metadata.SessionType,
+            raw_session_type = metadata.SessionType,
+            raw_session_name = TelemetryCompletenessService.GetOfficialSessionTypeName(metadata.SessionType),
             total_laps = metadata.TotalLaps,
             track_length_m = metadata.TrackLengthMeters,
             started_at = metadata.StartedAt.ToString("O"),
