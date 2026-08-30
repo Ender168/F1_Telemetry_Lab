@@ -45,7 +45,6 @@ public static class SessionStorageOptimizer
         var before = new FileInfo(databasePath).Length;
         long rowsPruned = 0;
         var dropped = 0;
-        var changed = false;
 
         var builder = new SqliteConnectionStringBuilder
         {
@@ -66,6 +65,11 @@ public static class SessionStorageOptimizer
             if (!TableExists(connection, "lap_summary") || !TableExists(connection, "final_classification"))
                 return new SessionStorageOptimizationResult(false, before, before, 0, 0);
 
+            var needsOptimization = TransientTables.Any(table => TableExists(connection, table)) ||
+                                    PlayerDetailTables.Any(table => HasNonPlayerRows(connection, table));
+            if (!needsOptimization)
+                return new SessionStorageOptimizationResult(false, before, before, 0, 0);
+
             using var transaction = connection.BeginTransaction();
             foreach (var table in PlayerDetailTables)
             {
@@ -73,12 +77,7 @@ public static class SessionStorageOptimizer
                 using var command = connection.CreateCommand();
                 command.Transaction = transaction;
                 command.CommandText = $"DELETE FROM {table} WHERE COALESCE(is_player, 0) = 0";
-                var affected = command.ExecuteNonQuery();
-                if (affected > 0)
-                {
-                    rowsPruned += affected;
-                    changed = true;
-                }
+                rowsPruned += command.ExecuteNonQuery();
             }
 
             foreach (var table in TransientTables)
@@ -89,7 +88,6 @@ public static class SessionStorageOptimizer
                 command.CommandText = $"DROP TABLE {table}";
                 command.ExecuteNonQuery();
                 dropped++;
-                changed = true;
             }
 
             SetMeta(connection, transaction, "storage_profile_version", StorageProfileVersion.ToString(CultureInfo.InvariantCulture));
@@ -106,9 +104,8 @@ public static class SessionStorageOptimizer
             checkpoint.ExecuteNonQuery();
         }
 
-        if (changed)
+        using (var vacuum = new SqliteConnection(builder.ToString()))
         {
-            using var vacuum = new SqliteConnection(builder.ToString());
             vacuum.Open();
             Execute(vacuum, "VACUUM;");
             Execute(vacuum, "PRAGMA optimize;");
@@ -124,10 +121,16 @@ public static class SessionStorageOptimizer
             transaction.Commit();
         }
 
-        if (changed)
-            log?.Invoke($"Lean storage: pruned {rowsPruned:N0} non-player derived rows, dropped {dropped} transient tables, database {before:N0} -> {after:N0} bytes.");
+        log?.Invoke($"Lean storage: pruned {rowsPruned:N0} non-player derived rows, dropped {dropped} transient tables, database {before:N0} -> {after:N0} bytes.");
+        return new SessionStorageOptimizationResult(true, before, after, rowsPruned, dropped);
+    }
 
-        return new SessionStorageOptimizationResult(changed, before, after, rowsPruned, dropped);
+    private static bool HasNonPlayerRows(SqliteConnection connection, string table)
+    {
+        if (!TableExists(connection, table) || !ColumnExists(connection, table, "is_player")) return false;
+        using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT 1 FROM {table} WHERE COALESCE(is_player,0)=0 LIMIT 1";
+        return command.ExecuteScalar() is not null;
     }
 
     private static void SetMeta(SqliteConnection connection, SqliteTransaction transaction, string key, string value)
