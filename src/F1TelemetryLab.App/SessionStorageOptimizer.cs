@@ -69,7 +69,7 @@ public static class SessionStorageOptimizer
             using var transaction = connection.BeginTransaction();
             foreach (var table in PlayerDetailTables)
             {
-                if (!TableExists(connection, table) || !ColumnExists(connection, table, "is_player")) continue;
+                if (!TableExists(connection, table, transaction) || !ColumnExists(connection, table, "is_player", transaction)) continue;
                 using var command = connection.CreateCommand();
                 command.Transaction = transaction;
                 command.CommandText = $"DELETE FROM {table} WHERE COALESCE(is_player, 0) = 0";
@@ -83,7 +83,7 @@ public static class SessionStorageOptimizer
 
             foreach (var table in TransientTables)
             {
-                if (!TableExists(connection, table)) continue;
+                if (!TableExists(connection, table, transaction)) continue;
                 using var command = connection.CreateCommand();
                 command.Transaction = transaction;
                 command.CommandText = $"DROP TABLE {table}";
@@ -132,7 +132,7 @@ public static class SessionStorageOptimizer
 
     private static void SetMeta(SqliteConnection connection, SqliteTransaction transaction, string key, string value)
     {
-        if (!TableExists(connection, "session_metadata")) return;
+        if (!TableExists(connection, "session_metadata", transaction)) return;
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = "INSERT INTO session_metadata(key,value) VALUES($key,$value) ON CONFLICT(key) DO UPDATE SET value=excluded.value";
@@ -141,17 +141,19 @@ public static class SessionStorageOptimizer
         command.ExecuteNonQuery();
     }
 
-    private static bool TableExists(SqliteConnection connection, string table)
+    private static bool TableExists(SqliteConnection connection, string table, SqliteTransaction? transaction = null)
     {
         using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = "SELECT 1 FROM sqlite_master WHERE type='table' AND name=$name LIMIT 1";
         command.Parameters.AddWithValue("$name", table);
         return command.ExecuteScalar() is not null;
     }
 
-    private static bool ColumnExists(SqliteConnection connection, string table, string column)
+    private static bool ColumnExists(SqliteConnection connection, string table, string column, SqliteTransaction? transaction = null)
     {
         using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = $"PRAGMA table_info({table})";
         using var reader = command.ExecuteReader();
         while (reader.Read())
