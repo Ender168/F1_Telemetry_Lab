@@ -35,7 +35,23 @@ public static class SessionManifestService
         {
             try
             {
-                using var connection = new SqliteConnection($"Data Source={databasePath};Mode=ReadOnly;Cache=Private");
+                TelemetryCompletenessService.Enrich(databasePath);
+                manifest.Remove("telemetry_completeness_warning");
+            }
+            catch (Exception ex) when (ex is SqliteException or IOException or InvalidOperationException)
+            {
+                manifest["telemetry_completeness_warning"] = ex.Message;
+            }
+
+            try
+            {
+                using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+                {
+                    DataSource = databasePath,
+                    Mode = SqliteOpenMode.ReadOnly,
+                    Cache = SqliteCacheMode.Private,
+                    Pooling = false
+                }.ToString());
                 connection.Open();
                 manifest["database_user_version"] = DatabaseSchemaMigrator.ReadUserVersion(connection);
                 ApplyMetadata(connection, manifest);
@@ -44,13 +60,15 @@ public static class SessionManifestService
                 manifest["classification_status"] = classificationSource switch
                 {
                     "official_udp" => "official",
-                    "provisional_latest_lap_data" => "provisional",
+                    var source when source.StartsWith("provisional_", StringComparison.OrdinalIgnoreCase) => "provisional",
                     _ => "unavailable"
                 };
                 manifest["classification_note"] = ReadClassificationNote(connection, classificationSource);
                 manifest["car_setup_snapshots"] = CountRows(connection, "car_setups");
                 manifest["confirmed_rewinds"] = CountRows(connection, "rewind_events");
                 manifest["suspected_state_resets"] = CountRows(connection, "suspected_state_reset_events");
+                manifest["motion_ex_player_rows"] = CountRows(connection, "motion_ex_player");
+                manifest["lap_position_rows"] = CountRows(connection, "lap_positions");
             }
             catch (SqliteException)
             {
@@ -96,6 +114,15 @@ public static class SessionManifestService
         CopyString(metadata, manifest, "track_name");
         CopyNumber(metadata, manifest, "track_id");
         CopyNumber(metadata, manifest, "session_type");
+        CopyNumber(metadata, manifest, "raw_session_type");
+        CopyString(metadata, manifest, "raw_session_name");
+        CopyString(metadata, manifest, "inferred_session_kind");
+        CopyNumber(metadata, manifest, "session_type_conflict");
+        CopyString(metadata, manifest, "session_type_conflict_note");
+        CopyNumber(metadata, manifest, "packet_8_present");
+        CopyNumber(metadata, manifest, "extended_telemetry_rows_updated");
+        CopyNumber(metadata, manifest, "motion_ex_rows");
+        CopyNumber(metadata, manifest, "lap_position_rows");
         CopyNumber(metadata, manifest, "total_laps");
         CopyNumber(metadata, manifest, "track_length_m");
         CopyString(metadata, manifest, "started_at");
@@ -121,12 +148,11 @@ public static class SessionManifestService
             if (!string.IsNullOrWhiteSpace(note)) return note;
         }
 
-        return source switch
-        {
-            "official_udp" => "Official final classification from UDP packet 8.",
-            "provisional_latest_lap_data" => "UDP packet 8 is absent. Positions are reconstructed from the latest Lap Data and may be incomplete.",
-            _ => "Classification has not been built or no usable classification rows were found."
-        };
+        if (source.Equals("official_udp", StringComparison.OrdinalIgnoreCase))
+            return "Official final classification from UDP packet 8.";
+        if (source.StartsWith("provisional_", StringComparison.OrdinalIgnoreCase))
+            return "UDP packet 8 is absent. Classification is reconstructed from recorded race-state data and remains provisional.";
+        return "Classification has not been built or no usable classification rows were found.";
     }
 
     private static long CountRows(SqliteConnection connection, string table)
