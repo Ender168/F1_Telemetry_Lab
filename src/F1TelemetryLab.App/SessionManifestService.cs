@@ -45,6 +45,34 @@ public static class SessionManifestService
 
             try
             {
+                AdditionalTelemetry2026Service.Enrich(databasePath);
+                manifest.Remove("additional_telemetry_warning");
+            }
+            catch (Exception ex) when (ex is SqliteException or IOException or InvalidOperationException)
+            {
+                manifest["additional_telemetry_warning"] = ex.Message;
+            }
+
+            try
+            {
+                var storage = SessionStorageOptimizer.Optimize(databasePath);
+                manifest["storage_optimized"] = storage.Optimized;
+                manifest["storage_size_before_bytes"] = storage.SizeBeforeBytes;
+                manifest["storage_size_after_bytes"] = storage.SizeAfterBytes;
+                manifest["storage_saved_bytes"] = Math.Max(0, storage.SizeBeforeBytes - storage.SizeAfterBytes);
+                manifest["storage_rows_pruned"] = storage.RowsPruned;
+                manifest["storage_tables_dropped"] = storage.TablesDropped;
+                manifest.Remove("storage_optimization_warning");
+            }
+            catch (Exception ex) when (ex is SqliteException or IOException or InvalidOperationException)
+            {
+                manifest["storage_optimization_warning"] = ex.Message;
+            }
+
+            manifest["database_size_bytes"] = File.Exists(databasePath) ? new FileInfo(databasePath).Length : 0;
+
+            try
+            {
                 using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
                 {
                     DataSource = databasePath,
@@ -69,6 +97,11 @@ public static class SessionManifestService
                 manifest["suspected_state_resets"] = CountRows(connection, "suspected_state_reset_events");
                 manifest["motion_ex_player_rows"] = CountRows(connection, "motion_ex_player");
                 manifest["lap_position_rows"] = CountRows(connection, "lap_positions");
+                manifest["player_car_telemetry_rows"] = CountRows(connection, "car_telemetry");
+                manifest["session_history_lap_rows"] = CountRows(connection, "session_history_laps");
+                manifest["session_history_stint_rows"] = CountRows(connection, "session_history_stints");
+                manifest["tyre_set_rows"] = CountRows(connection, "tyre_sets");
+                manifest["car_telemetry_2_player_rows"] = CountRows(connection, "car_telemetry_2_player");
             }
             catch (SqliteException)
             {
@@ -123,6 +156,23 @@ public static class SessionManifestService
         CopyNumber(metadata, manifest, "extended_telemetry_rows_updated");
         CopyNumber(metadata, manifest, "motion_ex_rows");
         CopyNumber(metadata, manifest, "lap_position_rows");
+        CopyNumber(metadata, manifest, "additional_telemetry_2026_version");
+        CopyNumber(metadata, manifest, "additional_telemetry_2026_raw_packets");
+        CopyNumber(metadata, manifest, "session_history_lap_rows");
+        CopyNumber(metadata, manifest, "session_history_stint_rows");
+        CopyNumber(metadata, manifest, "tyre_set_rows");
+        CopyNumber(metadata, manifest, "car_telemetry_2_player_rows");
+        CopyNumber(metadata, manifest, "storage_profile_version");
+        CopyString(metadata, manifest, "storage_profile");
+        CopyString(metadata, manifest, "storage_rebuildable_detail");
+        CopyNumber(metadata, manifest, "storage_rows_pruned");
+        CopyNumber(metadata, manifest, "storage_tables_dropped");
+        CopyNumber(metadata, manifest, "storage_size_before_bytes");
+        CopyNumber(metadata, manifest, "storage_size_after_bytes");
+        CopyNumber(metadata, manifest, "storage_saved_bytes");
+        CopyString(metadata, manifest, "storage_optimized_at");
+        if (metadata.TryGetValue("storage_profile", out var storageProfile) && !string.IsNullOrWhiteSpace(storageProfile))
+            manifest["storage_optimized"] = true;
         CopyNumber(metadata, manifest, "total_laps");
         CopyNumber(metadata, manifest, "track_length_m");
         CopyString(metadata, manifest, "started_at");

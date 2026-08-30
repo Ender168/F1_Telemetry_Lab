@@ -250,7 +250,7 @@ public sealed class QualityAndSchemaTests
     }
 
     [Fact]
-    public void AnalysisPersistsTwentyFourSlotsAndMarksFallbackClassificationProvisional()
+    public void AnalysisPreservesTwentyFourSlotsInRawAndKeepsPlayerDetailAfterCompaction()
     {
         SQLitePCL.Batteries_V2.Init();
         var folder = Path.Combine(Path.GetTempPath(), $"f1tlab-24cars-{Guid.NewGuid():N}");
@@ -284,14 +284,31 @@ public sealed class QualityAndSchemaTests
             AnalysisEngine.AnalyzeSession(folder);
             using var analyzed = new SqliteConnection($"Data Source={source};Mode=ReadOnly");
             analyzed.Open();
-            foreach (var table in new[] { "lap_data", "car_status", "car_telemetry", "car_damage", "car_setups" })
+
+            Assert.Equal(7L, ScalarLong(analyzed, "SELECT COUNT(*) FROM raw_packets"));
+            using (var rawTelemetry = analyzed.CreateCommand())
             {
-                Assert.Equal(24L, ScalarLong(analyzed, $"SELECT COUNT(DISTINCT car_idx) FROM {table}"));
+                rawTelemetry.CommandText = "SELECT payload FROM raw_packets WHERE packet_id=6 ORDER BY id DESC LIMIT 1";
+                var payload = Assert.IsType<byte[]>(rawTelemetry.ExecuteScalar());
+                var slots = F12026Parser.ParseCarTelemetryPacket(payload, DateTimeOffset.UnixEpoch, activeCars: 20);
+                Assert.Equal(24, slots.Count);
+                Assert.Contains(slots, x => x.CarIndex == 21 && x.IsPlayer);
+            }
+
+            foreach (var table in new[] { "lap_data", "car_status", "car_telemetry", "car_damage", "motion_data" })
+            {
+                Assert.Equal(1L, ScalarLong(analyzed, $"SELECT COUNT(DISTINCT car_idx) FROM {table}"));
                 Assert.Equal(1L, ScalarLong(analyzed, $"SELECT COUNT(*) FROM {table} WHERE car_idx=21 AND is_player=1"));
             }
 
+            // Setup changes are low-frequency and useful for opponent comparisons, so they remain all-car.
+            Assert.Equal(24L, ScalarLong(analyzed, "SELECT COUNT(DISTINCT car_idx) FROM car_setups"));
+            Assert.Equal(1L, ScalarLong(analyzed, "SELECT COUNT(*) FROM car_setups WHERE car_idx=21 AND is_player=1"));
+
+            Assert.Equal("raw_plus_summaries_plus_player_detail", ScalarText(analyzed, "SELECT value FROM session_metadata WHERE key='storage_profile'"));
+            Assert.Equal(0L, ScalarLong(analyzed, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='analysis_samples'"));
+            Assert.Equal(0L, ScalarLong(analyzed, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='final_classification_packet'"));
             Assert.Equal(1L, ScalarLong(analyzed, "SELECT COUNT(*) FROM final_classification WHERE car_idx=21 AND classification_source='provisional_latest_lap_data' AND classification_is_official=0"));
-            Assert.Equal(0L, ScalarLong(analyzed, "SELECT COUNT(*) FROM final_classification_packet"));
             Assert.Contains("packet 8 is absent", ScalarText(analyzed, "SELECT classification_note FROM final_classification LIMIT 1"), StringComparison.OrdinalIgnoreCase);
         }
         finally

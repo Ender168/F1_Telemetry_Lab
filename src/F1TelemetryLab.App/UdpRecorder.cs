@@ -14,6 +14,7 @@ public sealed class UdpRecorder : IAsyncDisposable
 
     private readonly ConcurrentDictionary<int, LiveCarRow> _liveCars = new();
     private readonly ConcurrentDictionary<ulong, int> _activeCarsBySession = new();
+    private readonly RawPacketStoragePolicy _rawStoragePolicy = new();
     private readonly PacketSequenceTracker _sequenceTracker = new();
     private readonly object _lifecycleSync = new();
     private CancellationTokenSource? _cts;
@@ -33,6 +34,9 @@ public sealed class UdpRecorder : IAsyncDisposable
     private long _duplicateFrames;
     private long _outOfOrderFrames;
     private long _queueDrops;
+    private long _rawPacketsStored;
+    private long _rawPacketsSkipped;
+    private long _setupPacketsDeduplicated;
     private int _queueDepth;
     private int _queueHighWatermark;
     private int _sessionChanges;
@@ -226,7 +230,7 @@ public sealed class UdpRecorder : IAsyncDisposable
             }
         }
 
-        Log?.Invoke($"Stopped. Packets: {PacketsSeen:N0}, car samples: {CarSamplesSeen:N0}, quality: {Quality.Rating}");
+        Log?.Invoke($"Stopped. Packets received: {PacketsSeen:N0}, raw stored: {Interlocked.Read(ref _rawPacketsStored):N0}, raw skipped: {Interlocked.Read(ref _rawPacketsSkipped):N0}, duplicate setup packets skipped: {Interlocked.Read(ref _setupPacketsDeduplicated):N0}, decoded live car samples: {CarSamplesSeen:N0}, quality: {Quality.Rating}");
         if (_metadata is not null)
         {
             var dbInfo = File.Exists(_metadata.DatabasePath) ? new FileInfo(_metadata.DatabasePath).Length.ToString("N0") + " bytes" : "missing";
@@ -313,7 +317,19 @@ public sealed class UdpRecorder : IAsyncDisposable
             await foreach (var packet in queue.Reader.ReadAllAsync())
             {
                 Interlocked.Decrement(ref _queueDepth);
-                _db?.InsertRaw(packet.ReceivedAt, packet.Header, packet.Payload);
+
+                var storageDecision = _rawStoragePolicy.Evaluate(packet.Header, packet.Payload, _metadata?.SessionType ?? -1);
+                if (storageDecision == RawPacketStorageDecision.Store)
+                {
+                    _db?.InsertRaw(packet.ReceivedAt, packet.Header, packet.Payload);
+                    Interlocked.Increment(ref _rawPacketsStored);
+                }
+                else
+                {
+                    Interlocked.Increment(ref _rawPacketsSkipped);
+                    if (storageDecision == RawPacketStorageDecision.SkipDuplicateSetup)
+                        Interlocked.Increment(ref _setupPacketsDeduplicated);
+                }
 
                 if (packet.Header is { PacketFormat: AppInfo.SupportedPacketFormat, PacketId: 1 })
                     UpdateSessionMetadata(packet);
@@ -341,7 +357,8 @@ public sealed class UdpRecorder : IAsyncDisposable
                     _activeCarsBySession.TryGetValue(telemetryHeader.SessionUid, out var activeCars);
                     foreach (var sample in F12026Parser.ParseCarTelemetryPacket(packet.Payload, packet.ReceivedAt, activeCars > 0 ? activeCars : null))
                     {
-                        _db?.InsertCarTelemetry(sample);
+                        // Live telemetry is RAM-only. The authoritative packet 6 remains in raw_packets,
+                        // and car_telemetry is rebuilt by AnalysisEngine after the session stops.
                         Interlocked.Increment(ref _carSamplesSeen);
                         UpdateLiveCar(sample);
                     }
@@ -433,6 +450,9 @@ public sealed class UdpRecorder : IAsyncDisposable
         Interlocked.Exchange(ref _duplicateFrames, 0);
         Interlocked.Exchange(ref _outOfOrderFrames, 0);
         Interlocked.Exchange(ref _queueDrops, 0);
+        Interlocked.Exchange(ref _rawPacketsStored, 0);
+        Interlocked.Exchange(ref _rawPacketsSkipped, 0);
+        Interlocked.Exchange(ref _setupPacketsDeduplicated, 0);
         Interlocked.Exchange(ref _queueDepth, 0);
         Interlocked.Exchange(ref _queueHighWatermark, 0);
         Interlocked.Exchange(ref _sessionChanges, 0);
@@ -441,6 +461,7 @@ public sealed class UdpRecorder : IAsyncDisposable
         Interlocked.Exchange(ref _finalClassificationObserved, 0);
         _backgroundError = null;
         _sequenceTracker.Reset();
+        _rawStoragePolicy.Reset();
         _activeCarsBySession.Clear();
         _liveCars.Clear();
     }
