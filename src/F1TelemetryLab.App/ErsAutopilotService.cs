@@ -7,7 +7,7 @@ public sealed class ErsAutopilotService : IDisposable
     private readonly IErsInputSink _inputSink;
     private readonly Action<string>? _log;
     private readonly ErsAuditLog _audit;
-    private readonly string _sessionFolder;
+    private readonly Action<ErsControlProfile, ErsAutopilotOptions>? _profileSink;
     private readonly Dictionary<int, LapDataSample> _lapRows = new();
     private ErsAutopilotStatus _publicStatus;
     private SessionControlSample? _session;
@@ -31,15 +31,16 @@ public sealed class ErsAutopilotService : IDisposable
         ErsAutopilotOptions options,
         ErsProfileLoadResult profiles,
         IErsInputSink inputSink,
-        string sessionFolder,
+        Action<ErsAuditRecord>? auditSink = null,
+        Action<ErsControlProfile, ErsAutopilotOptions>? profileSink = null,
         Action<string>? log = null)
     {
         _options = options;
         _profiles = profiles;
         _inputSink = inputSink;
         _log = log;
-        _sessionFolder = sessionFolder;
-        _audit = new ErsAuditLog(sessionFolder);
+        _profileSink = profileSink;
+        _audit = new ErsAuditLog(auditSink);
         _publicStatus = ErsAutopilotStatus.Initial(options.OperatingMode);
 
         foreach (var warning in profiles.Warnings) _log?.Invoke("ERS profile warning: " + warning);
@@ -148,7 +149,7 @@ public sealed class ErsAutopilotService : IDisposable
             return;
         }
 
-        ErsProfileStore.WriteSessionSnapshot(selected, _sessionFolder, _options);
+        _profileSink?.Invoke(selected, _options);
         _log?.Invoke($"ERS profile selected: {selected.ProfileId} ({selected.DisplayName}).");
     }
 

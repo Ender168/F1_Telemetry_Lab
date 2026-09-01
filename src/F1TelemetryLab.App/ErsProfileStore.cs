@@ -85,7 +85,7 @@ public static class ErsProfileStore
         return new ErsProfileLoadResult(folder, profiles, warnings);
     }
 
-    public static void WriteSessionSnapshot(ErsControlProfile profile, string sessionFolder, ErsAutopilotOptions options)
+    public static string CreateSessionSnapshotJson(ErsControlProfile profile, ErsAutopilotOptions options)
     {
         var snapshot = new
         {
@@ -98,9 +98,7 @@ public static class ErsProfileStore
             key_hold_ms = options.KeyHoldMilliseconds,
             profile
         };
-        File.WriteAllText(
-            Path.Combine(sessionFolder, "ers_profile_used.json"),
-            JsonSerializer.Serialize(snapshot, JsonOptions));
+        return JsonSerializer.Serialize(snapshot, JsonOptions);
     }
 
     public static string VirtualKeyName(int value) => value switch

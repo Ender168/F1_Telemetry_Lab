@@ -208,13 +208,14 @@ public sealed class ErsAutopilotTests
         try
         {
             var input = new FakeInputSink();
+            var audit = new List<ErsAuditRecord>();
             var profiles = new ErsProfileLoadResult(folder, new[] { ChinaProfile() }, Array.Empty<string>());
             var start = DateTimeOffset.UtcNow;
             using (var service = new ErsAutopilotService(
                        new ErsAutopilotOptions { OperatingMode = ErsAutopilotOperatingMode.Live },
                        profiles,
                        input,
-                       folder))
+                       audit.Add))
             {
                 service.ProcessPacket(SessionPacket(isNetworkGame: false, ersAssist: 0), start);
                 service.ProcessPacket(LapPacket(distance: 3_500), start.AddMilliseconds(10));
@@ -230,9 +231,8 @@ public sealed class ErsAutopilotTests
                 Assert.Equal(ErsDeployMode.Medium, service.Status.CurrentMode);
             }
 
-            var audit = File.ReadAllText(Path.Combine(folder, "ers_control_log.csv"));
-            Assert.Contains("feedback-superseded:expected-Hotlap", audit);
-            Assert.DoesNotContain("\"telemetry-confirmed\"", audit);
+            Assert.Contains(audit, row => row.Action.Contains("feedback-superseded:expected-Hotlap", StringComparison.Ordinal));
+            Assert.DoesNotContain(audit, row => row.Action.Equals("telemetry-confirmed", StringComparison.Ordinal));
         }
         finally
         {
@@ -465,8 +465,7 @@ public sealed class ErsAutopilotTests
             using var service = new ErsAutopilotService(
                 new ErsAutopilotOptions { OperatingMode = ErsAutopilotOperatingMode.Live },
                 profiles,
-                input,
-                folder);
+                input);
             test(service, input);
         }
         finally

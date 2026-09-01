@@ -13,6 +13,8 @@ public sealed class AppSettings
     public string ErsAutopilotMode { get; set; } = "dry-run";
     public int ErsDecreaseVirtualKey { get; set; } = 0x76;
     public int ErsIncreaseVirtualKey { get; set; } = 0x77;
+    public string WinRarPath { get; set; } = "";
+    public bool OpenRaceEngineerOverlayOnStart { get; set; }
 }
 
 public static class AppSettingsService
@@ -67,6 +69,7 @@ public static class AppSettingsService
         settings.ErsAutopilotMode = ErsAutopilotOptions.ToSettingValue(ErsAutopilotOptions.ParseOperatingMode(settings.ErsAutopilotMode));
         settings.ErsDecreaseVirtualKey = Math.Clamp(settings.ErsDecreaseVirtualKey, 1, ushort.MaxValue);
         settings.ErsIncreaseVirtualKey = Math.Clamp(settings.ErsIncreaseVirtualKey, 1, ushort.MaxValue);
+        settings.WinRarPath = settings.WinRarPath?.Trim() ?? "";
         return settings;
     }
 

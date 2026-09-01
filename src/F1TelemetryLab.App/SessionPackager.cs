@@ -1,57 +1,83 @@
 using Microsoft.Data.Sqlite;
-using System.IO.Compression;
-using System.Text.Json;
-using System.Text.Json.Nodes;
+using System.Diagnostics;
 
 namespace F1TelemetryLab;
 
+public sealed record RarProcessResult(int ExitCode, string Output, string Error);
+
+public interface IRarProcessRunner
+{
+    RarProcessResult Run(string executablePath, string workingDirectory, IReadOnlyList<string> arguments);
+}
+
+public sealed class WinRarProcessRunner : IRarProcessRunner
+{
+    public RarProcessResult Run(string executablePath, string workingDirectory, IReadOnlyList<string> arguments)
+    {
+        var start = new ProcessStartInfo
+        {
+            FileName = executablePath,
+            WorkingDirectory = workingDirectory,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        foreach (var argument in arguments) start.ArgumentList.Add(argument);
+        using var process = Process.Start(start) ?? throw new InvalidOperationException("WinRAR could not be started.");
+        var output = process.StandardOutput.ReadToEnd();
+        var error = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        return new RarProcessResult(process.ExitCode, output, error);
+    }
+}
+
 public static class SessionPackager
 {
-    private const int AnalysisPackVersion = 2;
-
-    public static string CreateZip(string sessionFolder, string databasePath, string? preferredSessionName = null)
+    public static string CreateRar(
+        string sessionFolder,
+        string databasePath,
+        string? preferredSessionName = null,
+        string? configuredWinRarPath = null,
+        IRarProcessRunner? processRunner = null)
     {
-        if (!Directory.Exists(sessionFolder))
-            throw new DirectoryNotFoundException($"Session folder not found: {sessionFolder}");
-
+        if (!Directory.Exists(sessionFolder)) throw new DirectoryNotFoundException($"Session folder not found: {sessionFolder}");
         if (!File.Exists(databasePath))
-            throw new FileNotFoundException("session.sqlite was not created. The archive would be useless, so packaging was stopped.", databasePath);
+            throw new FileNotFoundException("session.sqlite was not created. The RAR archive would be useless.", databasePath);
 
         SessionManifestService.Refresh(sessionFolder);
+        var physical = Path.GetFileName(sessionFolder.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        var baseName = SafeFileName(string.IsNullOrWhiteSpace(preferredSessionName) ? physical : preferredSessionName!);
+        if (string.IsNullOrWhiteSpace(baseName)) baseName = physical;
+        var archivePath = Path.Combine(sessionFolder, baseName + ".rar");
+        TryDelete(archivePath);
 
-        var physicalBaseName = Path.GetFileName(sessionFolder.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-        var baseName = SafeFileName(string.IsNullOrWhiteSpace(preferredSessionName) ? physicalBaseName : preferredSessionName!);
-        if (string.IsNullOrWhiteSpace(baseName)) baseName = physicalBaseName;
-
-        var zipPath = Path.Combine(sessionFolder, baseName + ".zip");
-        TryDelete(zipPath);
-
-        var stagingRoot = Path.Combine(Path.GetTempPath(), "F1TelemetryLab_pack_" + Guid.NewGuid().ToString("N"));
-        var stagingSession = Path.Combine(stagingRoot, baseName);
-        var stagedFullDb = Path.Combine(stagingSession, "session.sqlite");
-        var compactLocalDb = Path.Combine(sessionFolder, "chatgpt_pack.sqlite");
-        var stagedCompactDb = Path.Combine(stagingSession, "chatgpt_pack.sqlite");
-
+        var runner = processRunner ?? new WinRarProcessRunner();
+        var executable = ResolveWinRar(configuredWinRarPath, processRunner is not null);
+        var stagingRoot = Path.Combine(Path.GetTempPath(), "F1TelemetryLab_rar_" + Guid.NewGuid().ToString("N"));
+        var snapshotPath = Path.Combine(stagingRoot, "session.sqlite");
         try
         {
-            Directory.CreateDirectory(stagingSession);
+            Directory.CreateDirectory(stagingRoot);
+            CreateDatabaseSnapshot(databasePath, snapshotPath);
+            CompactAndVerifySnapshot(snapshotPath);
 
-            // Never copy the live SQLite file byte-for-byte. A session may still have WAL pages,
-            // so use SQLite backup to produce one internally consistent, self-contained snapshot.
-            CreateDatabaseSnapshot(databasePath, stagedFullDb);
+            var add = BuildAddArguments(archivePath);
+            var created = runner.Run(executable, stagingRoot, add);
+            if (created.ExitCode != 0)
+                throw new InvalidOperationException($"WinRAR archive creation failed with exit code {created.ExitCode}: {CleanError(created)}");
+            if (!File.Exists(archivePath) || new FileInfo(archivePath).Length == 0)
+                throw new InvalidDataException("WinRAR reported success but did not create a non-empty archive.");
 
-            // Keep the compact projection because it is convenient for quick inspection, but it is no longer
-            // a substitute for the raw database. The analysis pack always contains both databases.
-            CreateChatGptDatabase(stagedFullDb, compactLocalDb);
-            File.Copy(compactLocalDb, stagedCompactDb, overwrite: true);
+            var tested = runner.Run(executable, stagingRoot, BuildTestArguments(archivePath));
+            if (tested.ExitCode != 0)
+            {
+                TryDelete(archivePath);
+                throw new InvalidDataException($"WinRAR archive test failed with exit code {tested.ExitCode}: {CleanError(tested)}");
+            }
 
-            CopySessionSidecars(sessionFolder, stagingSession, zipPath);
-            WriteAnalysisJsonFiles(stagingSession, stagedFullDb, sessionFolder);
-            WritePackContents(stagingSession);
-
-            ZipFile.CreateFromDirectory(stagingRoot, zipPath, CompressionLevel.Optimal, includeBaseDirectory: false);
-            SessionManifestService.Refresh(sessionFolder, zipPath: zipPath);
-            return zipPath;
+            SessionManifestService.Refresh(sessionFolder, archivePath: archivePath);
+            return archivePath;
         }
         finally
         {
@@ -59,362 +85,112 @@ public static class SessionPackager
         }
     }
 
-    private static void CreateDatabaseSnapshot(string sourceDbPath, string targetDbPath)
+    public static IReadOnlyList<string> BuildAddArguments(string archivePath) => new[]
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(targetDbPath)!);
-        TryDelete(targetDbPath);
+        "a",
+        "-ma5",
+        "-m5",
+        "-md128m",
+        "-ep",
+        "-o+",
+        "-idq",
+        "-y",
+        archivePath,
+        "session.sqlite"
+    };
 
-        var sourceBuilder = new SqliteConnectionStringBuilder
+    public static IReadOnlyList<string> BuildTestArguments(string archivePath) => new[]
+    {
+        "t",
+        "-idq",
+        "-y",
+        archivePath
+    };
+
+    public static string? FindWinRar(string? configuredPath = null)
+    {
+        if (!string.IsNullOrWhiteSpace(configuredPath) && File.Exists(configuredPath)) return Path.GetFullPath(configuredPath);
+        var candidates = new List<string>();
+        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+        if (!string.IsNullOrWhiteSpace(programFiles)) candidates.Add(Path.Combine(programFiles, "WinRAR", "WinRAR.exe"));
+        if (!string.IsNullOrWhiteSpace(programFilesX86)) candidates.Add(Path.Combine(programFilesX86, "WinRAR", "WinRAR.exe"));
+        var path = Environment.GetEnvironmentVariable("PATH") ?? "";
+        candidates.AddRange(path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+            .Select(folder => Path.Combine(folder.Trim(), "WinRAR.exe")));
+        return candidates.FirstOrDefault(File.Exists);
+    }
+
+    private static string ResolveWinRar(string? configuredPath, bool runnerIsInjected)
+    {
+        if (runnerIsInjected) return string.IsNullOrWhiteSpace(configuredPath) ? "WinRAR.exe" : configuredPath;
+        return FindWinRar(configuredPath)
+               ?? throw new FileNotFoundException("WinRAR.exe was not found. Install WinRAR or specify its path in Settings. ZIP fallback is intentionally disabled.");
+    }
+
+    private static void CreateDatabaseSnapshot(string sourcePath, string destinationPath)
+    {
+        TryDelete(destinationPath);
+        using var source = new SqliteConnection(new SqliteConnectionStringBuilder
         {
-            DataSource = sourceDbPath,
+            DataSource = sourcePath,
             Mode = SqliteOpenMode.ReadOnly,
             Cache = SqliteCacheMode.Private,
-            DefaultTimeout = 30,
-            Pooling = false
-        };
-        var targetBuilder = new SqliteConnectionStringBuilder
+            Pooling = false,
+            DefaultTimeout = 60
+        }.ToString());
+        using var destination = new SqliteConnection(new SqliteConnectionStringBuilder
         {
-            DataSource = targetDbPath,
+            DataSource = destinationPath,
             Mode = SqliteOpenMode.ReadWriteCreate,
             Cache = SqliteCacheMode.Private,
-            DefaultTimeout = 30,
-            Pooling = false
-        };
-
-        using var source = new SqliteConnection(sourceBuilder.ToString());
-        using var target = new SqliteConnection(targetBuilder.ToString());
+            Pooling = false,
+            DefaultTimeout = 60
+        }.ToString());
         source.Open();
-        target.Open();
-        source.BackupDatabase(target);
+        destination.Open();
+        source.BackupDatabase(destination);
     }
 
-    private static void CopySessionSidecars(string sessionFolder, string stagingSession, string zipPath)
-    {
-        var regenerated = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            "session.sqlite",
-            "session.sqlite-wal",
-            "session.sqlite-shm",
-            "chatgpt_pack.sqlite",
-            "chatgpt_pack.sqlite-wal",
-            "chatgpt_pack.sqlite-shm",
-            "session_summary.json",
-            "setup.json",
-            "events.json",
-            "data_quality.json",
-            "track.json",
-            "PACK_CONTENTS.txt"
-        };
-
-        foreach (var file in Directory.EnumerateFiles(sessionFolder, "*", SearchOption.AllDirectories))
-        {
-            var full = Path.GetFullPath(file);
-            if (string.Equals(full, Path.GetFullPath(zipPath), StringComparison.OrdinalIgnoreCase))
-                continue;
-
-            var relative = Path.GetRelativePath(sessionFolder, file);
-            if (regenerated.Contains(relative)) continue;
-            if (relative.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) ||
-                relative.EndsWith(".rar", StringComparison.OrdinalIgnoreCase))
-                continue;
-
-            var target = Path.Combine(stagingSession, relative);
-            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-            File.Copy(file, target, overwrite: true);
-        }
-    }
-
-    private static void WriteAnalysisJsonFiles(string stagingSession, string databasePath, string sessionFolder)
+    private static void CompactAndVerifySnapshot(string databasePath)
     {
         using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
         {
             DataSource = databasePath,
-            Mode = SqliteOpenMode.ReadOnly,
+            Mode = SqliteOpenMode.ReadWrite,
             Cache = SqliteCacheMode.Private,
-            DefaultTimeout = 30,
-            Pooling = false
+            Pooling = false,
+            DefaultTimeout = 60
         }.ToString());
         connection.Open();
-
-        var generatedAt = DateTimeOffset.Now.ToString("O");
-        var manifest = ReadJsonNode(Path.Combine(sessionFolder, "manifest.json"));
-        var playerClassification = ReadRowsSafe(connection,
-            "SELECT * FROM final_classification WHERE is_player = 1 LIMIT 1");
-        var playerLapStats = ReadRowsSafe(connection,
-            "SELECT COUNT(DISTINCT lap_num) AS laps_observed, " +
-            "MIN(CASE WHEN lap_time_ms > 0 THEN lap_time_ms END) AS best_lap_ms " +
-            "FROM lap_summary WHERE is_player = 1");
-
-        var summary = new JsonObject
+        using (var journal = connection.CreateCommand())
         {
-            ["analysis_pack_version"] = AnalysisPackVersion,
-            ["generated_at"] = generatedAt,
-            ["app_version"] = AppInfo.Version,
-            ["schema_version"] = AppInfo.DatabaseSchemaVersion,
-            ["full_database"] = "session.sqlite",
-            ["compact_database"] = "chatgpt_pack.sqlite",
-            ["full_database_included"] = true,
-            ["manifest"] = manifest?.DeepClone(),
-            ["player_classification"] = JsonSerializer.SerializeToNode(playerClassification),
-            ["player_lap_stats"] = JsonSerializer.SerializeToNode(playerLapStats),
-            ["tables_present"] = JsonSerializer.SerializeToNode(ReadTableNames(connection))
-        };
-        WriteJson(Path.Combine(stagingSession, "session_summary.json"), summary);
-
-        var setup = new JsonObject
-        {
-            ["generated_at"] = generatedAt,
-            ["player_setup_snapshots"] = JsonSerializer.SerializeToNode(ReadRowsSafe(connection,
-                "SELECT * FROM car_setups WHERE is_player = 1 ORDER BY received_at, overall_frame_identifier"))
-        };
-        WriteJson(Path.Combine(stagingSession, "setup.json"), setup);
-
-        var events = new JsonObject
-        {
-            ["generated_at"] = generatedAt,
-            ["events"] = JsonSerializer.SerializeToNode(ReadRowsSafe(connection,
-                "SELECT * FROM events ORDER BY received_at, overall_frame_identifier")),
-            ["confirmed_rewinds"] = JsonSerializer.SerializeToNode(ReadRowsSafe(connection,
-                "SELECT * FROM rewind_events ORDER BY received_at, overall_frame_identifier")),
-            ["suspected_state_resets"] = JsonSerializer.SerializeToNode(ReadRowsSafe(connection,
-                "SELECT * FROM suspected_state_reset_events ORDER BY received_at, overall_frame_identifier"))
-        };
-        WriteJson(Path.Combine(stagingSession, "events.json"), events);
-
-        var quality = new JsonObject
-        {
-            ["generated_at"] = generatedAt,
-            ["recording_quality"] = JsonSerializer.SerializeToNode(ReadRowsSafe(connection,
-                "SELECT * FROM recording_quality")),
-            ["data_quality"] = JsonSerializer.SerializeToNode(ReadRowsSafe(connection,
-                "SELECT * FROM data_quality"))
-        };
-        WriteJson(Path.Combine(stagingSession, "data_quality.json"), quality);
-
-        var metadata = ReadKeyValueTable(connection, "session_metadata");
-        var track = new JsonObject
-        {
-            ["track_id"] = metadata.TryGetValue("track_id", out var trackId) ? trackId : null,
-            ["track_name"] = metadata.TryGetValue("track_name", out var trackName) ? trackName : null,
-            ["track_length_m"] = metadata.TryGetValue("track_length_m", out var trackLength) ? trackLength : null,
-            ["session_type"] = metadata.TryGetValue("session_type", out var sessionType) ? sessionType : null,
-            ["total_laps"] = metadata.TryGetValue("total_laps", out var totalLaps) ? totalLaps : null
-        };
-        WriteJson(Path.Combine(stagingSession, "track.json"), track);
-    }
-
-    private static void WritePackContents(string stagingSession)
-    {
-        File.WriteAllText(Path.Combine(stagingSession, "PACK_CONTENTS.txt"),
-            "F1 Telemetry Lab analysis pack\n\n" +
-            "Send this ZIP as-is for race analysis.\n\n" +
-            "session.sqlite       Full, consistent SQLite snapshot including raw UDP packets and derived tables.\n" +
-            "chatgpt_pack.sqlite Compact projection for quick inspection.\n" +
-            "session_summary.json Session metadata, player result, lap summary and table inventory.\n" +
-            "setup.json           Player setup snapshots and changes.\n" +
-            "events.json          Race events, confirmed flashbacks and suspected state resets.\n" +
-            "data_quality.json    Capture and analysis quality diagnostics.\n" +
-            "track.json           Track/session identifiers used by the game.\n\n" +
-            "ers_profile_used.json Exact track-specific ERS profile selected for this recording, when available.\n" +
-            "ers_control_log.csv   ERS decisions, safety blocks, key taps and telemetry confirmations.\n\n" +
-            "The full database is intentionally included. Compact data alone can hide parser defects that are recoverable from raw packets.\n");
-    }
-
-    private static void CreateChatGptDatabase(string sourceDbPath, string targetDbPath)
-    {
-        SQLitePCL.Batteries_V2.Init();
-        Directory.CreateDirectory(Path.GetDirectoryName(targetDbPath)!);
-        TryDelete(targetDbPath);
-        CreateEmptyDatabase(targetDbPath);
-
-        var sourceBuilder = new SqliteConnectionStringBuilder
-        {
-            DataSource = sourceDbPath,
-            Mode = SqliteOpenMode.ReadWrite,
-            Cache = SqliteCacheMode.Private,
-            DefaultTimeout = 30,
-            Pooling = false
-        };
-        using var con = new SqliteConnection(sourceBuilder.ToString());
-        con.Open();
-
-        Execute(con, "PRAGMA busy_timeout = 10000;");
-
-        using var cmd = con.CreateCommand();
-        cmd.CommandText = "ATTACH DATABASE $target AS out";
-        cmd.Parameters.AddWithValue("$target", targetDbPath);
-        cmd.ExecuteNonQuery();
-
-        try
-        {
-            CopyTableIfExists(con, "session_metadata");
-            CopyTableIfExists(con, "session_segments");
-            CopyTableIfExists(con, "recording_quality");
-            CopyTableIfExists(con, "data_quality");
-            CopyTableIfExists(con, "lap_summary");
-            CopyTableIfExists(con, "lap_state_summary");
-            CopyTableIfExists(con, "lap_quality");
-            CopyTableIfExists(con, "car_setups");
-            CopyTableIfExists(con, "rewind_events");
-            CopyTableIfExists(con, "suspected_state_reset_events");
-            CopyTableIfExists(con, "events");
-            CopyTableIfExists(con, "participants");
-            CopyTableIfExists(con, "analysis_trace_10m");
-            CopyTableIfExists(con, "final_classification");
-            CopyTableIfExists(con, "driver_aliases");
-
-            if (!TableExists(con, "analysis_trace_10m") && TableExists(con, "lap_summary"))
-            {
-                Execute(con,
-                    "CREATE TABLE IF NOT EXISTS out.analysis_trace_10m AS " +
-                    "SELECT car_idx, lap_num, is_player, clean_lap, 0 AS distance_bin_m, lap_time_ms AS time_ms, " +
-                    "max_speed AS speed, avg_throttle AS throttle, avg_brake AS brake, NULL AS steer, NULL AS gear, " +
-                    "NULL AS world_position_x, NULL AS world_position_z, NULL AS yaw, NULL AS g_force_lateral, NULL AS g_force_longitudinal " +
-                    "FROM main.lap_summary");
-            }
-
-            Execute(con, "CREATE TABLE IF NOT EXISTS out.pack_info(key TEXT PRIMARY KEY, value TEXT);");
-            InsertPackInfo(con, "created_at", DateTimeOffset.Now.ToString("O"));
-            InsertPackInfo(con, "source_database", "session.sqlite analysis-pack snapshot");
-            InsertPackInfo(con, "note", "Compact convenience DB. The same ZIP also contains the complete session.sqlite snapshot.");
-            Execute(con, $"PRAGMA out.user_version = {AppInfo.DatabaseSchemaVersion};");
+            journal.CommandText = "PRAGMA journal_mode=DELETE; PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA optimize;";
+            journal.ExecuteNonQuery();
         }
-        finally
-        {
-            try { Execute(con, "DETACH DATABASE out"); } catch { }
-        }
-
-        var compactBuilder = new SqliteConnectionStringBuilder
-        {
-            DataSource = targetDbPath,
-            Mode = SqliteOpenMode.ReadWrite,
-            Cache = SqliteCacheMode.Private,
-            DefaultTimeout = 30,
-            Pooling = false
-        };
-        using var compact = new SqliteConnection(compactBuilder.ToString());
-        compact.Open();
-        Execute(compact, "PRAGMA journal_mode = DELETE;");
-        Execute(compact, "VACUUM;");
+        using var integrity = connection.CreateCommand();
+        integrity.CommandText = "PRAGMA integrity_check";
+        var result = Convert.ToString(integrity.ExecuteScalar());
+        if (!string.Equals(result, "ok", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("SQLite snapshot failed integrity_check: " + result);
     }
 
-    private static void CreateEmptyDatabase(string path)
+    private static string CleanError(RarProcessResult value)
     {
-        var builder = new SqliteConnectionStringBuilder
-        {
-            DataSource = path,
-            Mode = SqliteOpenMode.ReadWriteCreate,
-            Cache = SqliteCacheMode.Private,
-            DefaultTimeout = 30,
-            Pooling = false
-        };
-        using var connection = new SqliteConnection(builder.ToString());
-        connection.Open();
-    }
-
-    private static List<Dictionary<string, object?>> ReadRowsSafe(SqliteConnection connection, string sql)
-    {
-        try
-        {
-            using var command = connection.CreateCommand();
-            command.CommandText = sql;
-            using var reader = command.ExecuteReader();
-            var rows = new List<Dictionary<string, object?>>();
-            while (reader.Read())
-            {
-                var row = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-                for (var i = 0; i < reader.FieldCount; i++)
-                    row[reader.GetName(i)] = reader.IsDBNull(i) ? null : reader.GetValue(i);
-                rows.Add(row);
-            }
-            return rows;
-        }
-        catch (SqliteException)
-        {
-            return new List<Dictionary<string, object?>>();
-        }
-    }
-
-    private static Dictionary<string, string?> ReadKeyValueTable(SqliteConnection connection, string table)
-    {
-        var result = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        if (!TableExists(connection, table)) return result;
-        try
-        {
-            using var command = connection.CreateCommand();
-            command.CommandText = $"SELECT key, value FROM {table}";
-            using var reader = command.ExecuteReader();
-            while (reader.Read())
-                result[reader.GetString(0)] = reader.IsDBNull(1) ? null : Convert.ToString(reader.GetValue(1));
-        }
-        catch (SqliteException) { }
-        return result;
-    }
-
-    private static List<string> ReadTableNames(SqliteConnection connection)
-    {
-        using var command = connection.CreateCommand();
-        command.CommandText = "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name";
-        using var reader = command.ExecuteReader();
-        var names = new List<string>();
-        while (reader.Read()) names.Add(reader.GetString(0));
-        return names;
-    }
-
-    private static JsonNode? ReadJsonNode(string path)
-    {
-        if (!File.Exists(path)) return null;
-        try { return JsonNode.Parse(File.ReadAllText(path)); }
-        catch (JsonException) { return null; }
-        catch (IOException) { return null; }
-    }
-
-    private static void WriteJson(string path, JsonNode node) =>
-        File.WriteAllText(path, node.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
-
-    private static void CopyTableIfExists(SqliteConnection con, string table)
-    {
-        if (!TableExists(con, table)) return;
-        Execute(con, $"DROP TABLE IF EXISTS out.{table}");
-        Execute(con, $"CREATE TABLE out.{table} AS SELECT * FROM main.{table}");
-    }
-
-    private static bool TableExists(SqliteConnection con, string table)
-    {
-        using var cmd = con.CreateCommand();
-        cmd.CommandText = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = $name LIMIT 1";
-        cmd.Parameters.AddWithValue("$name", table);
-        using var reader = cmd.ExecuteReader();
-        return reader.Read();
-    }
-
-    private static void Execute(SqliteConnection con, string sql)
-    {
-        using var cmd = con.CreateCommand();
-        cmd.CommandText = sql;
-        cmd.ExecuteNonQuery();
-    }
-
-    private static void InsertPackInfo(SqliteConnection con, string key, string value)
-    {
-        using var cmd = con.CreateCommand();
-        cmd.CommandText = "INSERT OR REPLACE INTO out.pack_info(key, value) VALUES ($key, $value)";
-        cmd.Parameters.AddWithValue("$key", key);
-        cmd.Parameters.AddWithValue("$value", value);
-        cmd.ExecuteNonQuery();
+        var text = string.IsNullOrWhiteSpace(value.Error) ? value.Output : value.Error;
+        text = text.Trim();
+        return text.Length <= 600 ? text : text[..600];
     }
 
     private static string SafeFileName(string value)
     {
         var invalid = Path.GetInvalidFileNameChars();
-        var chars = value.Select(ch => invalid.Contains(ch) ? '_' : ch).ToArray();
-        var safe = new string(chars).Trim();
-        while (safe.Contains("__", StringComparison.Ordinal)) safe = safe.Replace("__", "_");
-        return safe.Trim('_', ' ');
+        return new string(value.Select(ch => invalid.Contains(ch) ? '_' : ch).ToArray()).Trim();
     }
 
     private static void TryDelete(string path)
     {
-        try { if (File.Exists(path)) File.Delete(path); } catch { }
+        try { if (File.Exists(path)) File.Delete(path); }
+        catch { }
     }
 }

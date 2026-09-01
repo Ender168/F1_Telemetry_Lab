@@ -227,6 +227,106 @@ public sealed class TelemetryDatabase : IDisposable
         cmd.ExecuteNonQuery();
     }
 
+    public void InsertErsControlEvent(ErsAuditRecord row)
+    {
+        EnsureBatch();
+        using var cmd = _connection.CreateCommand();
+        cmd.Transaction = _batchTransaction;
+        cmd.CommandText = """
+            INSERT INTO ers_control_events(
+                received_at,lap_num,lap_distance_m,segment,battery_pct,current_mode,target_mode,
+                gap_ahead_ms,gap_behind_ms,rule_id,action,reason)
+            VALUES($received,$lap,$distance,$segment,$battery,$current,$target,$ahead,$behind,$rule,$action,$reason)
+            """;
+        cmd.Parameters.AddWithValue("$received", row.ReceivedAt.ToString("O"));
+        cmd.Parameters.AddWithValue("$lap", row.LapNumber);
+        cmd.Parameters.AddWithValue("$distance", row.LapDistanceM);
+        cmd.Parameters.AddWithValue("$segment", row.Segment);
+        cmd.Parameters.AddWithValue("$battery", row.BatteryPct);
+        cmd.Parameters.AddWithValue("$current", row.CurrentMode);
+        cmd.Parameters.AddWithValue("$target", row.TargetMode);
+        cmd.Parameters.AddWithValue("$ahead", (object?)row.GapAheadMs ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$behind", (object?)row.GapBehindMs ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$rule", row.RuleId);
+        cmd.Parameters.AddWithValue("$action", row.Action);
+        cmd.Parameters.AddWithValue("$reason", row.Reason);
+        cmd.ExecuteNonQuery();
+        CountOperation();
+    }
+
+    public void SaveErsProfileSnapshot(ErsControlProfile profile, ErsAutopilotOptions options)
+    {
+        EnsureBatch();
+        using var cmd = _connection.CreateCommand();
+        cmd.Transaction = _batchTransaction;
+        cmd.CommandText = """
+            INSERT INTO ers_profile_snapshots(id,captured_at,profile_id,operating_mode,profile_json,app_version)
+            VALUES(1,$captured,$profile,$mode,$json,$version)
+            ON CONFLICT(id) DO UPDATE SET captured_at=excluded.captured_at,profile_id=excluded.profile_id,
+                operating_mode=excluded.operating_mode,profile_json=excluded.profile_json,app_version=excluded.app_version
+            """;
+        cmd.Parameters.AddWithValue("$captured", DateTimeOffset.Now.ToString("O"));
+        cmd.Parameters.AddWithValue("$profile", profile.ProfileId);
+        cmd.Parameters.AddWithValue("$mode", ErsAutopilotOptions.ToSettingValue(options.OperatingMode));
+        cmd.Parameters.AddWithValue("$json", ErsProfileStore.CreateSessionSnapshotJson(profile, options));
+        cmd.Parameters.AddWithValue("$version", AppInfo.Version);
+        cmd.ExecuteNonQuery();
+        CountOperation();
+    }
+
+    public void SaveRaceProfileSnapshot(RaceEngineerProfile profile)
+    {
+        EnsureBatch();
+        using var cmd = _connection.CreateCommand();
+        cmd.Transaction = _batchTransaction;
+        cmd.CommandText = """
+            INSERT INTO race_profile_snapshots(id,captured_at,profile_id,track_id,profile_json,app_version)
+            VALUES(1,$captured,$profile,$track,$json,$version)
+            ON CONFLICT(id) DO UPDATE SET captured_at=excluded.captured_at,profile_id=excluded.profile_id,
+                track_id=excluded.track_id,profile_json=excluded.profile_json,app_version=excluded.app_version
+            """;
+        cmd.Parameters.AddWithValue("$captured", DateTimeOffset.Now.ToString("O"));
+        cmd.Parameters.AddWithValue("$profile", profile.ProfileId);
+        cmd.Parameters.AddWithValue("$track", profile.TrackId);
+        cmd.Parameters.AddWithValue("$json", RaceEngineerProfileStore.SerializeSnapshot(profile));
+        cmd.Parameters.AddWithValue("$version", AppInfo.Version);
+        cmd.ExecuteNonQuery();
+        CountOperation();
+    }
+
+    public void InsertRaceEngineerLap(CompletedLiveLap row)
+    {
+        EnsureBatch();
+        using var cmd = _connection.CreateCommand();
+        cmd.Transaction = _batchTransaction;
+        cmd.CommandText = """
+            INSERT OR REPLACE INTO race_engineer_laps(
+                session_uid,lap_num,lap_time_ms,clean_lap,pit_lap,safety_car_affected,visual_compound,
+                tyre_age_laps,tyre_wear_start_pct,tyre_wear_end_pct,tyre_wear_delta_pct,
+                ers_start_pct,ers_end_pct,ers_delta_pct,position_end,completion_evidence)
+            VALUES($uid,$lap,$time,$clean,$pit,$sc,$compound,$age,$wearStart,$wearEnd,$wearDelta,
+                $ersStart,$ersEnd,$ersDelta,$position,$evidence)
+            """;
+        cmd.Parameters.AddWithValue("$uid", row.SessionUid.ToString());
+        cmd.Parameters.AddWithValue("$lap", row.LapNumber);
+        cmd.Parameters.AddWithValue("$time", row.LapTimeMs);
+        cmd.Parameters.AddWithValue("$clean", row.Clean ? 1 : 0);
+        cmd.Parameters.AddWithValue("$pit", row.PitLap ? 1 : 0);
+        cmd.Parameters.AddWithValue("$sc", row.SafetyCarAffected ? 1 : 0);
+        cmd.Parameters.AddWithValue("$compound", row.VisualCompound);
+        cmd.Parameters.AddWithValue("$age", row.TyreAgeLaps);
+        cmd.Parameters.AddWithValue("$wearStart", row.TyreWearStartPct);
+        cmd.Parameters.AddWithValue("$wearEnd", row.TyreWearEndPct);
+        cmd.Parameters.AddWithValue("$wearDelta", row.TyreWearDeltaPct);
+        cmd.Parameters.AddWithValue("$ersStart", row.ErsStartPct);
+        cmd.Parameters.AddWithValue("$ersEnd", row.ErsEndPct);
+        cmd.Parameters.AddWithValue("$ersDelta", row.ErsDeltaPct);
+        cmd.Parameters.AddWithValue("$position", row.PositionEnd);
+        cmd.Parameters.AddWithValue("$evidence", row.CompletionEvidence);
+        cmd.ExecuteNonQuery();
+        CountOperation();
+    }
+
     public void InsertRaw(DateTimeOffset receivedAt, PacketHeader? header, byte[] payload)
     {
         EnsureBatch();

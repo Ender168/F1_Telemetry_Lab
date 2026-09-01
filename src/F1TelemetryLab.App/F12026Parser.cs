@@ -17,6 +17,8 @@ public static class F12026Parser
     private const int CarSetupSize2026 = 50;
     private const int ParticipantSize2026 = 60;
     private const int FinalClassificationSize2026 = 46;
+    private const int TyreSetSize2026 = 10;
+    private const int MaxTyreSets2026 = 20;
 
     public static bool TryParseHeader(ReadOnlySpan<byte> data, out PacketHeader header)
     {
@@ -259,6 +261,40 @@ public static class F12026Parser
             offset += CarDamageSize2026;
         }
         return samples;
+    }
+
+    public static TyreSetPacketSample? ParseTyreSetsPacket(ReadOnlySpan<byte> data, DateTimeOffset receivedAt)
+    {
+        if (!TryParseHeader(data, out var h) || h.PacketFormat != AppInfo.SupportedPacketFormat || h.PacketId != 12) return null;
+        if (data.Length < HeaderSize + 1 + MaxTyreSets2026 * TyreSetSize2026 + 1) return null;
+        var carIndex = data[HeaderSize];
+        if (carIndex >= MaxCars2026) return null;
+        var baseOffset = HeaderSize + 1;
+        var sets = new List<TyreSetInfo>(MaxTyreSets2026);
+        for (var i = 0; i < MaxTyreSets2026; i++)
+        {
+            var row = data.Slice(baseOffset + i * TyreSetSize2026, TyreSetSize2026);
+            sets.Add(new TyreSetInfo(
+                i,
+                row[0],
+                row[1],
+                row[2],
+                row[3] != 0,
+                row[4],
+                row[5],
+                row[6],
+                I16(row, 7),
+                row[9] != 0));
+        }
+
+        return new TyreSetPacketSample(
+            receivedAt,
+            h.SessionUid,
+            h.OverallFrameIdentifier,
+            carIndex,
+            h.PlayerCarIndex == carIndex,
+            data[baseOffset + MaxTyreSets2026 * TyreSetSize2026],
+            sets);
     }
 
     public static EventSample? ParseEventPacket(ReadOnlySpan<byte> data, DateTimeOffset receivedAt)

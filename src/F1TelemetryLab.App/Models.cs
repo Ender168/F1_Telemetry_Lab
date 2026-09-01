@@ -165,6 +165,27 @@ public sealed record CarDamageSample(
     int DiffuserDamage,
     int SidepodDamage);
 
+public sealed record TyreSetInfo(
+    int SetIndex,
+    int ActualCompound,
+    int VisualCompound,
+    int WearPct,
+    bool Available,
+    int RecommendedSession,
+    int LifeSpanLaps,
+    int UsableLifeLaps,
+    int LapDeltaTimeMs,
+    bool Fitted);
+
+public sealed record TyreSetPacketSample(
+    DateTimeOffset ReceivedAt,
+    ulong SessionUid,
+    uint OverallFrameIdentifier,
+    int CarIndex,
+    bool IsPlayer,
+    int FittedIndex,
+    IReadOnlyList<TyreSetInfo> Sets);
+
 public sealed record EventSample(
     DateTimeOffset ReceivedAt,
     ulong SessionUid,
@@ -350,7 +371,7 @@ public sealed class SessionMetadata
     public DateTimeOffset? StoppedAt { get; set; }
     public string DatabasePath { get; set; } = "";
     public string SessionFolder { get; set; } = "";
-    public string ZipPath { get; set; } = "";
+    public string ArchivePath { get; set; } = "";
 }
 
 public sealed record AnalysisResult(

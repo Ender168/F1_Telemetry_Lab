@@ -1,6 +1,6 @@
 using System.Collections.Concurrent;
+using Microsoft.Data.Sqlite;
 using System.Net.Sockets;
-using System.Text.Json;
 using System.Threading.Channels;
 
 namespace F1TelemetryLab;
@@ -44,8 +44,12 @@ public sealed class UdpRecorder : IAsyncDisposable
     private int _raceFinishObserved;
     private int _finalClassificationObserved;
     private ErsAutopilotService? _ersAutopilot;
+    private RaceEngineerService? _raceEngineer;
     private ErsAutopilotOptions _ersOptions = new() { OperatingMode = ErsAutopilotOperatingMode.Off };
     private ErsAutopilotStatus _lastErsStatus = ErsAutopilotStatus.Initial(ErsAutopilotOperatingMode.Off);
+    private RaceEngineerSnapshot _lastRaceEngineerSnapshot = RaceEngineerSnapshot.Waiting;
+    private string _rootFolder = "";
+    private string _winRarPath = "";
 
     public bool IsRecording => _cts is not null;
     public bool IsStopping
@@ -62,6 +66,7 @@ public sealed class UdpRecorder : IAsyncDisposable
     public long CarSamplesSeen => Interlocked.Read(ref _carSamplesSeen);
     public IReadOnlyList<LiveCarRow> LiveCars => _liveCars.Values.OrderBy(x => x.CarIndex).ToList();
     public ErsAutopilotStatus ErsStatus => _ersAutopilot?.Status ?? _lastErsStatus;
+    public RaceEngineerSnapshot RaceEngineer => _raceEngineer?.Snapshot ?? _lastRaceEngineerSnapshot;
     public RecordingQualitySnapshot Quality => new(
         PacketsSeen,
         CarSamplesSeen,
@@ -78,7 +83,7 @@ public sealed class UdpRecorder : IAsyncDisposable
     public event Action? Updated;
     public event Action<string>? Log;
 
-    public void Start(int port, string rootFolder, ErsAutopilotOptions? ersOptions = null)
+    public void Start(int port, string rootFolder, ErsAutopilotOptions? ersOptions = null, string? winRarPath = null)
     {
         if (IsActive) return;
 
@@ -93,7 +98,8 @@ public sealed class UdpRecorder : IAsyncDisposable
             var sessionName = $"Unknown_Track_Unknown_Session_{_startedAt:yyyyMMdd_HHmmss}";
             var sessionFolder = Path.Combine(rootFolder, "telemetry_packs", sessionName);
             Directory.CreateDirectory(sessionFolder);
-            Directory.CreateDirectory(Path.Combine(sessionFolder, "exports"));
+            _rootFolder = Path.GetFullPath(rootFolder);
+            _winRarPath = winRarPath?.Trim() ?? "";
 
             var dbPath = Path.Combine(sessionFolder, "session.sqlite");
             _metadata = new SessionMetadata
@@ -109,6 +115,15 @@ public sealed class UdpRecorder : IAsyncDisposable
 
             _ersOptions = ersOptions ?? new ErsAutopilotOptions { OperatingMode = ErsAutopilotOperatingMode.Off };
             _lastErsStatus = ErsAutopilotStatus.Initial(_ersOptions.OperatingMode);
+            var ersProfiles = ErsProfileStore.Load(rootFolder);
+            var raceProfiles = RaceEngineerProfileStore.Load(rootFolder);
+            _raceEngineer = new RaceEngineerService(
+                raceProfiles,
+                ersProfiles,
+                database.InsertRaceEngineerLap,
+                database.SaveRaceProfileSnapshot,
+                message => Log?.Invoke(message));
+            _lastRaceEngineerSnapshot = RaceEngineerSnapshot.Waiting;
             if (_ersOptions.OperatingMode == ErsAutopilotOperatingMode.Off)
             {
                 _ersAutopilot = null;
@@ -117,12 +132,12 @@ public sealed class UdpRecorder : IAsyncDisposable
             {
                 try
                 {
-                    var profiles = ErsProfileStore.Load(rootFolder);
                     _ersAutopilot = new ErsAutopilotService(
                         _ersOptions,
-                        profiles,
+                        ersProfiles,
                         new WindowsKeyboardErsInputSink(),
-                        sessionFolder,
+                        database.InsertErsControlEvent,
+                        database.SaveErsProfileSnapshot,
                         message => Log?.Invoke(message));
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or ArgumentException)
@@ -159,6 +174,7 @@ public sealed class UdpRecorder : IAsyncDisposable
         {
             try { _ersAutopilot?.Dispose(); } catch { }
             _ersAutopilot = null;
+            _raceEngineer = null;
             database?.Dispose();
             udp?.Dispose();
             _cts?.Dispose();
@@ -213,9 +229,11 @@ public sealed class UdpRecorder : IAsyncDisposable
             _writerTask = null;
         }
         _lastErsStatus = _ersAutopilot?.Status ?? _lastErsStatus;
+        _lastRaceEngineerSnapshot = _raceEngineer?.Snapshot ?? _lastRaceEngineerSnapshot;
         try { _ersAutopilot?.Dispose(); }
         catch (Exception ex) { Log?.Invoke("ERS audit close warning: " + ex.Message); }
         _ersAutopilot = null;
+        _raceEngineer = null;
         cts.Dispose();
 
         if (_metadata is not null)
@@ -240,14 +258,20 @@ public sealed class UdpRecorder : IAsyncDisposable
         Status = _backgroundError is null ? "Stopped" : "Stopped with errors";
         if (_metadata is not null)
         {
-            try { WriteManifest(_metadata, Quality, _backgroundError, _lastErsStatus); }
-            catch (Exception ex) { Log?.Invoke("Manifest warning: " + ex.Message); }
-
             try
             {
                 Log?.Invoke("Analyzing session...");
                 var analysis = await AnalysisEngine.AnalyzeSessionAsync(_metadata.SessionFolder, Log);
                 Log?.Invoke(analysis.Summary);
+                try
+                {
+                    var learning = RaceProfileLearningService.Learn(_metadata.SessionFolder, _rootFolder);
+                    Log?.Invoke(learning.Summary);
+                }
+                catch (Exception ex) when (ex is SqliteException or IOException or InvalidDataException or InvalidOperationException)
+                {
+                    Log?.Invoke("Race profile learning skipped: " + ex.Message);
+                }
             }
             catch (Exception ex)
             {
@@ -258,12 +282,13 @@ public sealed class UdpRecorder : IAsyncDisposable
             {
                 try
                 {
-                    _metadata.ZipPath = await Task.Run(() => SessionPackager.CreateZip(_metadata.SessionFolder, _metadata.DatabasePath, _metadata.SessionName));
-                    Log?.Invoke("Zip created: " + _metadata.ZipPath);
+                    _metadata.ArchivePath = await Task.Run(() => SessionPackager.CreateRar(
+                        _metadata.SessionFolder, _metadata.DatabasePath, _metadata.SessionName, _winRarPath));
+                    Log?.Invoke("RAR created: " + _metadata.ArchivePath);
                 }
                 catch (Exception ex)
                 {
-                    Log?.Invoke("Zip failed: " + ex.Message);
+                    Log?.Invoke("RAR failed: " + ex.Message);
                 }
             }
         }
@@ -355,6 +380,7 @@ public sealed class UdpRecorder : IAsyncDisposable
             await foreach (var packet in queue.Reader.ReadAllAsync())
             {
                 Interlocked.Decrement(ref _queueDepth);
+                _raceEngineer?.ProcessPacket(packet.Payload, packet.ReceivedAt);
                 _ersAutopilot?.ProcessPacket(packet.Payload, packet.ReceivedAt);
 
                 var storageDecision = _rawStoragePolicy.Evaluate(packet.Header, packet.Payload, _metadata?.SessionType ?? -1);
@@ -503,6 +529,7 @@ public sealed class UdpRecorder : IAsyncDisposable
         _rawStoragePolicy.Reset();
         _activeCarsBySession.Clear();
         _liveCars.Clear();
+        _lastRaceEngineerSnapshot = RaceEngineerSnapshot.Waiting;
     }
 
     private void UpdateHighWatermark(int depth)
@@ -527,49 +554,6 @@ public sealed class UdpRecorder : IAsyncDisposable
         var invalid = Path.GetInvalidFileNameChars();
         var cleaned = new string(value.Select(ch => invalid.Contains(ch) ? '_' : ch).ToArray());
         return cleaned.Replace(' ', '_');
-    }
-
-    private static void WriteManifest(
-        SessionMetadata metadata,
-        RecordingQualitySnapshot quality,
-        Exception? backgroundError,
-        ErsAutopilotStatus ersStatus)
-    {
-        var dbExists = File.Exists(metadata.DatabasePath);
-        var dbSize = dbExists ? new FileInfo(metadata.DatabasePath).Length : 0L;
-        var manifest = new
-        {
-            app = AppInfo.Name,
-            version = AppInfo.Version,
-            schema_version = AppInfo.DatabaseSchemaVersion,
-            session_name = metadata.SessionName,
-            session_uid = metadata.SessionUid.ToString(),
-            track_name = metadata.TrackName,
-            track_id = metadata.TrackId,
-            session_type = metadata.SessionType,
-            raw_session_type = metadata.SessionType,
-            raw_session_name = TelemetryCompletenessService.GetOfficialSessionTypeName(metadata.SessionType),
-            total_laps = metadata.TotalLaps,
-            track_length_m = metadata.TrackLengthMeters,
-            started_at = metadata.StartedAt.ToString("O"),
-            stopped_at = metadata.StoppedAt?.ToString("O"),
-            database = "session.sqlite",
-            database_exists = dbExists,
-            database_size_bytes = dbSize,
-            recording_quality = quality,
-            ers_autopilot_mode = ErsAutopilotOptions.ToSettingValue(ersStatus.OperatingMode),
-            ers_autopilot_state = ersStatus.State,
-            ers_profile_id = string.IsNullOrWhiteSpace(ersStatus.ProfileId) ? null : ersStatus.ProfileId,
-            ers_final_detail = ersStatus.Detail,
-            background_error = backgroundError?.Message
-        };
-        File.WriteAllText(
-            Path.Combine(metadata.SessionFolder, "manifest.json"),
-            JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true }));
-        File.WriteAllText(
-            Path.Combine(metadata.SessionFolder, "README_FOR_CHATGPT.txt"),
-            "This telemetry pack was created by F1 Telemetry Lab. Send the whole zip to ChatGPT for analysis.\n" +
-            "The manifest includes recording-quality diagnostics. Full session.sqlite remains local.\n");
     }
 
     public async ValueTask DisposeAsync()

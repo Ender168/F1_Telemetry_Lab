@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.10.0
+
+### Live Race Engineer
+
+- Добавлены последние три подтверждённых завершённых круга в Live UI.
+- Ресурс шин оценивается диапазоном до safe wear limit по худшему колесу, live wear rate и Tyre Sets usable life.
+- Позиция после пит-стопа рассчитывается диапазоном по текущим live gaps и track-specific pit loss.
+- ERS advisor показывает целевой energy corridor участка и рекомендацию Critical, Save, On plan или Aggressive.
+- Каждая оценка имеет Low, Medium, High или Unavailable confidence и объяснение в tooltip.
+- Добавлен отдельный перемещаемый always-on-top overlay.
+
+### Track profiles and learning
+
+- Добавлены отдельные Race Engineer JSON-профили в `<root>/race_profiles/` и исходный профиль China R03.
+- После анализа приложение обучает tyre wear по compound и green-flag pit loss для конкретной трассы.
+- Повторный анализ одной `session_uid` не удваивает обучающие наблюдения.
+- Незавершённые, invalid, pit и SC/VSC laps не участвуют в tyre learning.
+
+### SQLite-only data and RAR5
+
+- Schema version повышена до 6.
+- ERS audit и profile snapshot перенесены из CSV/JSON в `ers_control_events` и `ers_profile_snapshots`.
+- Добавлены `race_engineer_laps`, `race_profile_snapshots`, `analysis_runs` и `race_learning_observations`.
+- Автоматическое создание CSV, JSON manifest и `chatgpt_pack.sqlite` отключено.
+- WinRAR создаёт RAR5 с `-m5` и ровно одним `session.sqlite`, затем выполняет test command.
+- ZIP fallback отсутствует. Ошибка упаковки не затрагивает рабочую базу.
+- Добавлен ручной небольшой `race_summary.xlsx` с листами Laps, Tyres, Pits, ERS и Quality.
+
+### Regression coverage
+
+- Добавлены тесты completed-lap gate, tyre range/confidence, pit range, ERS aggression, XLSX OpenXML structure и строгого RAR contract.
+- Старые тесты обновлены под SQLite-only storage.
+
 ## 0.9.1
 
 ### ERS Live input correction

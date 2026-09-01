@@ -20,7 +20,7 @@ public static class AnalysisPackFeature
         var russian = string.Equals(analyzeButton.Content as string, "Проанализировать сессию", StringComparison.Ordinal);
         var prepare = new Button
         {
-            Content = russian ? "Подготовить архив для анализа" : "Prepare analysis pack",
+            Content = russian ? "Подготовить RAR для анализа" : "Prepare analysis RAR",
             Width = 220
         };
 
@@ -54,8 +54,9 @@ public static class AnalysisPackFeature
 
         try
         {
-            var zip = await Task.Run(() => SessionPackager.CreateZip(session.FolderPath, databasePath, session.SessionName));
-            button.Content = russian ? $"Готово: {Path.GetFileName(zip)}" : $"Ready: {Path.GetFileName(zip)}";
+            var settings = AppSettingsService.Load();
+            var rar = await Task.Run(() => SessionPackager.CreateRar(session.FolderPath, databasePath, session.SessionName, settings.WinRarPath));
+            button.Content = russian ? $"Готово: {Path.GetFileName(rar)}" : $"Ready: {Path.GetFileName(rar)}";
         }
         catch (Exception ex)
         {
@@ -73,8 +74,8 @@ public static class AnalysisPackFeature
         string.Equals(text, "Проанализировать сессию", StringComparison.Ordinal);
 
     private static bool IsPrepareButton(string? text) =>
-        string.Equals(text, "Prepare analysis pack", StringComparison.Ordinal) ||
-        string.Equals(text, "Подготовить архив для анализа", StringComparison.Ordinal);
+        string.Equals(text, "Prepare analysis RAR", StringComparison.Ordinal) ||
+        string.Equals(text, "Подготовить RAR для анализа", StringComparison.Ordinal);
 
     private static IEnumerable<Control> EnumerateControls(Control root)
     {

@@ -50,7 +50,7 @@ public sealed class LongSessionTests
 
             var timer = Stopwatch.StartNew();
             var result = AnalysisEngine.AnalyzeSession(folder);
-            var zip = SessionPackager.CreateZip(folder, databasePath, "One_Hour_Benchmark");
+            var rar = SessionPackager.CreateRar(folder, databasePath, "One_Hour_Benchmark", processRunner: new BenchmarkRarRunner());
             timer.Stop();
 
             Assert.Equal(packetCount, result.RawPacketsProcessed);
@@ -58,15 +58,22 @@ public sealed class LongSessionTests
             Assert.True(timer.Elapsed < TimeSpan.FromMinutes(3), $"One-hour fixture analysis and packaging took {timer.Elapsed}.");
             Assert.True(Process.GetCurrentProcess().PeakWorkingSet64 < 2_500_000_000L, "Peak working set exceeded 2.5 GB.");
             Assert.True(new FileInfo(databasePath).Length > 1_000_000);
-            Assert.True(File.Exists(zip));
-            var compact = Path.Combine(folder, "chatgpt_pack.sqlite");
-            Assert.True(File.Exists(compact));
-            Assert.True(new FileInfo(compact).Length < new FileInfo(databasePath).Length);
+            Assert.True(File.Exists(rar));
+            Assert.False(File.Exists(Path.Combine(folder, "chatgpt_pack.sqlite")));
         }
         finally
         {
             Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
             if (Directory.Exists(folder)) Directory.Delete(folder, recursive: true);
+        }
+    }
+
+    private sealed class BenchmarkRarRunner : IRarProcessRunner
+    {
+        public RarProcessResult Run(string executablePath, string workingDirectory, IReadOnlyList<string> arguments)
+        {
+            if (arguments[0] == "a") File.WriteAllText(arguments[^2], "benchmark-rar");
+            return new RarProcessResult(0, "ok", "");
         }
     }
 
