@@ -48,7 +48,7 @@ public sealed class AnalysisPackTests
             Assert.Contains("-m5", add);
             Assert.Contains("-md128m", add);
             Assert.Equal("session.sqlite", add[^1]);
-            Assert.Single(add.Where(x => !x.StartsWith('-') && x != "a" && x != rar));
+            Assert.Single(add, x => !x.StartsWith('-') && x != "a" && x != rar);
             Assert.Equal("t", runner.Calls[1][0]);
 
             var extracted = Path.Combine(root, "snapshot.sqlite");
