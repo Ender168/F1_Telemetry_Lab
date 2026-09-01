@@ -128,10 +128,11 @@ public sealed class RaceEngineerTests
     {
         var packet = Packet(1, 662);
         var payload = packet.AsSpan(F12026Parser.HeaderSize);
-        payload[3] = 2;
+        payload[3] = 56;
         BinaryPrimitives.WriteUInt16LittleEndian(payload[4..], 5441);
         payload[6] = 15;
-        payload[8] = 56;
+        payload[7] = 2;
+        payload[8] = 0;
         payload[124] = 0;
         payload[125] = 0;
         payload[661] = 0;
