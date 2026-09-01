@@ -212,7 +212,7 @@ public sealed class QualityAndSchemaTests
     }
 
     [Fact]
-    public void CompactChatGptDatabaseContainsSetupSnapshots()
+    public void AuthoritativeSessionDatabaseContainsSetupSnapshotsWithoutCompactSidecar()
     {
         SQLitePCL.Batteries_V2.Init();
         var folder = Path.Combine(Path.GetTempPath(), $"f1tlab-pack-{Guid.NewGuid():N}");
@@ -235,12 +235,12 @@ public sealed class QualityAndSchemaTests
                     """);
             }
 
-            _ = SessionPackager.CreateZip(folder, source, "SetupFixture");
-            var compact = Path.Combine(folder, "chatgpt_pack.sqlite");
-            using var packed = new SqliteConnection($"Data Source={compact};Mode=ReadOnly");
+            SessionManifestService.Refresh(folder);
+            using var packed = new SqliteConnection($"Data Source={source};Mode=ReadOnly");
             packed.Open();
             Assert.Equal(1L, ScalarLong(packed, "SELECT COUNT(*) FROM car_setups"));
             Assert.Equal(30L, ScalarLong(packed, "SELECT front_wing FROM car_setups WHERE is_player=1"));
+            Assert.False(File.Exists(Path.Combine(folder, "chatgpt_pack.sqlite")));
         }
         finally
         {

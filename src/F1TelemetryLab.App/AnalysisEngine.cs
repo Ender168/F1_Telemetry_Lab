@@ -21,34 +21,16 @@ public static class AnalysisEngine
         if (!File.Exists(dbPath))
             throw new FileNotFoundException("session.sqlite not found", dbPath);
 
-        var exports = Path.Combine(sessionFolder, "exports");
-        var playerOnly = Path.Combine(exports, "player_only");
-        var allCars = Path.Combine(exports, "all_cars");
-        var comparison = Path.Combine(exports, "comparison");
-        var quality = Path.Combine(exports, "quality");
-        Directory.CreateDirectory(playerOnly);
-        Directory.CreateDirectory(allCars);
-        Directory.CreateDirectory(comparison);
-        Directory.CreateDirectory(quality);
-
         SQLitePCL.Batteries_V2.Init();
         var stagingDb = Path.Combine(sessionFolder, $"session.analysis.{Guid.NewGuid():N}.sqlite");
         try
         {
             log?.Invoke("Creating an atomic analysis snapshot...");
             CreateWorkingCopy(dbPath, stagingDb);
-            var result = AnalyzeWorkingCopy(
-                stagingDb,
-                sessionFolder,
-                exports,
-                playerOnly,
-                allCars,
-                comparison,
-                quality,
-                log);
+            var result = AnalyzeWorkingCopy(stagingDb, sessionFolder, log);
 
             ReplaceDatabaseAtomically(stagingDb, dbPath);
-            WriteAnalysisManifest(sessionFolder, result);
+            WriteAnalysisRun(dbPath, result);
             SessionManifestService.Refresh(sessionFolder, analyzedAt: DateTimeOffset.Now);
             return result;
         }
@@ -63,11 +45,6 @@ public static class AnalysisEngine
     private static AnalysisResult AnalyzeWorkingCopy(
         string dbPath,
         string sessionFolder,
-        string exports,
-        string playerOnly,
-        string allCars,
-        string comparison,
-        string quality,
         Action<string>? log)
     {
         using var con = new SqliteConnection($"Data Source={dbPath};Default Timeout=60");
@@ -102,19 +79,6 @@ public static class AnalysisEngine
         BuildSqlDerivedTables(con);
         UpdateDataQuality(con, qualities, stats.FinalClassificationRows, eventCodes);
 
-        ExportCsv(con, Path.Combine(quality, "lap_quality.csv"), "SELECT * FROM lap_quality ORDER BY car_idx, lap_num");
-        ExportCsv(con, Path.Combine(quality, "rewind_events.csv"), "SELECT * FROM rewind_events ORDER BY received_at, car_idx");
-        ExportCsv(con, Path.Combine(quality, "suspected_state_reset_events.csv"), "SELECT * FROM suspected_state_reset_events ORDER BY received_at, car_idx");
-        ExportCsv(con, Path.Combine(allCars, "lap_summary_all_cars.csv"), "SELECT * FROM lap_summary ORDER BY car_idx, lap_num");
-        ExportCsv(con, Path.Combine(allCars, "lap_state_summary_all_cars.csv"), "SELECT * FROM lap_state_summary ORDER BY car_idx, lap_num");
-        ExportCsv(con, Path.Combine(allCars, "final_classification.csv"), "SELECT * FROM final_classification ORDER BY position, car_idx");
-        ExportCsv(con, Path.Combine(allCars, "participants_debug.csv"), "SELECT * FROM participants_debug ORDER BY received_at");
-        ExportCsv(con, Path.Combine(allCars, "car_setups.csv"), "SELECT * FROM car_setups ORDER BY session_uid, car_idx, overall_frame_identifier, received_at");
-        ExportCsv(con, Path.Combine(playerOnly, "lap_summary_player.csv"), "SELECT * FROM lap_summary WHERE is_player = 1 ORDER BY lap_num");
-        ExportCsv(con, Path.Combine(comparison, "analysis_trace_10m.csv"), "SELECT * FROM analysis_trace_10m ORDER BY car_idx, lap_num, distance_bin_m");
-        ExportBestLaps(con, Path.Combine(comparison, "best_laps_by_car.csv"));
-        ExportPlayerVsFastest(con, Path.Combine(comparison, "player_vs_fastest_basic.csv"));
-
         using (var checkpoint = con.CreateCommand())
         {
             checkpoint.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
@@ -125,7 +89,7 @@ public static class AnalysisEngine
         var dirtyCount = qualities.Count(x => !x.CleanLap);
         return new AnalysisResult(
             sessionFolder,
-            exports,
+            sessionFolder,
             rawPacketCount,
             stats.TelemetryRows,
             stats.LapRows,
@@ -140,7 +104,7 @@ public static class AnalysisEngine
             suspectedStateResets.Count,
             cleanCount,
             dirtyCount,
-            $"Processed {rawPacketCount:N0} packets. Clean laps: {cleanCount}, dirty laps: {dirtyCount}. Exports: {exports}");
+            $"Processed {rawPacketCount:N0} packets. Clean laps: {cleanCount}, dirty laps: {dirtyCount}. All automatic analysis data is stored in session.sqlite.");
     }
 
     private static void CreateAnalysisSchema(SqliteConnection con)
@@ -800,32 +764,26 @@ public static class AnalysisEngine
         return value;
     }
 
-    private static void WriteAnalysisManifest(string sessionFolder, AnalysisResult result)
+    private static void WriteAnalysisRun(string databasePath, AnalysisResult result)
     {
-        var manifestPath = Path.Combine(sessionFolder, "analysis_manifest.json");
-        var json = JsonSerializer.Serialize(new
-        {
-            app = AppInfo.Name,
-            version = AppInfo.Version,
-            schema_version = AppInfo.DatabaseSchemaVersion,
-            analyzed_at = DateTimeOffset.Now.ToString("O"),
-            raw_packets_processed = result.RawPacketsProcessed,
-            telemetry_rows = result.TelemetryRows,
-            lap_rows = result.LapRows,
-            motion_rows = result.MotionRows,
-            status_rows = result.StatusRows,
-            damage_rows = result.DamageRows,
-            setup_change_rows = result.SetupRows,
-            events_rows = result.EventsRows,
-            participants_rows = result.ParticipantsRows,
-            final_classification_rows = result.FinalClassificationRows,
-            confirmed_rewind_rows = result.ConfirmedRewindRows,
-            suspected_state_reset_rows = result.SuspectedStateResetRows,
-            clean_lap_count = result.CleanLapCount,
-            dirty_lap_count = result.DirtyLapCount,
-            exports = "exports"
-        }, new JsonSerializerOptions { WriteIndented = true });
-        File.WriteAllText(manifestPath, json, Encoding.UTF8);
+        using var connection = new SqliteConnection($"Data Source={databasePath};Mode=ReadWrite;Cache=Private;Default Timeout=30");
+        connection.Open();
+        DatabaseSchemaMigrator.Apply(connection);
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO analysis_runs(
+                analyzed_at,app_version,schema_version,raw_packets_processed,clean_laps,dirty_laps,status,summary)
+            VALUES($at,$version,$schema,$raw,$clean,$dirty,$status,$summary)
+            """;
+        command.Parameters.AddWithValue("$at", DateTimeOffset.Now.ToString("O"));
+        command.Parameters.AddWithValue("$version", AppInfo.Version);
+        command.Parameters.AddWithValue("$schema", AppInfo.DatabaseSchemaVersion);
+        command.Parameters.AddWithValue("$raw", result.RawPacketsProcessed);
+        command.Parameters.AddWithValue("$clean", result.CleanLapCount);
+        command.Parameters.AddWithValue("$dirty", result.DirtyLapCount);
+        command.Parameters.AddWithValue("$status", "completed");
+        command.Parameters.AddWithValue("$summary", result.Summary);
+        command.ExecuteNonQuery();
     }
 
     private static DateTimeOffset ParseDate(string value) => DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var dt) ? dt : DateTimeOffset.Now;

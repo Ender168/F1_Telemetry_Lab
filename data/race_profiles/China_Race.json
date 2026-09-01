@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "profile_id": "china-race-engineer-r03-v1",
+  "display_name": "China Race Engineer baseline from R03",
+  "selection_priority": 100,
+  "track_id": 2,
+  "track_name": "China",
+  "track_length_m": 5441,
+  "session_types": [15, 16, 17],
+  "safe_tyre_wear_pct": 75,
+  "pit_loss_green_seconds": 23.0,
+  "pit_loss_vsc_seconds": 15.0,
+  "pit_loss_safety_car_seconds": 12.0,
+  "pit_loss_uncertainty_seconds": 1.8,
+  "ers_battery_capacity_j": 4000000,
+  "ers_critical_pct": 12,
+  "ers_aggressive_energy_per_lap_j": 400000,
+  "tyre_wear_priors": [
+    { "visual_compound": 16, "wear_pct_per_lap": 2.4 },
+    { "visual_compound": 17, "wear_pct_per_lap": 1.8 },
+    { "visual_compound": 18, "wear_pct_per_lap": 1.35 },
+    { "visual_compound": 7, "wear_pct_per_lap": 1.5 },
+    { "visual_compound": 8, "wear_pct_per_lap": 1.2 }
+  ],
+  "ers_energy_bands": [
+    { "segment": "T1 -> T4", "priority": 100, "start_m": 600, "end_m": 1280, "target_min_pct": 35, "target_max_pct": 60 },
+    { "segment": "T6 -> T10", "priority": 100, "start_m": 1570, "end_m": 3000, "target_min_pct": 38, "target_max_pct": 62 },
+    { "segment": "T10 -> T13", "priority": 200, "start_m": 3000, "end_m": 3420, "target_min_pct": 50, "target_max_pct": 75 },
+    { "segment": "T13 -> T14", "priority": 200, "start_m": 3420, "end_m": 4350, "target_min_pct": 28, "target_max_pct": 55 },
+    { "segment": "T14 -> T16", "priority": 100, "start_m": 4800, "end_m": 5260, "target_min_pct": 30, "target_max_pct": 58 },
+    { "segment": "T16 -> T1", "priority": 100, "start_m": 5260, "end_m": 520, "target_min_pct": 32, "target_max_pct": 62 },
+    { "segment": "Default", "priority": 0, "start_m": 0, "end_m": 5441, "target_min_pct": 35, "target_max_pct": 65 }
+  ]
+}

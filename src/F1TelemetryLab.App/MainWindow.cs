@@ -10,7 +10,6 @@ using System.Collections.ObjectModel;
 using System.Diagnostics;
 using Microsoft.Data.Sqlite;
 using System.Globalization;
-using System.Text.Json;
 
 namespace F1TelemetryLab;
 
@@ -39,6 +38,15 @@ public sealed class MainWindow : Window
     private TextBox _portText = null!;
     private TextBox _rootText = null!;
     private CheckBox _autoZipCheck = null!;
+    private ComboBox _ersModeCombo = null!;
+    private TextBlock _ersStatusText = null!;
+    private TextBlock _raceLapsText = null!;
+    private TextBlock _raceTyresText = null!;
+    private TextBlock _racePitText = null!;
+    private TextBlock _raceErsText = null!;
+    private TextBlock _raceAdvisorConfidenceText = null!;
+    private Button _raceOverlayButton = null!;
+    private RaceEngineerOverlayWindow? _raceOverlayWindow;
     private Button _startButton = null!;
     private Button _stopButton = null!;
     private ListBox _sessionList = null!;
@@ -94,6 +102,11 @@ public sealed class MainWindow : Window
     private bool _closingAfterStop;
     private bool _closeStopInProgress;
 
+    private sealed record ErsModeChoice(ErsAutopilotOperatingMode Mode, string Label)
+    {
+        public override string ToString() => Label;
+    }
+
     public MainWindow()
     {
         _settings = AppSettingsService.Load();
@@ -116,6 +129,7 @@ public sealed class MainWindow : Window
         _timer.Tick += (_, _) => UpdateLiveUi();
         _timer.Start();
         Closing += OnWindowClosing;
+        Closed += (_, _) => _raceOverlayWindow?.Close();
     }
 
 
@@ -156,7 +170,7 @@ public sealed class MainWindow : Window
         ["Open session folder"] = "Открыть папку сессии",
         ["Analyze selected session"] = "Проанализировать сессию",
         ["Classification"] = "Классификация",
-        ["Technical details and manifest"] = "Технические сведения и manifest",
+        ["Technical details"] = "Технические сведения",
         ["Save all aliases"] = "Сохранить все псевдонимы",
         ["Track Map"] = "Карта трассы",
         ["Plot from compare"] = "Построить из сравнения",
@@ -165,7 +179,6 @@ public sealed class MainWindow : Window
         ["Race Report"] = "Отчёт по гонке",
         ["Clean only"] = "Только чистые",
         ["Problems only"] = "Только проблемы",
-        ["Export CSV"] = "Экспорт CSV",
         ["Column help"] = "Описание столбцов",
         ["Stint Report"] = "Отчёт по стинтам",
         ["Pit Report"] = "Отчёт по пит-стопам",
@@ -185,7 +198,23 @@ public sealed class MainWindow : Window
         ["Delete previewed"] = "Удалить показанные",
         ["Copy logs"] = "Копировать журнал",
         ["Cars"] = "Болиды",
-        ["Log"] = "Журнал"
+        ["Log"] = "Журнал",
+        ["ERS Autopilot"] = "Автопилот ERS",
+        ["Open ERS profiles"] = "Открыть профили ERS",
+        ["ERS mode"] = "Режим ERS",
+        ["Race Engineer"] = "Гоночный инженер",
+        ["Last laps"] = "Последние круги",
+        ["Tyres"] = "Шины",
+        ["Pit stop"] = "Пит-стоп",
+        ["Open overlay"] = "Открыть оверлей",
+        ["Hide overlay"] = "Скрыть оверлей",
+        ["Export race summary"] = "Экспорт краткого Excel",
+        ["Open race profiles"] = "Открыть профили гонок",
+        ["Auto RAR after Stop"] = "Авто-RAR после остановки",
+        ["Create RAR with session.sqlite only after Stop"] = "Создавать RAR только с session.sqlite после остановки",
+        ["Open Race Engineer overlay when recording starts"] = "Открывать оверлей гоночного инженера при старте записи",
+        ["WinRAR path"] = "Путь к WinRAR",
+        ["Race overlay"] = "Гоночный оверлей"
     };
 
     private static IBrush Hex(uint rgb)
@@ -284,7 +313,7 @@ public sealed class MainWindow : Window
     {
         var grid = new Grid
         {
-            RowDefinitions = new RowDefinitions("Auto,Auto,*,Auto"),
+            RowDefinitions = new RowDefinitions("Auto,Auto,Auto,*,Auto"),
             ColumnDefinitions = new ColumnDefinitions("3*,2*")
         };
 
@@ -305,7 +334,11 @@ public sealed class MainWindow : Window
 
         _portText = new TextBox { Text = _settings.Port.ToString(CultureInfo.InvariantCulture), Width = 80, PlaceholderText = "Port" };
         _rootText = new TextBox { Text = _settings.RootFolder, Width = 320, PlaceholderText = "Root folder" };
-        _autoZipCheck = new CheckBox { Content = "Auto ZIP after Stop", IsChecked = _settings.AutoZip, Foreground = Brushes.White, VerticalAlignment = VerticalAlignment.Center };
+        _autoZipCheck = new CheckBox { Content = "Auto RAR after Stop", IsChecked = _settings.AutoZip, Foreground = Brushes.White, VerticalAlignment = VerticalAlignment.Center };
+        var ersChoices = ErsModeChoices();
+        _ersModeCombo = new ComboBox { ItemsSource = ersChoices, Width = 145, HorizontalAlignment = HorizontalAlignment.Left };
+        var configuredErsMode = ErsAutopilotOptions.ParseOperatingMode(_settings.ErsAutopilotMode);
+        _ersModeCombo.SelectedItem = ersChoices.First(choice => choice.Mode == configuredErsMode);
         _startButton = new Button { Content = "Start Recording", Width = 150 };
         _stopButton = new Button { Content = "Stop", Width = 100, IsEnabled = false };
         _startButton.Click += (_, _) => StartRecording();
@@ -316,12 +349,19 @@ public sealed class MainWindow : Window
         controls.Children.Add(new TextBlock { Text = "Root", Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center });
         controls.Children.Add(_rootText);
         controls.Children.Add(_autoZipCheck);
+        controls.Children.Add(new TextBlock { Text = "ERS mode", Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center });
+        controls.Children.Add(_ersModeCombo);
         controls.Children.Add(_startButton);
         controls.Children.Add(_stopButton);
         grid.Children.Add(controls);
 
+        var raceEngineer = BuildRaceEngineerPanel();
+        Grid.SetRow(raceEngineer, 2);
+        Grid.SetColumnSpan(raceEngineer, 2);
+        grid.Children.Add(raceEngineer);
+
         var livePanel = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,*"), RowSpacing = 8 };
-        Grid.SetRow(livePanel, 2);
+        Grid.SetRow(livePanel, 3);
         Grid.SetColumn(livePanel, 0);
         livePanel.Children.Add(BuildCards());
         var carsTitle = new TextBlock { Text = "Cars", FontSize = 18, FontWeight = FontWeight.Bold, Foreground = Brushes.White };
@@ -341,7 +381,7 @@ public sealed class MainWindow : Window
         grid.Children.Add(livePanel);
 
         var logPanel = new Grid { RowDefinitions = new RowDefinitions("Auto,*"), RowSpacing = 8, Margin = new Thickness(16, 0, 0, 0) };
-        Grid.SetRow(logPanel, 2);
+        Grid.SetRow(logPanel, 3);
         Grid.SetColumn(logPanel, 1);
         var logHeader = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10 };
         logHeader.Children.Add(new TextBlock { Text = "Log", FontSize = 18, FontWeight = FontWeight.Bold, Foreground = Brushes.White, VerticalAlignment = VerticalAlignment.Center });
@@ -370,7 +410,136 @@ public sealed class MainWindow : Window
         logPanel.Children.Add(logList);
         grid.Children.Add(logPanel);
 
+        var openProfiles = new Button { Content = "Open ERS profiles", Width = 170, VerticalAlignment = VerticalAlignment.Center };
+        openProfiles.Click += (_, _) => OpenErsProfilesFolder();
+        _ersStatusText = new TextBlock
+        {
+            Text = ErsAutopilotStatus.Initial(configuredErsMode).Display,
+            Foreground = Hex(0xC7D4E8),
+            TextWrapping = TextWrapping.Wrap,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        var ersPanel = new Border
+        {
+            Background = Hex(0x1D2630),
+            BorderBrush = Hex(0x354255),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(12),
+            Margin = new Thickness(0, 12, 0, 0),
+            Child = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto"),
+                ColumnSpacing = 14,
+                Children =
+                {
+                    new TextBlock { Text = "ERS Autopilot", FontSize = 17, FontWeight = FontWeight.Bold, Foreground = Brushes.White, VerticalAlignment = VerticalAlignment.Center },
+                    _ersStatusText,
+                    openProfiles
+                }
+            }
+        };
+        Grid.SetColumn(_ersStatusText, 1);
+        Grid.SetColumn(openProfiles, 2);
+        Grid.SetRow(ersPanel, 4);
+        Grid.SetColumnSpan(ersPanel, 2);
+        grid.Children.Add(ersPanel);
+
         return grid;
+    }
+
+    private Control BuildRaceEngineerPanel()
+    {
+        _raceLapsText = AdvisorValue();
+        _raceTyresText = AdvisorValue();
+        _racePitText = AdvisorValue();
+        _raceErsText = AdvisorValue();
+        _raceAdvisorConfidenceText = new TextBlock
+        {
+            Foreground = Hex(0xAEBBD0),
+            FontSize = 12,
+            TextWrapping = TextWrapping.Wrap,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        _raceOverlayButton = new Button { Content = "Open overlay", Width = 125 };
+        _raceOverlayButton.Click += (_, _) => ToggleRaceEngineerOverlay();
+        var openProfiles = new Button { Content = "Open race profiles", Width = 150 };
+        openProfiles.Click += (_, _) => OpenRaceProfilesFolder();
+
+        var header = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto"), ColumnSpacing = 12 };
+        header.Children.Add(new TextBlock
+        {
+            Text = "Race Engineer",
+            FontSize = 18,
+            FontWeight = FontWeight.Bold,
+            Foreground = Brushes.White,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+        Grid.SetColumn(_raceAdvisorConfidenceText, 1);
+        header.Children.Add(_raceAdvisorConfidenceText);
+        var headerActions = new WrapPanel { Orientation = Orientation.Horizontal, ItemSpacing = 8, Children = { openProfiles, _raceOverlayButton } };
+        Grid.SetColumn(headerActions, 2);
+        header.Children.Add(headerActions);
+
+        var cards = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,*,*,*"),
+            ColumnSpacing = 8,
+            Children =
+            {
+                AdvisorCard("Last laps", _raceLapsText),
+                AdvisorCard("Tyres", _raceTyresText),
+                AdvisorCard("Pit stop", _racePitText),
+                AdvisorCard("ERS", _raceErsText)
+            }
+        };
+        Grid.SetColumn(cards.Children[1], 1);
+        Grid.SetColumn(cards.Children[2], 2);
+        Grid.SetColumn(cards.Children[3], 3);
+        return new Border
+        {
+            Background = Hex(0x1D2630),
+            BorderBrush = Hex(0x354255),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(12),
+            Margin = new Thickness(0, 0, 0, 12),
+            Child = new StackPanel { Spacing = 8, Children = { header, cards } }
+        };
+    }
+
+    private static TextBlock AdvisorValue() => new()
+    {
+        Foreground = Brushes.White,
+        TextWrapping = TextWrapping.Wrap,
+        MinHeight = 38
+    };
+
+    private static Border AdvisorCard(string title, TextBlock value) => new()
+    {
+        Background = Hex(0x161B22),
+        CornerRadius = new CornerRadius(6),
+        Padding = new Thickness(9),
+        Child = new StackPanel
+        {
+            Spacing = 4,
+            Children =
+            {
+                new TextBlock { Text = title, Foreground = Hex(0xF4BF75), FontWeight = FontWeight.SemiBold },
+                value
+            }
+        }
+    };
+
+    private IReadOnlyList<ErsModeChoice> ErsModeChoices()
+    {
+        var russian = string.Equals(_settings.Language, "ru", StringComparison.OrdinalIgnoreCase);
+        return new[]
+        {
+            new ErsModeChoice(ErsAutopilotOperatingMode.Off, russian ? "Выключен" : "Off"),
+            new ErsModeChoice(ErsAutopilotOperatingMode.DryRun, russian ? "Тест без ввода" : "Dry-run"),
+            new ErsModeChoice(ErsAutopilotOperatingMode.Live, russian ? "Управление" : "Live control")
+        };
     }
 
     private Control BuildCards()
@@ -479,12 +648,14 @@ public sealed class MainWindow : Window
         openFolder.Click += (_, _) => OpenSelectedSessionFolder();
         var analyze = new Button { Content = "Analyze selected session", Width = 210 };
         analyze.Click += async (_, _) => await AnalyzeSelectedSessionAsync();
+        var exportSummary = new Button { Content = "Export race summary", Width = 190 };
+        exportSummary.Click += async (_, _) => await ExportSelectedRaceSummaryAsync();
         var actions = new WrapPanel
         {
             Orientation = Orientation.Horizontal,
             ItemSpacing = 10,
             LineSpacing = 8,
-            Children = { openFolder, analyze }
+            Children = { openFolder, analyze, exportSummary }
         };
         Grid.SetRow(actions, 1);
         details.Children.Add(actions);
@@ -522,14 +693,14 @@ public sealed class MainWindow : Window
 
         _technicalManifestText = new TextBlock
         {
-            Text = "No manifest loaded.",
+            Text = "No database details loaded.",
             Foreground = Brushes.LightGray,
             FontFamily = FontFamily.Parse("Consolas"),
             TextWrapping = TextWrapping.Wrap
         };
         var technical = new Expander
         {
-            Header = "Technical details and manifest",
+            Header = "Technical details",
             Content = new ScrollViewer
             {
                 Content = _technicalManifestText,
@@ -785,8 +956,6 @@ public sealed class MainWindow : Window
         _raceReportProblemsOnly.Click += (_, _) => LoadRaceReportRows();
         var load = new Button { Content = "Refresh", Width = 95 };
         load.Click += (_, _) => LoadRaceReportDrivers();
-        var export = new Button { Content = "Export CSV", Width = 105 };
-        export.Click += (_, _) => ExportRaceReportCsv();
         _raceReportLegendToggle = new Button { Content = "Column help", Width = 115 };
         _raceReportLegendToggle.Click += (_, _) => ToggleRaceReportLegend();
         controls.Children.Add(new TextBlock { Text = "Driver", Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center });
@@ -796,7 +965,6 @@ public sealed class MainWindow : Window
         controls.Children.Add(_raceReportCleanOnly);
         controls.Children.Add(_raceReportProblemsOnly);
         controls.Children.Add(load);
-        controls.Children.Add(export);
         controls.Children.Add(_raceReportLegendToggle);
         grid.Children.Add(controls);
 
@@ -1224,7 +1392,7 @@ public sealed class MainWindow : Window
 
         var status = new TextBlock
         {
-            Text = "Setup changes are extracted from UDP packet 5 during analysis and included in chatgpt_pack.sqlite.",
+            Text = "Setup changes are extracted from UDP packet 5 during analysis and stored in session.sqlite.",
             Foreground = Hex(0xA8B3C7),
             TextWrapping = TextWrapping.Wrap
         };
@@ -1284,7 +1452,7 @@ public sealed class MainWindow : Window
                 detail.Text = rows.LastOrDefault()?.Detail ?? "No Car Setup rows were found. Re-analyze the session with v0.7.1; the original raw packet 5 data is retained.";
                 status.Text = rows.Count == 0
                     ? "No setup snapshots for this driver. Re-analyze the session if it was recorded by an older version."
-                    : $"{rows.Count:N0} initial/change snapshot(s). Unchanged 2 Hz packets are intentionally deduplicated; all fields are included in chatgpt_pack.sqlite and car_setups.csv.";
+                    : $"{rows.Count:N0} initial/change snapshot(s). Unchanged 2 Hz packets are intentionally deduplicated; all fields are stored in session.sqlite.";
             }
             catch (Exception ex)
             {
@@ -1463,9 +1631,6 @@ public sealed class MainWindow : Window
         allBest.Click += (_, _) => ApplyBestLapToAllSlots();
         var sameLap = new Button { Content = "Same lap", Width = 95 };
         sameLap.Click += (_, _) => ApplyReferenceLapNumberToAllSlots();
-        var export = new Button { Content = "Export", Width = 80 };
-        export.Click += (_, _) => ExportComparedLaps();
-
         _zoomFromText = new TextBox { Width = 65, PlaceholderText = "from m" };
         _zoomToText = new TextBox { Width = 65, PlaceholderText = "to m" };
         var applyZoom = new Button { Content = "Apply", Width = 75 };
@@ -1482,7 +1647,6 @@ public sealed class MainWindow : Window
         controls.Children.Add(youTop);
         controls.Children.Add(allBest);
         controls.Children.Add(sameLap);
-        controls.Children.Add(export);
         controls.Children.Add(new TextBlock { Text = "Zoom", Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(16,0,0,0) });
         controls.Children.Add(_zoomFromText);
         controls.Children.Add(_zoomToText);
@@ -1668,23 +1832,43 @@ public sealed class MainWindow : Window
             Foreground = Brushes.LightGray,
             TextWrapping = TextWrapping.Wrap
         });
+        panel.Children.Add(new TextBlock
+        {
+            Text = string.Equals(_settings.Language, "ru", StringComparison.OrdinalIgnoreCase)
+                ? "Прототип ERS: выключите ERS Assist в игре, назначьте уменьшение стандартного режима ERS на F7, увеличение на F8. Начните с теста без ввода. Управление заблокировано в онлайне, отправляет клавиши только при активном окне F1 25, аварийная остановка - F12."
+                : "ERS prototype: turn the in-game ERS Assist off, bind standard ERS mode decrease to F7 and increase to F8. Start with Dry-run. Live control is blocked online, sends keys only while F1 25 is foreground, and F12 is the emergency stop.",
+            Foreground = Hex(0xF4BF75),
+            TextWrapping = TextWrapping.Wrap
+        });
 
         var form = new Grid
         {
             ColumnDefinitions = new ColumnDefinitions("190,420"),
-            RowDefinitions = new RowDefinitions("Auto,Auto,Auto,Auto,Auto,Auto"),
+            RowDefinitions = new RowDefinitions("Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"),
             RowSpacing = 10,
             ColumnSpacing = 12
         };
         var port = new TextBox { Text = _settings.Port.ToString(CultureInfo.InvariantCulture), Width = 120, HorizontalAlignment = HorizontalAlignment.Left };
         var root = new TextBox { Text = _settings.RootFolder, HorizontalAlignment = HorizontalAlignment.Stretch };
-        var autoZip = new CheckBox { Content = "Create compact ZIP after Stop", IsChecked = _settings.AutoZip, Foreground = Brushes.White };
+        var autoZip = new CheckBox { Content = "Create RAR with session.sqlite only after Stop", IsChecked = _settings.AutoZip, Foreground = Brushes.White };
         var retention = new TextBox { Text = _settings.RetentionDays.ToString(CultureInfo.InvariantCulture), Width = 120, HorizontalAlignment = HorizontalAlignment.Left };
         var language = new ComboBox { ItemsSource = new[] { "English (en)", "Русский (ru)" }, Width = 180, HorizontalAlignment = HorizontalAlignment.Left };
         language.SelectedIndex = string.Equals(_settings.Language, "ru", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
         var scale = new ComboBox { ItemsSource = new[] { "80%", "90%", "100%", "110%", "125%", "150%", "175%" }, Width = 120, HorizontalAlignment = HorizontalAlignment.Left };
         scale.SelectedItem = $"{_settings.UiScalePercent}%";
         if (scale.SelectedItem is null) scale.SelectedItem = "100%";
+        var winRar = new TextBox
+        {
+            Text = _settings.WinRarPath,
+            PlaceholderText = @"Auto-detect or C:\Program Files\WinRAR\WinRAR.exe",
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        };
+        var autoOverlay = new CheckBox
+        {
+            Content = "Open Race Engineer overlay when recording starts",
+            IsChecked = _settings.OpenRaceEngineerOverlayOnStart,
+            Foreground = Brushes.White
+        };
 
         AddSettingRow(form, 0, "UDP port", port);
         AddSettingRow(form, 1, "Storage root", root);
@@ -1692,6 +1876,8 @@ public sealed class MainWindow : Window
         AddSettingRow(form, 3, "Retention, days", retention);
         AddSettingRow(form, 4, "UI language", language);
         AddSettingRow(form, 5, "UI scale", scale);
+        AddSettingRow(form, 6, "WinRAR path", winRar);
+        AddSettingRow(form, 7, "Race overlay", autoOverlay);
         panel.Children.Add(new Border
         {
             Background = Hex(0x1D2630),
@@ -1734,6 +1920,8 @@ public sealed class MainWindow : Window
             _settings.RetentionDays = retentionDays;
             _settings.Language = language.SelectedIndex == 1 ? "ru" : "en";
             _settings.UiScalePercent = scaleValue;
+            _settings.WinRarPath = winRar.Text?.Trim() ?? "";
+            _settings.OpenRaceEngineerOverlayOnStart = autoOverlay.IsChecked == true;
             try
             {
                 AppSettingsService.Save(_settings);
@@ -1808,7 +1996,7 @@ public sealed class MainWindow : Window
         panel.Children.Add(_settingsStatus);
         panel.Children.Add(new TextBlock
         {
-            Text = $"v{AppInfo.Version} | schema {AppInfo.DatabaseSchemaVersion} | compact packages include lap reports, data-quality dimensions, telemetry bins and Car Setup changes.",
+            Text = $"v{AppInfo.Version} | schema {AppInfo.DatabaseSchemaVersion} | automatic data stays in session.sqlite; optional export is one small Excel workbook.",
             Foreground = Hex(0xA8B3C7),
             TextWrapping = TextWrapping.Wrap
         });
@@ -1877,11 +2065,15 @@ public sealed class MainWindow : Window
             _settings.Port = port;
             _settings.RootFolder = root;
             _settings.AutoZip = _autoZipCheck.IsChecked == true;
+            var ersMode = (_ersModeCombo.SelectedItem as ErsModeChoice)?.Mode ?? ErsAutopilotOperatingMode.DryRun;
+            _settings.ErsAutopilotMode = ErsAutopilotOptions.ToSettingValue(ersMode);
             try { AppSettingsService.Save(_settings); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { AddLog("Settings persistence warning: " + ex.Message); }
-            _recorder.Start(port, root);
+            _recorder.Start(port, root, ErsAutopilotOptions.FromSettings(_settings), _settings.WinRarPath);
             _startButton.IsEnabled = false;
             _stopButton.IsEnabled = true;
+            _ersModeCombo.IsEnabled = false;
+            if (_settings.OpenRaceEngineerOverlayOnStart) ShowRaceEngineerOverlay();
         }
         catch (Exception ex)
         {
@@ -1914,21 +2106,63 @@ public sealed class MainWindow : Window
             _busy = false;
             _startButton.IsEnabled = true;
             _stopButton.IsEnabled = _recorder.IsRecording;
+            _ersModeCombo.IsEnabled = !_recorder.IsRecording;
         }
     }
 
     private void UpdateLiveUi()
     {
         var quality = _recorder.Quality;
+        var raceEngineer = _recorder.RaceEngineer;
+        var raceDisplay = RaceEngineerText.Format(raceEngineer, string.Equals(_settings.Language, "ru", StringComparison.OrdinalIgnoreCase));
         _statusText.Text = _recorder.Status;
         _packetsText.Text = _recorder.PacketsSeen.ToString("N0");
         _samplesText.Text = _recorder.CarSamplesSeen.ToString("N0");
         _sessionText.Text = _recorder.CurrentSession?.TrackName ?? "None";
         _qualityText.Text = $"{quality.Rating}\nDrops {quality.QueueDrops:N0} | Queue {quality.QueueDepth:N0}/{quality.QueueHighWatermark:N0}";
+        _ersStatusText.Text = _recorder.ErsStatus.Display;
+        _raceLapsText.Text = raceDisplay.Laps;
+        _raceTyresText.Text = raceDisplay.Tyres;
+        _racePitText.Text = raceDisplay.Pit;
+        _raceErsText.Text = raceDisplay.Ers;
+        _raceAdvisorConfidenceText.Text = raceDisplay.Confidence;
+        ToolTip.SetTip(_raceTyresText, raceEngineer.Tyres.Reason);
+        ToolTip.SetTip(_racePitText, raceEngineer.Pit.Reason);
+        ToolTip.SetTip(_raceErsText, raceEngineer.Ers.Reason);
+        _raceOverlayWindow?.UpdateSnapshot(raceEngineer);
 
         _liveRows.Clear();
         foreach (var row in _recorder.LiveCars)
             _liveRows.Add(row.Display);
+    }
+
+    private void ToggleRaceEngineerOverlay()
+    {
+        if (_raceOverlayWindow?.IsVisible == true)
+        {
+            _raceOverlayWindow.Hide();
+            _raceOverlayButton.Content = string.Equals(_settings.Language, "ru", StringComparison.OrdinalIgnoreCase) ? "Открыть оверлей" : "Open overlay";
+            return;
+        }
+        ShowRaceEngineerOverlay();
+    }
+
+    private void ShowRaceEngineerOverlay()
+    {
+        if (_raceOverlayWindow is null)
+        {
+            _raceOverlayWindow = new RaceEngineerOverlayWindow(string.Equals(_settings.Language, "ru", StringComparison.OrdinalIgnoreCase));
+            _raceOverlayWindow.Closed += (_, _) =>
+            {
+                _raceOverlayWindow = null;
+                if (_raceOverlayButton is not null)
+                    _raceOverlayButton.Content = string.Equals(_settings.Language, "ru", StringComparison.OrdinalIgnoreCase) ? "Открыть оверлей" : "Open overlay";
+            };
+        }
+        _raceOverlayWindow.UpdateSnapshot(_recorder.RaceEngineer);
+        _raceOverlayWindow.Show(this);
+        _raceOverlayWindow.Activate();
+        _raceOverlayButton.Content = string.Equals(_settings.Language, "ru", StringComparison.OrdinalIgnoreCase) ? "Скрыть оверлей" : "Hide overlay";
     }
 
     private async void OnWindowClosing(object? sender, WindowClosingEventArgs e)
@@ -1976,6 +2210,34 @@ public sealed class MainWindow : Window
     {
         _logRows.Insert(0, $"{DateTime.Now:HH:mm:ss}  {message}");
         while (_logRows.Count > 200) _logRows.RemoveAt(_logRows.Count - 1);
+    }
+
+    private void OpenErsProfilesFolder()
+    {
+        try
+        {
+            var root = string.IsNullOrWhiteSpace(_rootText.Text) ? DefaultRootFolder() : _rootText.Text.Trim();
+            var folder = ErsProfileStore.EnsureDefaultProfiles(root);
+            Process.Start(new ProcessStartInfo("explorer.exe", folder) { UseShellExecute = true });
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException)
+        {
+            AddLog("Open ERS profiles failed: " + ex.Message);
+        }
+    }
+
+    private void OpenRaceProfilesFolder()
+    {
+        try
+        {
+            var root = string.IsNullOrWhiteSpace(_rootText.Text) ? DefaultRootFolder() : _rootText.Text.Trim();
+            var folder = RaceEngineerProfileStore.EnsureDefaultProfiles(root);
+            Process.Start(new ProcessStartInfo("explorer.exe", folder) { UseShellExecute = true });
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException)
+        {
+            AddLog("Open race profiles failed: " + ex.Message);
+        }
     }
 
 
@@ -2032,8 +2294,8 @@ public sealed class MainWindow : Window
     {
         if (_sessionList.SelectedItem is not SessionListItem session) return;
         var folder = session.FolderPath;
-        var zip = Directory.Exists(folder)
-            ? Directory.GetFiles(folder, "*.zip").OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault()
+        var rar = Directory.Exists(folder)
+            ? Directory.GetFiles(folder, "*.rar").OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault()
             : null;
         var quality = RecordingQualityService.Load(folder);
         _selectedSessionText.Text =
@@ -2043,7 +2305,7 @@ public sealed class MainWindow : Window
             $"Capture: {session.CaptureQuality} | Completeness: {session.Completeness} | Analysis: {session.AnalysisConfidence}\n" +
             $"Car Setup changes: {session.SetupSnapshots:N0} | Stored size: {session.SizeLabel}";
         _technicalManifestText.Text =
-            $"Physical folder: {folder}\nSQLite: {Path.Combine(folder, "session.sqlite")}\nZIP: {(zip is not null ? zip : "not created")}\n\nManifest:\n{session.TechnicalDetails}";
+            $"Physical folder: {folder}\nSQLite: {Path.Combine(folder, "session.sqlite")}\nRAR: {(rar is not null ? rar : "not created")}\n\nDatabase details:\n{session.TechnicalDetails}";
         _globalSessionContext.Text =
             $"Session: {session.SessionName} | Track: {session.TrackName} | Driver: {session.PlayerName} | {session.AnalysisState} | " +
             $"Capture {session.CaptureQuality} / Completeness {session.Completeness} / Analysis {session.AnalysisConfidence}";
@@ -2356,14 +2618,14 @@ public sealed class MainWindow : Window
     {
         try
         {
-            var manifest = Path.Combine(folder, "manifest.json");
-            if (!File.Exists(manifest)) return null;
-            using var doc = JsonDocument.Parse(File.ReadAllText(manifest));
-            if (doc.RootElement.TryGetProperty("session_name", out var value))
-            {
-                var text = value.GetString();
-                return string.IsNullOrWhiteSpace(text) ? null : text;
-            }
+            var database = Path.Combine(folder, "session.sqlite");
+            if (!File.Exists(database)) return null;
+            using var connection = new SqliteConnection($"Data Source={database};Mode=ReadOnly;Cache=Private");
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT value FROM session_metadata WHERE key='session_name' LIMIT 1";
+            var text = Convert.ToString(command.ExecuteScalar(), CultureInfo.InvariantCulture);
+            return string.IsNullOrWhiteSpace(text) ? null : text;
         }
         catch { }
         return null;
@@ -2435,29 +2697,6 @@ public sealed class MainWindow : Window
         }
     }
 
-    private void ExportRaceReportCsv()
-    {
-        try
-        {
-            var folder = GetSelectedSessionFolder();
-            var driver = _raceReportDriver?.SelectedItem as RaceReportDriverOption;
-            if (folder is null || driver is null)
-            {
-                _raceReportStatus.Text = "Select a session and driver first.";
-                return;
-            }
-
-            var path = RaceReportDataService.ExportCsv(folder, driver.CarIndex);
-            _raceReportStatus.Text = "Race Report exported: " + path;
-            AddLog("Race Report exported: " + path);
-        }
-        catch (Exception ex)
-        {
-            _raceReportStatus.Text = "Race Report export failed: " + ex.Message;
-            AddLog("Race Report export failed: " + ex.Message);
-        }
-    }
-
     private async Task AnalyzeSelectedSessionAsync()
     {
         if (_recorder.IsRecording)
@@ -2483,11 +2722,27 @@ public sealed class MainWindow : Window
             AddLog("Analyzing selected session...");
             var result = await AnalysisEngine.AnalyzeSessionAsync(folder, message => Dispatcher.UIThread.Post(() => AddLog(message)));
             AddLog(result.Summary);
+            try
+            {
+                var learning = RaceProfileLearningService.Learn(folder, _settings.RootFolder);
+                AddLog(learning.Summary);
+            }
+            catch (Exception ex) when (ex is IOException or InvalidDataException or SqliteException or InvalidOperationException)
+            {
+                AddLog("Race profile learning skipped: " + ex.Message);
+            }
             var dbPath = Path.Combine(folder, "session.sqlite");
             if (File.Exists(dbPath))
             {
-                var zip = SessionPackager.CreateZip(folder, dbPath, ReadPreferredSessionName(folder));
-                AddLog("Zip refreshed: " + zip);
+                try
+                {
+                    var rar = await Task.Run(() => SessionPackager.CreateRar(folder, dbPath, ReadPreferredSessionName(folder), _settings.WinRarPath));
+                    AddLog("RAR refreshed: " + rar);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or InvalidOperationException)
+                {
+                    AddLog("Analysis completed, but RAR failed: " + ex.Message);
+                }
             }
             InvalidateCompareAfterAnalysis();
             RefreshSessions();
@@ -2500,6 +2755,31 @@ public sealed class MainWindow : Window
         finally
         {
             _busy = false;
+        }
+    }
+
+    private async Task ExportSelectedRaceSummaryAsync()
+    {
+        if (_recorder.IsRecording)
+        {
+            AddLog("Stop recording before exporting the workbook.");
+            return;
+        }
+        var folder = GetSelectedSessionFolder();
+        if (folder is null)
+        {
+            AddLog("Select a session first.");
+            return;
+        }
+        try
+        {
+            var path = await Task.Run(() => RaceSummaryWorkbookExporter.Export(folder));
+            AddLog("Race summary Excel created: " + path);
+            RefreshSessions();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or SqliteException or InvalidDataException)
+        {
+            AddLog("Race summary Excel failed: " + ex.Message);
         }
     }
 
@@ -2945,34 +3225,6 @@ public sealed class MainWindow : Window
             AddLog("Compare plot failed: " + ex.Message);
         }
     }
-
-    private void ExportComparedLaps()
-    {
-        try
-        {
-            var folder = GetSelectedSessionFolder();
-            if (folder is null)
-            {
-                _compareStatus.Text = "Select a session first.";
-                return;
-            }
-            var laps = _lastComparedLaps.Count > 0 ? _lastComparedLaps : GetSelectedCompareLaps();
-            if (laps.Count == 0)
-            {
-                _compareStatus.Text = "Nothing to export. Select and plot at least one lap.";
-                return;
-            }
-            var path = CompareDataService.ExportCustomComparison(folder, laps);
-            _compareStatus.Text = "Exported: " + path;
-            AddLog("Comparison exported: " + path);
-        }
-        catch (Exception ex)
-        {
-            _compareStatus.Text = "Export failed: " + ex.Message;
-            AddLog("Compare export failed: " + ex.Message);
-        }
-    }
-
 
     private void PlotTrackMapFromCompare()
     {

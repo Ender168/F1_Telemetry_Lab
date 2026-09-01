@@ -19,5 +19,7 @@
   <ItemGroup>
     <ProjectReference Include="../../src/F1TelemetryLab.App/F1TelemetryLab.App.csproj" />
     <None Include="Fixtures/*.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../data/ers_profiles/China_Race.json" Link="Fixtures/ers/China_Race.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../data/race_profiles/China_Race.json" Link="data/race_profiles/China_Race.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

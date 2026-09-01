@@ -82,6 +82,90 @@ public static class DatabaseSchemaMigrator
             }
         }
 
+        if (version < 6)
+        {
+            Execute(connection, """
+                CREATE TABLE IF NOT EXISTS ers_control_events(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    received_at TEXT NOT NULL,
+                    lap_num INTEGER,
+                    lap_distance_m REAL,
+                    segment TEXT,
+                    battery_pct REAL,
+                    current_mode TEXT,
+                    target_mode TEXT,
+                    gap_ahead_ms INTEGER,
+                    gap_behind_ms INTEGER,
+                    rule_id TEXT,
+                    action TEXT NOT NULL,
+                    reason TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_ers_control_events_lap_time
+                    ON ers_control_events(lap_num, received_at);
+
+                CREATE TABLE IF NOT EXISTS ers_profile_snapshots(
+                    id INTEGER PRIMARY KEY CHECK(id = 1),
+                    captured_at TEXT NOT NULL,
+                    profile_id TEXT NOT NULL,
+                    operating_mode TEXT NOT NULL,
+                    profile_json TEXT NOT NULL,
+                    app_version TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS race_profile_snapshots(
+                    id INTEGER PRIMARY KEY CHECK(id = 1),
+                    captured_at TEXT NOT NULL,
+                    profile_id TEXT NOT NULL,
+                    track_id INTEGER NOT NULL,
+                    profile_json TEXT NOT NULL,
+                    app_version TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS race_engineer_laps(
+                    session_uid TEXT NOT NULL,
+                    lap_num INTEGER NOT NULL,
+                    lap_time_ms INTEGER NOT NULL,
+                    clean_lap INTEGER NOT NULL,
+                    pit_lap INTEGER NOT NULL,
+                    safety_car_affected INTEGER NOT NULL,
+                    visual_compound INTEGER,
+                    tyre_age_laps INTEGER,
+                    tyre_wear_start_pct REAL,
+                    tyre_wear_end_pct REAL,
+                    tyre_wear_delta_pct REAL,
+                    ers_start_pct REAL,
+                    ers_end_pct REAL,
+                    ers_delta_pct REAL,
+                    position_end INTEGER,
+                    completion_evidence TEXT,
+                    PRIMARY KEY(session_uid, lap_num)
+                ) WITHOUT ROWID;
+
+                CREATE TABLE IF NOT EXISTS analysis_runs(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    analyzed_at TEXT NOT NULL,
+                    app_version TEXT NOT NULL,
+                    schema_version INTEGER NOT NULL,
+                    raw_packets_processed INTEGER NOT NULL,
+                    clean_laps INTEGER NOT NULL,
+                    dirty_laps INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    summary TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS race_learning_observations(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    learned_at TEXT NOT NULL,
+                    track_id INTEGER NOT NULL,
+                    metric TEXT NOT NULL,
+                    visual_compound INTEGER,
+                    sample_count INTEGER NOT NULL,
+                    observed_value REAL NOT NULL,
+                    unit TEXT NOT NULL
+                );
+                """);
+        }
+
         Execute(connection, $"PRAGMA user_version = {AppInfo.DatabaseSchemaVersion};");
     }
 

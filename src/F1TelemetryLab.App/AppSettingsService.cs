@@ -10,6 +10,11 @@ public sealed class AppSettings
     public int RetentionDays { get; set; }
     public string Language { get; set; } = "en";
     public int UiScalePercent { get; set; } = 100;
+    public string ErsAutopilotMode { get; set; } = "dry-run";
+    public int ErsDecreaseVirtualKey { get; set; } = 0x76;
+    public int ErsIncreaseVirtualKey { get; set; } = 0x77;
+    public string WinRarPath { get; set; } = "";
+    public bool OpenRaceEngineerOverlayOnStart { get; set; }
 }
 
 public static class AppSettingsService
@@ -61,6 +66,10 @@ public static class AppSettingsService
         settings.RetentionDays = Math.Clamp(settings.RetentionDays, 0, 3_650);
         settings.Language = string.Equals(settings.Language, "ru", StringComparison.OrdinalIgnoreCase) ? "ru" : "en";
         settings.UiScalePercent = Math.Clamp(settings.UiScalePercent, 80, 175);
+        settings.ErsAutopilotMode = ErsAutopilotOptions.ToSettingValue(ErsAutopilotOptions.ParseOperatingMode(settings.ErsAutopilotMode));
+        settings.ErsDecreaseVirtualKey = Math.Clamp(settings.ErsDecreaseVirtualKey, 1, ushort.MaxValue);
+        settings.ErsIncreaseVirtualKey = Math.Clamp(settings.ErsIncreaseVirtualKey, 1, ushort.MaxValue);
+        settings.WinRarPath = settings.WinRarPath?.Trim() ?? "";
         return settings;
     }
 

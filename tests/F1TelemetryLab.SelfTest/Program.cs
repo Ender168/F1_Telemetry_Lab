@@ -417,7 +417,9 @@ static void AnalysisIsolatesLatestLogicalSession()
         Equal(1L, reader.GetInt64(0), "logical session count");
         Equal("202", reader.GetString(1), "selected session UID");
         Equal(80_000L, reader.GetInt64(2), "selected session best lap");
-        Check(File.Exists(Path.Combine(folder, "analysis_manifest.json")), "analysis manifest missing");
+        using var analysisCommand = con.CreateCommand();
+        analysisCommand.CommandText = "SELECT COUNT(*) FROM analysis_runs";
+        Check(Convert.ToInt64(analysisCommand.ExecuteScalar()) > 0, "analysis run record missing");
     }
     finally
     {

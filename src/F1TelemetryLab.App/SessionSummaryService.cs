@@ -1,6 +1,5 @@
 using Microsoft.Data.Sqlite;
 using System.Globalization;
-using System.Text.Json;
 
 namespace F1TelemetryLab;
 
@@ -43,19 +42,16 @@ public static class SessionSummaryService
     public static SessionListItem Load(string folder)
     {
         var folderName = Path.GetFileName(folder);
-        var manifestPath = Path.Combine(folder, "manifest.json");
-        var rawManifest = File.Exists(manifestPath) ? SafeReadAllText(manifestPath) : "manifest.json not found";
-        using var manifest = ParseManifest(rawManifest);
-        var root = manifest?.RootElement;
-        var sessionName = Text(root, "session_name") ?? folderName;
-        var trackName = Text(root, "track_name") ?? "Unknown track";
-        var started = ParseDate(Text(root, "started_at"));
-        var stopped = ParseDate(Text(root, "stopped_at"));
-        var duration = started is not null && stopped is not null && stopped >= started ? stopped - started : null;
-        var totalLaps = Int32(root, "total_laps");
-        var classificationSource = FormatClassificationSource(Text(root, "classification_source"));
-        var setupSnapshots = Int64(root, "car_setup_snapshots");
         var database = Path.Combine(folder, "session.sqlite");
+        var metadata = LoadMetadata(database);
+        var sessionName = metadata.GetValueOrDefault("session_name") ?? folderName;
+        var trackName = metadata.GetValueOrDefault("track_name") ?? "Unknown track";
+        var started = ParseDate(metadata.GetValueOrDefault("started_at"));
+        var stopped = ParseDate(metadata.GetValueOrDefault("stopped_at"));
+        var duration = started is not null && stopped is not null && stopped >= started ? stopped - started : null;
+        var totalLaps = int.TryParse(metadata.GetValueOrDefault("total_laps"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var laps) ? laps : 0;
+        var classificationSource = FormatClassificationSource(ReadClassificationSource(database));
+        var setupSnapshots = CountRows(database, "car_setups");
         var analysisState = File.Exists(database) && HasTable(database, "lap_summary") ? "Analyzed" : "Recording only";
         var playerName = LoadPlayerName(database) ?? "YOU";
         var quality = RecordingQualityService.Load(folder);
@@ -75,33 +71,84 @@ public static class SessionSummaryService
             analysisState,
             playerName,
             setupSnapshots,
-            rawManifest);
+            BuildTechnicalDetails(database, metadata));
     }
 
-    private static JsonDocument? ParseManifest(string raw)
+    private static Dictionary<string, string> LoadMetadata(string database)
     {
-        try { return JsonDocument.Parse(raw); }
-        catch (JsonException) { return null; }
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (!File.Exists(database)) return result;
+        try
+        {
+            using var connection = new SqliteConnection($"Data Source={database};Mode=ReadOnly;Cache=Shared");
+            connection.Open();
+            if (!TableExists(connection, "session_metadata")) return result;
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT key,value FROM session_metadata ORDER BY key";
+            using var reader = command.ExecuteReader();
+            while (reader.Read()) result[reader.GetString(0)] = reader.IsDBNull(1) ? "" : reader.GetString(1);
+        }
+        catch (SqliteException) { }
+        return result;
     }
 
-    private static string SafeReadAllText(string path)
+    private static string BuildTechnicalDetails(string database, IReadOnlyDictionary<string, string> metadata)
     {
-        try { return File.ReadAllText(path); }
-        catch (IOException ex) { return "manifest read failed: " + ex.Message; }
-        catch (UnauthorizedAccessException ex) { return "manifest read failed: " + ex.Message; }
+        if (!File.Exists(database)) return "session.sqlite not found";
+        var lines = new List<string>
+        {
+            $"Database: session.sqlite",
+            $"App: {metadata.GetValueOrDefault("app_version", "unknown")}",
+            $"Schema: {metadata.GetValueOrDefault("schema_version", "unknown")}",
+            $"Session UID: {metadata.GetValueOrDefault("session_uid", "unknown")}",
+            $"Analyzed at: {metadata.GetValueOrDefault("analyzed_at", "not analyzed")}",
+            $"Archive: {metadata.GetValueOrDefault("archive_name", "not created")}",
+            $"Finalization warning: {metadata.GetValueOrDefault("finalization_warning", "")}"
+        };
+        try
+        {
+            using var connection = new SqliteConnection($"Data Source={database};Mode=ReadOnly;Cache=Shared");
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name";
+            using var reader = command.ExecuteReader();
+            var tables = new List<string>();
+            while (reader.Read()) tables.Add(reader.GetString(0));
+            lines.Add("Tables: " + string.Join(", ", tables));
+        }
+        catch (SqliteException ex) { lines.Add("Database read warning: " + ex.Message); }
+        return string.Join(Environment.NewLine, lines);
     }
 
-    private static string? Text(JsonElement? root, string property)
+    private static string? ReadClassificationSource(string database)
     {
-        if (root is not { ValueKind: JsonValueKind.Object } value || !value.TryGetProperty(property, out var item)) return null;
-        return item.ValueKind == JsonValueKind.String ? item.GetString() : item.ToString();
+        if (!File.Exists(database)) return null;
+        try
+        {
+            using var connection = new SqliteConnection($"Data Source={database};Mode=ReadOnly;Cache=Shared");
+            connection.Open();
+            if (!TableExists(connection, "final_classification") || !ColumnExists(connection, "final_classification", "classification_source")) return "not_analyzed";
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT classification_source FROM final_classification LIMIT 1";
+            return Convert.ToString(command.ExecuteScalar(), CultureInfo.InvariantCulture);
+        }
+        catch (SqliteException) { return null; }
     }
 
-    private static int Int32(JsonElement? root, string property) =>
-        int.TryParse(Text(root, property), NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) ? value : 0;
-
-    private static long Int64(JsonElement? root, string property) =>
-        long.TryParse(Text(root, property), NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) ? value : 0;
+    private static long CountRows(string database, string table)
+    {
+        if (!File.Exists(database)) return 0;
+        try
+        {
+            using var connection = new SqliteConnection($"Data Source={database};Mode=ReadOnly;Cache=Shared");
+            connection.Open();
+            if (!TableExists(connection, table)) return 0;
+            using var command = connection.CreateCommand();
+            command.CommandText = $"SELECT COUNT(*) FROM {table}";
+            return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture);
+        }
+        catch (SqliteException) { return 0; }
+    }
 
     private static string FormatClassificationSource(string? source) => source switch
     {

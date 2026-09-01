@@ -1,5 +1,69 @@
 # Changelog
 
+## 0.10.0
+
+### Live Race Engineer
+
+- Добавлены последние три подтверждённых завершённых круга в Live UI.
+- Ресурс шин оценивается диапазоном до safe wear limit по худшему колесу, live wear rate и Tyre Sets usable life.
+- Позиция после пит-стопа рассчитывается диапазоном по текущим live gaps и track-specific pit loss.
+- ERS advisor показывает целевой energy corridor участка и рекомендацию Critical, Save, On plan или Aggressive.
+- Каждая оценка имеет Low, Medium, High или Unavailable confidence и объяснение в tooltip.
+- Добавлен отдельный перемещаемый always-on-top overlay.
+
+### Track profiles and learning
+
+- Добавлены отдельные Race Engineer JSON-профили в `<root>/race_profiles/` и исходный профиль China R03.
+- После анализа приложение обучает tyre wear по compound и green-flag pit loss для конкретной трассы.
+- Повторный анализ одной `session_uid` не удваивает обучающие наблюдения.
+- Незавершённые, invalid, pit и SC/VSC laps не участвуют в tyre learning.
+
+### SQLite-only data and RAR5
+
+- Schema version повышена до 6.
+- ERS audit и profile snapshot перенесены из CSV/JSON в `ers_control_events` и `ers_profile_snapshots`.
+- Добавлены `race_engineer_laps`, `race_profile_snapshots`, `analysis_runs` и `race_learning_observations`.
+- Автоматическое создание CSV, JSON manifest и `chatgpt_pack.sqlite` отключено.
+- WinRAR создаёт RAR5 с `-m5` и ровно одним `session.sqlite`, затем выполняет test command.
+- ZIP fallback отсутствует. Ошибка упаковки не затрагивает рабочую базу.
+- Добавлен ручной небольшой `race_summary.xlsx` с листами Laps, Tyres, Pits, ERS и Quality.
+
+### Regression coverage
+
+- Добавлены тесты completed-lap gate, tyre range/confidence, pit range, ERS aggression, XLSX OpenXML structure и строгого RAR contract.
+- Старые тесты обновлены под SQLite-only storage.
+
+## 0.9.1
+
+### ERS Live input correction
+
+- F7/F8 теперь отправляются через аппаратные scan-коды вместо virtual-key событий.
+- Key-down удерживается 80 мс и завершается отдельным key-up без блокировки UDP receive loop.
+- `telemetry-confirmed` записывается только после появления ожидаемого промежуточного `ersDeployMode` в Packet 7.
+- Если профиль сменил цель до подтверждения, команда маркируется `feedback-superseded`, а не ложным подтверждением.
+- После повторного отсутствия UDP-подтверждения Live безопасно блокируется с явным указанием, что F1 отвергла синтетический ввод.
+- В `ers_profile_used.json` сохраняются input backend и длительность удержания клавиши.
+- Добавлен регрессионный тест на короткую ERS-зону, завершившуюся до подтверждения режима.
+
+## 0.9.0
+
+### Track-specific ERS Autopilot prototype
+
+- Добавлены режимы Off, Dry-run и Live. Dry-run является безопасным значением по умолчанию.
+- Алгоритмы вынесены в отдельные JSON-профили в `<root>/ers_profiles/`; пользовательские файлы не перезаписываются обновлениями приложения.
+- Первый профиль `china-race-r03-v1` реализует базовый план R03 для Китая с Medium как основным режимом, контролируемыми зонами восстановления и ограниченными Boost после T13, T16 и T4.
+- Решение учитывает заряд в процентах, гистерезис восстановления, газ, скорость, позицию на круге и интервалы до машин впереди и сзади.
+- Переходы выполняются по одному шагу через F7/F8 и продолжаются только после подтверждения нового `ersDeployMode` из Packet 7.
+- Правила, пересекающие линию старта, сохраняют единое ограничение длительности и не запускаются повторно из-за смены номера круга.
+
+### Safety and audit
+
+- Live-ввод жёстко заблокирован в online-сессиях, при включённом игровом ERS Assist, паузе, spectator mode, Safety Car/VSC/formation lap, пит-лейне, мокрой погоде для dry-профиля, устаревшей телеметрии и несовпадении длины трассы.
+- Клавиши отправляются только в активное окно F1 25. F12 блокирует ввод до следующей записи.
+- Новый Overtake Mode 2026 не автоматизируется.
+- Каждая сессия получает `ers_control_log.csv` и точный снимок `ers_profile_used.json`; оба файла включаются в analysis pack версии 2.
+- Добавлены parser, decision-engine и safety regression tests.
+
 ## 0.7.1
 
 ### Online telemetry correctness
