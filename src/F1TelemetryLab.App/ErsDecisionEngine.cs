@@ -5,6 +5,7 @@ public sealed class ErsDecisionEngine
     private readonly ErsControlProfile _profile;
     private readonly HashSet<(int Lap, string RuleId)> _finishedRules = new();
     private bool _recoveryActive;
+    private ErsTacticalMode _tacticalMode = ErsTacticalMode.Neutral;
     private int _lastLap = -1;
     private string? _activeRuleId;
     private int _activeRuleLap = -1;
@@ -17,19 +18,20 @@ public sealed class ErsDecisionEngine
 
     public ErsControlDecision Evaluate(ErsControlState state)
     {
+        var tacticalMode = UpdateTacticalMode(state);
         if (!state.AutomationAllowed)
-            return ErsControlDecision.BlockedDecision(state, state.BlockReason);
+            return ErsControlDecision.BlockedDecision(state, $"{ModePrefix(tacticalMode)} {state.BlockReason}");
 
         UpdateLapState(state);
         UpdateRecoveryState(state.BatteryPct);
 
-        var activeRule = ContinueActiveRule(state);
+        var activeRule = ContinueActiveRule(state, tacticalMode);
         if (activeRule is not null)
-            return Decision(state, activeRule, Explain(activeRule, state));
+            return Decision(state, activeRule, Explain(activeRule, state, tacticalMode));
 
         var selected = _profile.Rules
             .Where(rule => !_finishedRules.Contains((state.LapNumber, rule.Id)))
-            .Where(rule => Matches(rule, state))
+            .Where(rule => Matches(rule, state, tacticalMode))
             .OrderByDescending(rule => rule.Priority)
             .ThenBy(rule => rule.Id, StringComparer.Ordinal)
             .FirstOrDefault();
@@ -40,7 +42,7 @@ public sealed class ErsDecisionEngine
             _activeRuleLap = state.LapNumber;
             _activeRuleStartedAt = state.ReceivedAt;
             MarkOncePerLapSelection(selected, state);
-            return Decision(state, selected, Explain(selected, state));
+            return Decision(state, selected, Explain(selected, state, tacticalMode));
         }
 
         return new ErsControlDecision(
@@ -51,8 +53,8 @@ public sealed class ErsDecisionEngine
             "default",
             "Normal lap baseline",
             _recoveryActive
-                ? $"Recovery is active, but this segment stays {_profile.DefaultMode}; wait for a configured recovery zone."
-                : $"Baseline {_profile.DefaultMode} mode.",
+                ? $"{ModePrefix(tacticalMode)} Recovery is active, but this segment stays {_profile.DefaultMode}; wait for a configured recovery zone."
+                : $"{ModePrefix(tacticalMode)} Baseline {_profile.DefaultMode} mode.",
             state.BatteryPct,
             state.LapNumber,
             state.LapDistanceM,
@@ -60,7 +62,7 @@ public sealed class ErsDecisionEngine
             state.GapBehindMs);
     }
 
-    private ErsControlRule? ContinueActiveRule(ErsControlState state)
+    private ErsControlRule? ContinueActiveRule(ErsControlState state, ErsTacticalMode tacticalMode)
     {
         if (_activeRuleId is null || _activeRuleLap != state.LapNumber) return null;
         var rule = _profile.Rules.FirstOrDefault(candidate => string.Equals(candidate.Id, _activeRuleId, StringComparison.Ordinal));
@@ -70,13 +72,13 @@ public sealed class ErsDecisionEngine
             return null;
         }
 
-        var stillMatches = Matches(rule, state);
+        var stillMatches = Matches(rule, state, tacticalMode);
         var expired = rule.MaximumActiveMs is > 0 &&
             state.ReceivedAt - _activeRuleStartedAt >= TimeSpan.FromMilliseconds(rule.MaximumActiveMs.Value);
         var higherPriorityRuleMatches = _profile.Rules.Any(candidate =>
             candidate.Priority > rule.Priority &&
             !_finishedRules.Contains((state.LapNumber, candidate.Id)) &&
-            Matches(candidate, state));
+            Matches(candidate, state, tacticalMode));
         if (stillMatches && !expired && !higherPriorityRuleMatches) return rule;
 
         ClearActiveRule(markFinished: rule.OncePerLap);
@@ -92,24 +94,57 @@ public sealed class ErsDecisionEngine
         _activeRuleStartedAt = default;
     }
 
-    private bool Matches(ErsControlRule rule, ErsControlState state)
+    private bool Matches(ErsControlRule rule, ErsControlState state, ErsTacticalMode tacticalMode)
     {
         if (!ContainsDistance(rule, state.LapDistanceM)) return false;
         if (rule.MinimumBatteryPct is not null && state.BatteryPct < rule.MinimumBatteryPct.Value) return false;
         if (rule.MinimumThrottlePct is not null && state.ThrottlePct < rule.MinimumThrottlePct.Value) return false;
         if (rule.MinimumSpeedKph is not null && state.SpeedKph < rule.MinimumSpeedKph.Value) return false;
 
-        var battle = state.InBattle(_profile.BattleGapMs);
+        var legacyBattle = state.InBattle(_profile.BattleGapMs);
         return rule.Condition switch
         {
             ErsRuleCondition.Always => true,
             ErsRuleCondition.CriticalBattery => state.BatteryPct <= _profile.CriticalBatteryPct,
             ErsRuleCondition.LowBattery => _recoveryActive,
-            ErsRuleCondition.Battle => battle,
+            ErsRuleCondition.Neutral => tacticalMode == ErsTacticalMode.Neutral,
+            ErsRuleCondition.Attack => tacticalMode == ErsTacticalMode.Attack,
+            ErsRuleCondition.Defend => tacticalMode == ErsTacticalMode.Defend,
+            ErsRuleCondition.Battle => legacyBattle,
             ErsRuleCondition.HighBattery => state.BatteryPct >= _profile.HighBatteryPct,
-            ErsRuleCondition.BattleOrHighBattery => battle || state.BatteryPct >= _profile.HighBatteryPct,
+            ErsRuleCondition.AttackOrHighBattery => tacticalMode == ErsTacticalMode.Attack || state.BatteryPct >= _profile.HighBatteryPct,
+            ErsRuleCondition.DefendOrHighBattery => tacticalMode == ErsTacticalMode.Defend || state.BatteryPct >= _profile.HighBatteryPct,
+            ErsRuleCondition.BattleOrHighBattery => legacyBattle || state.BatteryPct >= _profile.HighBatteryPct,
             _ => false
         };
+    }
+
+    private ErsTacticalMode UpdateTacticalMode(ErsControlState state)
+    {
+        var attackThreshold = _profile.AttackGapMs + (_tacticalMode == ErsTacticalMode.Attack ? _profile.TacticalExitMarginMs : 0);
+        var defendThreshold = _profile.DefendGapMs + (_tacticalMode == ErsTacticalMode.Defend ? _profile.TacticalExitMarginMs : 0);
+        var attack = state.InAttackRange(attackThreshold);
+        var defend = state.InDefendRange(defendThreshold);
+
+        _tacticalMode = (attack, defend) switch
+        {
+            (false, false) => ErsTacticalMode.Neutral,
+            (true, false) => ErsTacticalMode.Attack,
+            (false, true) => ErsTacticalMode.Defend,
+            _ => ResolveTwoSidedBattle(state)
+        };
+        return _tacticalMode;
+    }
+
+    private ErsTacticalMode ResolveTwoSidedBattle(ErsControlState state)
+    {
+        if (state.GapAheadMs is not > 0) return ErsTacticalMode.Defend;
+        if (state.GapBehindMs is not > 0) return ErsTacticalMode.Attack;
+
+        // Defence wins only when the rear threat is materially closer. Otherwise keep attacking.
+        return state.GapBehindMs.Value + _profile.DefendPriorityMarginMs <= state.GapAheadMs.Value
+            ? ErsTacticalMode.Defend
+            : ErsTacticalMode.Attack;
     }
 
     private bool ContainsDistance(ErsControlRule rule, double distanceM)
@@ -191,21 +226,33 @@ public sealed class ErsDecisionEngine
         state.GapAheadMs,
         state.GapBehindMs);
 
-    private string Explain(ErsControlRule rule, ErsControlState state)
+    private string Explain(ErsControlRule rule, ErsControlState state, ErsTacticalMode tacticalMode)
     {
         var condition = rule.Condition switch
         {
             ErsRuleCondition.CriticalBattery => $"critical battery {state.BatteryPct:0}%",
             ErsRuleCondition.LowBattery => $"recovery below {_profile.RecoveryExitPct:0}%",
-            ErsRuleCondition.Battle => "attack or defence gap",
+            ErsRuleCondition.Neutral => "neutral race state",
+            ErsRuleCondition.Attack => $"car ahead within {_profile.AttackGapMs} ms",
+            ErsRuleCondition.Defend => $"car behind within {_profile.DefendGapMs} ms",
+            ErsRuleCondition.Battle => "legacy battle gap",
             ErsRuleCondition.HighBattery => $"battery at least {_profile.HighBatteryPct:0}%",
+            ErsRuleCondition.AttackOrHighBattery => tacticalMode == ErsTacticalMode.Attack
+                ? $"car ahead within {_profile.AttackGapMs} ms"
+                : $"battery at least {_profile.HighBatteryPct:0}%",
+            ErsRuleCondition.DefendOrHighBattery => tacticalMode == ErsTacticalMode.Defend
+                ? $"car behind within {_profile.DefendGapMs} ms"
+                : $"battery at least {_profile.HighBatteryPct:0}%",
             ErsRuleCondition.BattleOrHighBattery => state.InBattle(_profile.BattleGapMs)
-                ? "attack or defence gap"
+                ? "legacy battle gap"
                 : $"battery at least {_profile.HighBatteryPct:0}%",
             _ => "profile rule"
         };
-        return string.IsNullOrWhiteSpace(rule.Note) ? condition : $"{condition}. {rule.Note}";
+        var detail = string.IsNullOrWhiteSpace(rule.Note) ? condition : $"{condition}. {rule.Note}";
+        return $"{ModePrefix(tacticalMode)} {detail}";
     }
+
+    private static string ModePrefix(ErsTacticalMode mode) => $"[{mode.ToString().ToUpperInvariant()}]";
 }
 
 public static class ErsModeTransition

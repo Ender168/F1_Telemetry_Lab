@@ -18,6 +18,7 @@ public sealed record ErsProfileLoadResult(
 public static class ErsProfileStore
 {
     private const string DefaultChinaFileName = "China_Race.json";
+    private const string BuiltInChinaProfileId = "china-race-r03-v1";
     private const string ProfileReadmeFileName = "README.md";
     private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
 
@@ -43,7 +44,14 @@ public static class ErsProfileStore
             foreach (var source in Directory.EnumerateFiles(installedFolder, "*.json", SearchOption.TopDirectoryOnly))
             {
                 var target = Path.Combine(folder, Path.GetFileName(source));
-                if (!File.Exists(target)) File.Copy(source, target);
+                if (!File.Exists(target))
+                {
+                    File.Copy(source, target);
+                }
+                else
+                {
+                    UpgradeKnownBuiltInProfile(source, target);
+                }
             }
 
             var readmeSource = Path.Combine(installedFolder, ProfileReadmeFileName);
@@ -109,9 +117,33 @@ public static class ErsProfileStore
         _ => $"VK_0x{value:X2}"
     };
 
+    private static void UpgradeKnownBuiltInProfile(string source, string target)
+    {
+        if (!string.Equals(Path.GetFileName(target), DefaultChinaFileName, StringComparison.OrdinalIgnoreCase)) return;
+
+        try
+        {
+            var installed = JsonSerializer.Deserialize<ErsControlProfile>(File.ReadAllText(source), JsonOptions);
+            var existing = JsonSerializer.Deserialize<ErsControlProfile>(File.ReadAllText(target), JsonOptions);
+            if (installed is null || existing is null) return;
+            if (!string.Equals(installed.ProfileId, BuiltInChinaProfileId, StringComparison.Ordinal) ||
+                !string.Equals(existing.ProfileId, BuiltInChinaProfileId, StringComparison.Ordinal)) return;
+            if (installed.ProfileRevision <= existing.ProfileRevision) return;
+
+            var backup = target + ".pre-0.10.1.bak";
+            if (!File.Exists(backup)) File.Copy(target, backup);
+            File.Copy(source, target, overwrite: true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            // Preserve an unreadable or user-customized target rather than replacing it blindly.
+        }
+    }
+
     private static void Validate(ErsControlProfile profile)
     {
         if (profile.SchemaVersion != 1) throw new InvalidDataException($"Unsupported schema_version {profile.SchemaVersion}.");
+        if (profile.ProfileRevision <= 0) throw new InvalidDataException("profile_revision must be positive.");
         if (string.IsNullOrWhiteSpace(profile.ProfileId)) throw new InvalidDataException("profile_id is required.");
         if (profile.TrackId < 0) throw new InvalidDataException("track_id must be non-negative.");
         if (profile.TrackLengthM <= 0) throw new InvalidDataException("track_length_m must be positive.");
@@ -127,6 +159,10 @@ public static class ErsProfileStore
         if (profile.HighBatteryPct < profile.RecoveryExitPct)
             throw new InvalidDataException("high_battery_pct must not be below recovery_exit_pct.");
         if (profile.BattleGapMs <= 0) throw new InvalidDataException("battle_gap_ms must be positive.");
+        if (profile.AttackGapMs <= 0) throw new InvalidDataException("attack_gap_ms must be positive.");
+        if (profile.DefendGapMs <= 0) throw new InvalidDataException("defend_gap_ms must be positive.");
+        if (profile.TacticalExitMarginMs < 0) throw new InvalidDataException("tactical_exit_margin_ms must be non-negative.");
+        if (profile.DefendPriorityMarginMs < 0) throw new InvalidDataException("defend_priority_margin_ms must be non-negative.");
         if (profile.MinimumControlSpeedKph < 0) throw new InvalidDataException("minimum_control_speed_kph must be non-negative.");
         if (profile.SessionTypes.Any(value => value is < 0 or > byte.MaxValue))
             throw new InvalidDataException("session_types values must fit in one byte.");

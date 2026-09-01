@@ -17,13 +17,25 @@ public enum ErsDeployMode
     Boost = 3
 }
 
+public enum ErsTacticalMode
+{
+    Neutral,
+    Attack,
+    Defend
+}
+
 public enum ErsRuleCondition
 {
     Always,
     CriticalBattery,
     LowBattery,
+    Neutral,
+    Attack,
+    Defend,
     Battle,
     HighBattery,
+    AttackOrHighBattery,
+    DefendOrHighBattery,
     BattleOrHighBattery
 }
 
@@ -71,6 +83,7 @@ public sealed class ErsAutopilotOptions
 public sealed class ErsControlProfile
 {
     public int SchemaVersion { get; set; } = 1;
+    public int ProfileRevision { get; set; } = 1;
     public string ProfileId { get; set; } = "";
     public string DisplayName { get; set; } = "";
     public int SelectionPriority { get; set; }
@@ -85,7 +98,16 @@ public sealed class ErsControlProfile
     public double RecoveryEnterPct { get; set; } = 35;
     public double RecoveryExitPct { get; set; } = 45;
     public double HighBatteryPct { get; set; } = 65;
+
+    // Legacy threshold used by v0.10.0 profiles and the Battle/BattleOrHighBattery conditions.
     public int BattleGapMs { get; set; } = 1_200;
+
+    // Tactical-mode thresholds. Attack watches the car ahead, Defend watches the car behind.
+    public int AttackGapMs { get; set; } = 1_200;
+    public int DefendGapMs { get; set; } = 1_000;
+    public int TacticalExitMarginMs { get; set; } = 250;
+    public int DefendPriorityMarginMs { get; set; } = 200;
+
     public int MinimumControlSpeedKph { get; set; } = 30;
     public List<ErsControlRule> Rules { get; set; } = new();
 
@@ -136,9 +158,11 @@ public sealed record ErsControlState(
     bool AutomationAllowed,
     string BlockReason)
 {
-    public bool InBattle(int thresholdMs) =>
-        GapAheadMs is > 0 && GapAheadMs <= thresholdMs ||
-        GapBehindMs is > 0 && GapBehindMs <= thresholdMs;
+    public bool InAttackRange(int thresholdMs) => GapAheadMs is > 0 && GapAheadMs <= thresholdMs;
+
+    public bool InDefendRange(int thresholdMs) => GapBehindMs is > 0 && GapBehindMs <= thresholdMs;
+
+    public bool InBattle(int thresholdMs) => InAttackRange(thresholdMs) || InDefendRange(thresholdMs);
 }
 
 public sealed record ErsControlDecision(
