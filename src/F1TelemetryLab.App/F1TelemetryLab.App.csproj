@@ -7,6 +7,10 @@
     <AssemblyName>F1TelemetryLab</AssemblyName>
     <RootNamespace>F1TelemetryLab</RootNamespace>
     <ApplicationIcon></ApplicationIcon>
+    <Version>0.10.2</Version>
+    <AssemblyVersion>0.10.2.0</AssemblyVersion>
+    <FileVersion>0.10.2.0</FileVersion>
+    <InformationalVersion>0.10.2</InformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>
@@ -19,5 +23,8 @@
 
   <ItemGroup>
     <Content Include="..\..\data\tracks\racenet\**\*.*" Link="data\tracks\racenet\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\data\tracks\Tracks\**\*.*" Link="data\tracks\Tracks\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\data\ers_profiles\**\*.*" Link="data\ers_profiles\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\data\race_profiles\**\*.*" Link="data\race_profiles\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

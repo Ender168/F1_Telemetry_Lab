@@ -1,5 +1,6 @@
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Input;
 using Avalonia.Media;
 using System.Globalization;
 
@@ -11,6 +12,7 @@ public sealed class SimpleLineChart : Control
     private string _metric = "speed";
     private int? _minDistance;
     private int? _maxDistance;
+    private Point? _cursor;
 
     private static readonly Color[] Palette =
     {
@@ -21,6 +23,20 @@ public sealed class SimpleLineChart : Control
         Color.FromRgb(220, 90, 90),
         Color.FromRgb(78, 201, 176)
     };
+
+    public SimpleLineChart()
+    {
+        PointerMoved += (_, args) =>
+        {
+            _cursor = args.GetPosition(this);
+            InvalidateVisual();
+        };
+        PointerExited += (_, _) =>
+        {
+            _cursor = null;
+            InvalidateVisual();
+        };
+    }
 
     public void SetData(IReadOnlyList<CompareSeries> series, string metric)
     {
@@ -63,7 +79,7 @@ public sealed class SimpleLineChart : Control
             .ToList();
         if (_series.Count == 0 || all.Count == 0)
         {
-            DrawText(context, "Выбери сессию, до 6 кругов и нажми Plot slots. Да, кнопки, куда без них.", 18, textBrush, new Point(plot.X + 18, plot.Y + 18));
+            DrawText(context, "Select a session and at least a reference lap, then choose Plot.", 16, textBrush, new Point(plot.X + 18, plot.Y + 18));
             return;
         }
 
@@ -112,7 +128,59 @@ public sealed class SimpleLineChart : Control
                 last = pt;
             }
         }
+
+        DrawCursor(context, plot, minX, maxX, minY, maxY, textBrush);
     }
+
+    private void DrawCursor(DrawingContext context, Rect plot, double minX, double maxX, double minY, double maxY, IBrush textBrush)
+    {
+        if (_cursor is not Point cursor || !plot.Contains(cursor)) return;
+        var distance = minX + (cursor.X - plot.Left) / Math.Max(1, plot.Width) * (maxX - minX);
+        var cursorPen = new Pen(new SolidColorBrush(Color.FromArgb(190, 210, 215, 222)), 1);
+        context.DrawLine(cursorPen, new Point(cursor.X, plot.Top), new Point(cursor.X, plot.Bottom));
+
+        var values = new List<(string Name, double Value, Color Color, Point Point)>();
+        for (var index = 0; index < _series.Count; index++)
+        {
+            var nearest = _series[index].Points
+                .Where(point => point.DistanceBinM >= minX && point.DistanceBinM <= maxX && !double.IsNaN(point.Value) && !double.IsInfinity(point.Value))
+                .MinBy(point => Math.Abs(point.DistanceBinM - distance));
+            if (nearest is null) continue;
+            var x = plot.Left + (nearest.DistanceBinM - minX) / Math.Max(1.0, maxX - minX) * plot.Width;
+            var y = plot.Bottom - (nearest.Value - minY) / Math.Max(0.0001, maxY - minY) * plot.Height;
+            values.Add((_series[index].Name, nearest.Value, Palette[index % Palette.Length], new Point(x, y)));
+        }
+
+        foreach (var item in values)
+        {
+            var brush = new SolidColorBrush(item.Color);
+            context.DrawEllipse(brush, new Pen(Brushes.White, 1), item.Point, 3.5, 3.5);
+        }
+
+        var tooltipWidth = Math.Min(300, Math.Max(180, plot.Width * 0.34));
+        var tooltipHeight = 30 + values.Count * 17;
+        var tooltipX = cursor.X + 10 + tooltipWidth <= plot.Right ? cursor.X + 10 : cursor.X - tooltipWidth - 10;
+        var tooltipY = Math.Clamp(cursor.Y - tooltipHeight / 2, plot.Top + 4, plot.Bottom - tooltipHeight - 4);
+        var tooltip = new Rect(tooltipX, tooltipY, tooltipWidth, tooltipHeight);
+        context.FillRectangle(new SolidColorBrush(Color.FromArgb(235, 21, 26, 33)), tooltip);
+        context.DrawRectangle(null, new Pen(new SolidColorBrush(Color.FromRgb(80, 88, 98)), 1), tooltip);
+        DrawText(context, $"{distance:0} m", 12, textBrush, new Point(tooltip.Left + 8, tooltip.Top + 6));
+        var unit = MetricUnit(_metric);
+        for (var index = 0; index < values.Count; index++)
+        {
+            var item = values[index];
+            var name = item.Name.Length > 24 ? item.Name[..24] : item.Name;
+            DrawText(context, $"{name}: {item.Value:0.##}{unit}", 11, new SolidColorBrush(item.Color), new Point(tooltip.Left + 8, tooltip.Top + 24 + index * 17));
+        }
+    }
+
+    private static string MetricUnit(string metric) => metric switch
+    {
+        "speed" => " km/h",
+        "throttle_%" or "brake_%" => " %",
+        "delta_ms" => " ms",
+        _ => ""
+    };
 
     private static void DrawText(DrawingContext context, string text, double size, IBrush brush, Point point)
     {

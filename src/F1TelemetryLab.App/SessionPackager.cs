@@ -1,69 +1,83 @@
 using Microsoft.Data.Sqlite;
-using System.IO.Compression;
+using System.Diagnostics;
 
 namespace F1TelemetryLab;
 
+public sealed record RarProcessResult(int ExitCode, string Output, string Error);
+
+public interface IRarProcessRunner
+{
+    RarProcessResult Run(string executablePath, string workingDirectory, IReadOnlyList<string> arguments);
+}
+
+public sealed class WinRarProcessRunner : IRarProcessRunner
+{
+    public RarProcessResult Run(string executablePath, string workingDirectory, IReadOnlyList<string> arguments)
+    {
+        var start = new ProcessStartInfo
+        {
+            FileName = executablePath,
+            WorkingDirectory = workingDirectory,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        foreach (var argument in arguments) start.ArgumentList.Add(argument);
+        using var process = Process.Start(start) ?? throw new InvalidOperationException("WinRAR could not be started.");
+        var output = process.StandardOutput.ReadToEnd();
+        var error = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        return new RarProcessResult(process.ExitCode, output, error);
+    }
+}
+
 public static class SessionPackager
 {
-    public static string CreateZip(string sessionFolder, string databasePath, string? preferredSessionName = null)
+    public static string CreateRar(
+        string sessionFolder,
+        string databasePath,
+        string? preferredSessionName = null,
+        string? configuredWinRarPath = null,
+        IRarProcessRunner? processRunner = null)
     {
-        if (!Directory.Exists(sessionFolder))
-            throw new DirectoryNotFoundException($"Session folder not found: {sessionFolder}");
-
+        if (!Directory.Exists(sessionFolder)) throw new DirectoryNotFoundException($"Session folder not found: {sessionFolder}");
         if (!File.Exists(databasePath))
-            throw new FileNotFoundException("session.sqlite was not created. The archive would be useless, so packaging was stopped.", databasePath);
+            throw new FileNotFoundException("session.sqlite was not created. The RAR archive would be useless.", databasePath);
 
-        // Build the compact upload database in the session folder first. That way, even if zip creation
-        // fails for some reason, the user still has a small chatgpt_pack.sqlite to send manually.
-        var compactLocalDb = Path.Combine(sessionFolder, "chatgpt_pack.sqlite");
-        CreateChatGptDatabase(databasePath, compactLocalDb);
+        SessionManifestService.Refresh(sessionFolder);
+        var physical = Path.GetFileName(sessionFolder.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        var baseName = SafeFileName(string.IsNullOrWhiteSpace(preferredSessionName) ? physical : preferredSessionName!);
+        if (string.IsNullOrWhiteSpace(baseName)) baseName = physical;
+        var archivePath = Path.Combine(sessionFolder, baseName + ".rar");
+        TryDelete(archivePath);
 
-        var physicalBaseName = Path.GetFileName(sessionFolder.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-        var baseName = SafeFileName(string.IsNullOrWhiteSpace(preferredSessionName) ? physicalBaseName : preferredSessionName!);
-        if (string.IsNullOrWhiteSpace(baseName)) baseName = physicalBaseName;
-
-        // Keep the upload zip inside the physical session folder. The folder may keep its original Unknown_* name
-        // because Windows often holds SQLite handles too long for a safe rename, but the zip itself uses the readable session name.
-        var zipPath = Path.Combine(sessionFolder, baseName + ".zip");
-        TryDelete(zipPath);
-
-        var stagingRoot = Path.Combine(Path.GetTempPath(), "F1TelemetryLab_pack_" + Guid.NewGuid().ToString("N"));
-        var stagingSession = Path.Combine(stagingRoot, baseName);
-
+        var runner = processRunner ?? new WinRarProcessRunner();
+        var executable = ResolveWinRar(configuredWinRarPath, processRunner is not null);
+        var stagingRoot = Path.Combine(Path.GetTempPath(), "F1TelemetryLab_rar_" + Guid.NewGuid().ToString("N"));
+        var snapshotPath = Path.Combine(stagingRoot, "session.sqlite");
         try
         {
-            Directory.CreateDirectory(stagingSession);
+            Directory.CreateDirectory(stagingRoot);
+            CreateDatabaseSnapshot(databasePath, snapshotPath);
+            CompactAndVerifySnapshot(snapshotPath);
 
-            foreach (var file in Directory.EnumerateFiles(sessionFolder, "*", SearchOption.AllDirectories))
+            var add = BuildAddArguments(archivePath);
+            var created = runner.Run(executable, stagingRoot, add);
+            if (created.ExitCode != 0)
+                throw new InvalidOperationException($"WinRAR archive creation failed with exit code {created.ExitCode}: {CleanError(created)}");
+            if (!File.Exists(archivePath) || new FileInfo(archivePath).Length == 0)
+                throw new InvalidDataException("WinRAR reported success but did not create a non-empty archive.");
+
+            var tested = runner.Run(executable, stagingRoot, BuildTestArguments(archivePath));
+            if (tested.ExitCode != 0)
             {
-                var full = Path.GetFullPath(file);
-                if (string.Equals(full, Path.GetFullPath(zipPath), StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                var relative = Path.GetRelativePath(sessionFolder, file);
-
-                // Keep the raw database local. It is useful for re-analysis, but hilariously bad as an upload format.
-                if (relative.Equals("session.sqlite", StringComparison.OrdinalIgnoreCase))
-                    continue;
-                if (relative.Equals("session.sqlite-wal", StringComparison.OrdinalIgnoreCase) ||
-                    relative.Equals("session.sqlite-shm", StringComparison.OrdinalIgnoreCase))
-                    continue;
-                if (relative.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) || relative.EndsWith(".rar", StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                var target = Path.Combine(stagingSession, relative);
-                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-                File.Copy(file, target, overwrite: true);
+                TryDelete(archivePath);
+                throw new InvalidDataException($"WinRAR archive test failed with exit code {tested.ExitCode}: {CleanError(tested)}");
             }
 
-            var notePath = Path.Combine(stagingSession, "PACK_CONTENTS.txt");
-            File.WriteAllText(notePath,
-                "This archive intentionally contains chatgpt_pack.sqlite instead of the full raw session.sqlite.\n" +
-                "The full raw UDP database stays in the local session folder.\n" +
-                "chatgpt_pack.sqlite contains analysis tables and 10m telemetry bins for upload-friendly review.\n");
-
-            ZipFile.CreateFromDirectory(stagingRoot, zipPath, CompressionLevel.Optimal, includeBaseDirectory: false);
-            return zipPath;
+            SessionManifestService.Refresh(sessionFolder, archivePath: archivePath);
+            return archivePath;
         }
         finally
         {
@@ -71,110 +85,112 @@ public static class SessionPackager
         }
     }
 
-    private static void CreateChatGptDatabase(string sourceDbPath, string targetDbPath)
+    public static IReadOnlyList<string> BuildAddArguments(string archivePath) => new[]
     {
-        SQLitePCL.Batteries_V2.Init();
-        Directory.CreateDirectory(Path.GetDirectoryName(targetDbPath)!);
-        TryDelete(targetDbPath);
+        "a",
+        "-ma5",
+        "-m5",
+        "-md128m",
+        "-ep",
+        "-o+",
+        "-idq",
+        "-y",
+        archivePath,
+        "session.sqlite"
+    };
 
-        // Do not open the source with Mode=ReadOnly here. In Microsoft.Data.Sqlite/SQLite,
-        // that can make ATTACH unable to create the target DB. Yes, that is exactly as annoying as it sounds.
-        using var con = new SqliteConnection($"Data Source={sourceDbPath};Default Timeout=30");
-        con.Open();
+    public static IReadOnlyList<string> BuildTestArguments(string archivePath) => new[]
+    {
+        "t",
+        "-idq",
+        "-y",
+        archivePath
+    };
 
-        Execute(con, "PRAGMA busy_timeout = 10000;");
-        Execute(con, "PRAGMA journal_mode = WAL;");
-        Execute(con, "PRAGMA wal_checkpoint(TRUNCATE);");
+    public static string? FindWinRar(string? configuredPath = null)
+    {
+        if (!string.IsNullOrWhiteSpace(configuredPath) && File.Exists(configuredPath)) return Path.GetFullPath(configuredPath);
+        var candidates = new List<string>();
+        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+        if (!string.IsNullOrWhiteSpace(programFiles)) candidates.Add(Path.Combine(programFiles, "WinRAR", "WinRAR.exe"));
+        if (!string.IsNullOrWhiteSpace(programFilesX86)) candidates.Add(Path.Combine(programFilesX86, "WinRAR", "WinRAR.exe"));
+        var path = Environment.GetEnvironmentVariable("PATH") ?? "";
+        candidates.AddRange(path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+            .Select(folder => Path.Combine(folder.Trim(), "WinRAR.exe")));
+        return candidates.FirstOrDefault(File.Exists);
+    }
 
-        using var cmd = con.CreateCommand();
-        cmd.CommandText = "ATTACH DATABASE $target AS out";
-        cmd.Parameters.AddWithValue("$target", targetDbPath);
-        cmd.ExecuteNonQuery();
+    private static string ResolveWinRar(string? configuredPath, bool runnerIsInjected)
+    {
+        if (runnerIsInjected) return string.IsNullOrWhiteSpace(configuredPath) ? "WinRAR.exe" : configuredPath;
+        return FindWinRar(configuredPath)
+               ?? throw new FileNotFoundException("WinRAR.exe was not found. Install WinRAR or specify its path in Settings. ZIP fallback is intentionally disabled.");
+    }
 
-        try
+    private static void CreateDatabaseSnapshot(string sourcePath, string destinationPath)
+    {
+        TryDelete(destinationPath);
+        using var source = new SqliteConnection(new SqliteConnectionStringBuilder
         {
-            CopyTableIfExists(con, "session_metadata");
-            CopyTableIfExists(con, "lap_summary");
-            CopyTableIfExists(con, "lap_state_summary");
-            CopyTableIfExists(con, "lap_quality");
-            CopyTableIfExists(con, "rewind_events");
-            CopyTableIfExists(con, "events");
-            CopyTableIfExists(con, "participants");
-            CopyTableIfExists(con, "analysis_trace_10m");
-            CopyTableIfExists(con, "final_classification");
-            CopyTableIfExists(con, "driver_aliases");
-
-            // If analysis_trace_10m does not exist because an older DB is being packed,
-            // create a tiny fallback from lap_summary only. It is not detailed, but at least not useless.
-            if (!TableExists(con, "analysis_trace_10m") && TableExists(con, "lap_summary"))
-            {
-                Execute(con,
-                    "CREATE TABLE IF NOT EXISTS out.analysis_trace_10m AS " +
-                    "SELECT car_idx, lap_num, is_player, clean_lap, 0 AS distance_bin_m, lap_time_ms AS time_ms, " +
-                    "max_speed AS speed, avg_throttle AS throttle, avg_brake AS brake, NULL AS steer, NULL AS gear, " +
-                    "NULL AS world_position_x, NULL AS world_position_z, NULL AS yaw, NULL AS g_force_lateral, NULL AS g_force_longitudinal " +
-                    "FROM main.lap_summary");
-            }
-
-            Execute(con, "CREATE TABLE IF NOT EXISTS out.pack_info(key TEXT PRIMARY KEY, value TEXT);");
-            InsertPackInfo(con, "created_at", DateTimeOffset.Now.ToString("O"));
-            InsertPackInfo(con, "source_database", Path.GetFileName(sourceDbPath));
-            InsertPackInfo(con, "note", "Compact ChatGPT upload DB. Raw packets are intentionally excluded.");
-        }
-        finally
+            DataSource = sourcePath,
+            Mode = SqliteOpenMode.ReadOnly,
+            Cache = SqliteCacheMode.Private,
+            Pooling = false,
+            DefaultTimeout = 60
+        }.ToString());
+        using var destination = new SqliteConnection(new SqliteConnectionStringBuilder
         {
-            try { Execute(con, "DETACH DATABASE out"); } catch { }
+            DataSource = destinationPath,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Cache = SqliteCacheMode.Private,
+            Pooling = false,
+            DefaultTimeout = 60
+        }.ToString());
+        source.Open();
+        destination.Open();
+        source.BackupDatabase(destination);
+    }
+
+    private static void CompactAndVerifySnapshot(string databasePath)
+    {
+        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Mode = SqliteOpenMode.ReadWrite,
+            Cache = SqliteCacheMode.Private,
+            Pooling = false,
+            DefaultTimeout = 60
+        }.ToString());
+        connection.Open();
+        using (var journal = connection.CreateCommand())
+        {
+            journal.CommandText = "PRAGMA journal_mode=DELETE; PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA optimize;";
+            journal.ExecuteNonQuery();
         }
-
-        using var compact = new SqliteConnection($"Data Source={targetDbPath};Default Timeout=30");
-        compact.Open();
-        Execute(compact, "PRAGMA journal_mode = DELETE;");
-        Execute(compact, "VACUUM;");
+        using var integrity = connection.CreateCommand();
+        integrity.CommandText = "PRAGMA integrity_check";
+        var result = Convert.ToString(integrity.ExecuteScalar());
+        if (!string.Equals(result, "ok", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("SQLite snapshot failed integrity_check: " + result);
     }
 
-    private static void CopyTableIfExists(SqliteConnection con, string table)
+    private static string CleanError(RarProcessResult value)
     {
-        if (!TableExists(con, table)) return;
-        Execute(con, $"DROP TABLE IF EXISTS out.{table}");
-        Execute(con, $"CREATE TABLE out.{table} AS SELECT * FROM main.{table}");
-    }
-
-    private static bool TableExists(SqliteConnection con, string table)
-    {
-        using var cmd = con.CreateCommand();
-        cmd.CommandText = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = $name LIMIT 1";
-        cmd.Parameters.AddWithValue("$name", table);
-        using var reader = cmd.ExecuteReader();
-        return reader.Read();
-    }
-
-    private static void Execute(SqliteConnection con, string sql)
-    {
-        using var cmd = con.CreateCommand();
-        cmd.CommandText = sql;
-        cmd.ExecuteNonQuery();
-    }
-
-    private static void InsertPackInfo(SqliteConnection con, string key, string value)
-    {
-        using var cmd = con.CreateCommand();
-        cmd.CommandText = "INSERT OR REPLACE INTO out.pack_info(key, value) VALUES ($key, $value)";
-        cmd.Parameters.AddWithValue("$key", key);
-        cmd.Parameters.AddWithValue("$value", value);
-        cmd.ExecuteNonQuery();
+        var text = string.IsNullOrWhiteSpace(value.Error) ? value.Output : value.Error;
+        text = text.Trim();
+        return text.Length <= 600 ? text : text[..600];
     }
 
     private static string SafeFileName(string value)
     {
         var invalid = Path.GetInvalidFileNameChars();
-        var chars = value.Select(ch => invalid.Contains(ch) ? '_' : ch).ToArray();
-        var safe = new string(chars).Trim();
-        while (safe.Contains("__", StringComparison.Ordinal)) safe = safe.Replace("__", "_");
-        return safe.Trim('_', ' ');
+        return new string(value.Select(ch => invalid.Contains(ch) ? '_' : ch).ToArray()).Trim();
     }
 
     private static void TryDelete(string path)
     {
-        try { if (File.Exists(path)) File.Delete(path); } catch { }
+        try { if (File.Exists(path)) File.Delete(path); }
+        catch { }
     }
 }

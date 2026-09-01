@@ -14,14 +14,18 @@ public static class RaceAnalysisDataService
     public static string BuildRaceSummary(IReadOnlyList<RaceLapReportRow> rows)
     {
         if (rows.Count == 0) return "Summary: no rows loaded.";
-        var clean = rows.Where(r => r.CleanLap && r.LapTimeMs > 0).ToList();
+        var clean = rows.Where(r => r.CleanLap && !r.PitThisLap && r.LapTimeMs > 0).ToList();
         var timed = rows.Where(r => r.LapTimeMs > 0).ToList();
+        var completedNonPit = rows.Where(r => !r.PitThisLap && r.LapTimeMs > 0).ToList();
         var bestClean = clean.OrderBy(r => r.LapTimeMs).FirstOrDefault();
         var bestAny = timed.OrderBy(r => r.LapTimeMs).FirstOrDefault();
         var avgClean = clean.Count == 0 ? double.NaN : clean.Average(r => r.LapTimeMs);
-        var avgWearLap = rows.Where(r => Valid(r.TyreWearAvgDelta)).Select(r => r.TyreWearAvgDelta).DefaultIfEmpty(double.NaN).Average();
-        var avgFuel = rows.Where(r => Valid(r.FuelUsed)).Select(r => r.FuelUsed).DefaultIfEmpty(double.NaN).Average();
-        var minErs = rows.Select(r => ErsPct(r.ErsEnd)).Where(Valid).DefaultIfEmpty(double.NaN).Min();
+        var wearSamples = completedNonPit.Where(r => Valid(r.TyreWearAvgDelta) && r.TyreWearAvgDelta >= 0).Select(r => r.TyreWearAvgDelta).ToList();
+        var fuelSamples = completedNonPit.Where(r => Valid(r.FuelUsed) && r.FuelUsed >= 0).Select(r => r.FuelUsed).ToList();
+        var ersSamples = completedNonPit.Select(r => ErsPct(r.ErsEnd)).Where(Valid).ToList();
+        var avgWearLap = wearSamples.Count == 0 ? double.NaN : wearSamples.Average();
+        var avgFuel = fuelSamples.Count == 0 ? double.NaN : fuelSamples.Average();
+        var minErs = ersSamples.Count == 0 ? double.NaN : ersSamples.Min();
         var damageAffected = rows.Any(r => r.DamageDeltaMax > 0 || MaxDamage(r) > 0);
         var pitCount = rows.Count(r => r.PitThisLap);
         var quality = BuildQualityFlags(rows);
@@ -31,9 +35,9 @@ public static class RaceAnalysisDataService
                $"Best clean {Lap(bestClean?.LapTimeMs ?? double.NaN)}; " +
                $"Best any {Lap(bestAny?.LapTimeMs ?? double.NaN)}; " +
                $"Avg clean {Lap(avgClean)}; " +
-               $"Avg tyre lap Δ {Num(avgWearLap)}%; " +
-               $"Avg fuel {Num(avgFuel)} kg/lap; " +
-               $"Min ERS {Num0(minErs)}%; " +
+               $"Avg tyre lap Δ {Num(avgWearLap)}% (n={wearSamples.Count}); " +
+               $"Avg fuel {Num(avgFuel)} kg/lap (n={fuelSamples.Count}); " +
+               $"Min ERS {Num0(minErs)}% (n={ersSamples.Count}); " +
                $"Pit laps {pitCount}; " +
                $"Damage affected {(damageAffected ? "Yes" : "No")}. " + quality;
     }
@@ -104,7 +108,7 @@ public static class RaceAnalysisDataService
     {
         if (driver is null) return new AnalysisTableResult(Array.Empty<AnalysisTableColumn>(), Array.Empty<AnalysisTableRow>(), "Select a driver.", StintLegend());
         var rows = RaceReportDataService.LoadRows(sessionFolder, driver.CarIndex).Where(r => r.LapNum > 0).OrderBy(r => r.LapNum).ToList();
-        var stints = BuildStints(rows);
+        var stints = RaceStrategyAnalyzer.BuildStints(rows);
         var columns = new[]
         {
             Col("stint", "Stint", 65, "Stint number", true),
@@ -112,6 +116,7 @@ public static class RaceAnalysisDataService
             Col("compound", "Compound", 95, "Tyre compound used in this stint", groupStart: true),
             Col("length", "Length", 70, "Number of laps", true),
             Col("clean", "Clean", 70, "Clean laps in this stint", true),
+            Col("obs", "Metric obs", 90, "Completed non-pit laps used for wear, fuel and ERS aggregates", true),
             Col("best", "Best", 95, "Best lap in stint", groupStart: true),
             Col("avg", "Avg clean", 95, "Average clean lap in stint"),
             Col("deg", "Deg sec/lap", 105, "Simple pace degradation slope over clean laps, seconds per lap", true),
@@ -123,7 +128,7 @@ public static class RaceAnalysisDataService
             Col("notes", "Notes", 420, "Stint flags", wrap: true, groupStart: true)
         };
         var tableRows = stints.Select(s => new AnalysisTableRow(StintValues(s), StintSeverity(s))).ToList();
-        var status = $"Stint Report: {driver.Code} / {driver.DisplayName}, {tableRows.Count} stints.";
+        var status = $"Stint Report: {driver.Identity}, {tableRows.Count} stints.";
         return new AnalysisTableResult(columns, tableRows, status, StintLegend());
     }
 
@@ -132,7 +137,7 @@ public static class RaceAnalysisDataService
         if (driver is null) return new AnalysisTableResult(Array.Empty<AnalysisTableColumn>(), Array.Empty<AnalysisTableRow>(), "Select a driver.", PitLegend());
         var rows = RaceReportDataService.LoadRows(sessionFolder, driver.CarIndex).Where(r => r.LapNum > 0).OrderBy(r => r.LapNum).ToList();
         var cleanAvg = rows.Where(r => r.CleanLap && r.LapTimeMs > 0 && !r.PitThisLap).Select(r => r.LapTimeMs).DefaultIfEmpty(double.NaN).Average();
-        var pitRows = rows.Where(r => r.PitThisLap || Compound(r) != Compound(Prev(rows, r)?.VisualCompoundEnd ?? r.VisualCompoundEnd, Prev(rows, r)?.ActualCompoundEnd ?? r.ActualCompoundEnd) || r.TyreAgeEnd < r.TyreAgeStart).ToList();
+        var pitRows = RaceStrategyAnalyzer.DetectPitStops(rows);
         var columns = new[]
         {
             Col("lap", "Pit lap", 75, "Lap where pit / compound change was detected", true),
@@ -152,17 +157,22 @@ public static class RaceAnalysisDataService
         {
             var prev = Prev(rows, r);
             var next = rows.FirstOrDefault(x => x.LapNum == r.LapNum + 1);
+            var after = next is not null && !RaceStrategyAnalyzer.SameCompound(r, next) ? next : r;
+            var beforeCompound = r.VisualCompoundStart > 0 || r.ActualCompoundStart > 0
+                ? Compound(r.VisualCompoundStart, r.ActualCompoundStart)
+                : prev is null ? Compound(r) : Compound(prev);
+            var wearBefore = AverageWearStart(r);
             var loss = Valid(cleanAvg) && r.LapTimeMs > 0 ? (r.LapTimeMs - cleanAvg) / 1000.0 : double.NaN;
             var values = new Dictionary<string, string>
             {
                 ["lap"] = r.LapNum.ToString(CultureInfo.InvariantCulture),
-                ["before"] = prev is null ? Compound(r) : Compound(prev),
-                ["after"] = Compound(r),
+                ["before"] = beforeCompound,
+                ["after"] = Compound(after),
                 ["age"] = r.TyreAgeStart.ToString(CultureInfo.InvariantCulture),
                 ["inlap"] = Lap(r.LapTimeMs),
                 ["outlap"] = next is null ? "-" : Lap(next.LapTimeMs),
                 ["loss"] = Valid(loss) ? loss.ToString("+0.0;-0.0;0.0", CultureInfo.InvariantCulture) + "s" : "-",
-                ["wear"] = Num(r.TyreWearAvgEnd),
+                ["wear"] = Num(wearBefore),
                 ["fuel"] = Num(r.FuelEnd),
                 ["dmg"] = r.DamageDeltaMax > 0 ? "+" + r.DamageDeltaMax.ToString(CultureInfo.InvariantCulture) : "-",
                 ["notes"] = PitNote(r, prev, next)
@@ -171,49 +181,32 @@ public static class RaceAnalysisDataService
         }
 
         var status = resultRows.Count == 0
-            ? $"Pit Report: {driver.Code} / {driver.DisplayName}, no pit stop or compound-change laps detected."
-            : $"Pit Report: {driver.Code} / {driver.DisplayName}, {resultRows.Count} pit/compound-change rows.";
+            ? $"Pit Report: {driver.Identity}, no pit stop or compound-change laps detected."
+            : $"Pit Report: {driver.Identity}, {resultRows.Count} pit/compound-change rows.";
         return new AnalysisTableResult(columns, resultRows, status, PitLegend());
     }
 
-    private sealed record Stint(int Number, IReadOnlyList<RaceLapReportRow> Rows);
-
-    private static List<Stint> BuildStints(IReadOnlyList<RaceLapReportRow> rows)
-    {
-        var result = new List<Stint>();
-        var current = new List<RaceLapReportRow>();
-        var stintNo = 1;
-        RaceLapReportRow? prev = null;
-        foreach (var row in rows)
-        {
-            var newStint = prev is not null && (row.PitThisLap || Compound(row) != Compound(prev) || row.TyreAgeEnd < prev.TyreAgeEnd);
-            if (newStint && current.Count > 0)
-            {
-                result.Add(new Stint(stintNo++, current.ToList()));
-                current.Clear();
-            }
-            current.Add(row);
-            prev = row;
-        }
-        if (current.Count > 0) result.Add(new Stint(stintNo, current));
-        return result;
-    }
-
-    private static Dictionary<string, string> StintValues(Stint stint)
+    private static Dictionary<string, string> StintValues(RaceStintGroup stint)
     {
         var rows = stint.Rows;
-        var clean = rows.Where(r => r.CleanLap && r.LapTimeMs > 0).ToList();
-        var best = clean.OrderBy(r => r.LapTimeMs).FirstOrDefault() ?? rows.Where(r => r.LapTimeMs > 0).OrderBy(r => r.LapTimeMs).FirstOrDefault();
+        var representative = rows.Where(r => !r.PitThisLap && r.LapTimeMs > 0).ToList();
+        var clean = representative.Where(r => r.CleanLap && r.LapTimeMs > 0).ToList();
+        var best = clean.OrderBy(r => r.LapTimeMs).FirstOrDefault()
+                   ?? representative.Where(r => r.LapTimeMs > 0).OrderBy(r => r.LapTimeMs).FirstOrDefault();
         var avg = clean.Count == 0 ? double.NaN : clean.Average(r => r.LapTimeMs);
         var deg = DegradationSlope(clean);
-        var minErs = rows.Select(r => ErsPct(r.ErsEnd)).Where(Valid).DefaultIfEmpty(double.NaN).Min();
-        var avgErs = rows.Select(r => ErsPct(r.ErsEnd)).Where(Valid).DefaultIfEmpty(double.NaN).Average();
+        var minErs = representative.Select(r => ErsPct(r.ErsEnd)).Where(Valid).DefaultIfEmpty(double.NaN).Min();
+        var avgErs = representative.Select(r => ErsPct(r.ErsEnd)).Where(Valid).DefaultIfEmpty(double.NaN).Average();
+        var avgWear = representative.Where(r => Valid(r.TyreWearAvgDelta) && r.TyreWearAvgDelta >= 0)
+            .Select(r => r.TyreWearAvgDelta)
+            .DefaultIfEmpty(double.NaN)
+            .Average();
         var notes = new List<string>();
         if (clean.Count == 0) notes.Add("No clean laps");
         if (rows.Any(r => r.PitThisLap)) notes.Add("Pit stop detected");
         if (rows.Any(r => r.DamageDeltaMax > 0)) notes.Add("Damage appeared");
         if (Valid(minErs) && minErs <= 10) notes.Add("Low ERS");
-        if (rows.Average(r => r.TyreWearAvgDelta) >= 3) notes.Add("High tyre wear");
+        if (Valid(avgWear) && avgWear >= 3) notes.Add("High tyre wear");
 
         return new Dictionary<string, string>
         {
@@ -222,11 +215,12 @@ public static class RaceAnalysisDataService
             ["compound"] = Compound(rows.Last()),
             ["length"] = rows.Count.ToString(CultureInfo.InvariantCulture),
             ["clean"] = clean.Count.ToString(CultureInfo.InvariantCulture),
+            ["obs"] = representative.Count.ToString(CultureInfo.InvariantCulture),
             ["best"] = best is null ? "-" : Lap(best.LapTimeMs),
             ["avg"] = Lap(avg),
             ["deg"] = Valid(deg) ? deg.ToString("+0.000;-0.000;0.000", CultureInfo.InvariantCulture) : "-",
-            ["wear"] = Num(rows.Average(r => r.TyreWearAvgDelta)),
-            ["fuel"] = Num(rows.Where(r => Valid(r.FuelUsed)).Select(r => r.FuelUsed).DefaultIfEmpty(double.NaN).Average()),
+            ["wear"] = Num(avgWear),
+            ["fuel"] = Num(representative.Where(r => Valid(r.FuelUsed)).Select(r => r.FuelUsed).DefaultIfEmpty(double.NaN).Average()),
             ["ers"] = Num0(avgErs),
             ["minErs"] = Num0(minErs),
             ["dmg"] = rows.Sum(r => Math.Max(0, r.DamageDeltaMax)).ToString(CultureInfo.InvariantCulture),
@@ -234,9 +228,9 @@ public static class RaceAnalysisDataService
         };
     }
 
-    private static string StintSeverity(Stint stint)
+    private static string StintSeverity(RaceStintGroup stint)
     {
-        if (stint.Rows.Any(r => r.DamageDeltaMax >= 10 || !r.CleanLap)) return "warn";
+        if (stint.Rows.Any(r => r.DamageDeltaMax >= 10 || (!r.CleanLap && !r.PitThisLap))) return "warn";
         return "normal";
     }
 
@@ -342,8 +336,8 @@ public static class RaceAnalysisDataService
         return int.TryParse(digits, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) ? value : 0;
     }
 
-    private static string CompareLegend(string mode, string group) => $"Compare mode {mode}. Pace gap is against the best selected driver on the same row. Tyres F/R means front average minus rear average wear gained. Fuel/ERS harvest is MGU-K + MGU-H in MJ. Yes, it is finally comparing drivers instead of making you do spreadsheet archaeology.";
-    private static string StintLegend() => "Stint report groups laps by compound changes, pit stops and tyre-age resets. Deg sec/lap is a simple clean-lap pace slope, useful as a first degradation signal, not divine prophecy.";
+    private static string CompareLegend(string mode, string group) => $"Compare mode {mode}. Pace gap is against the best selected driver on the same row. Tyres F/R means front average minus rear average wear gained. Fuel/ERS harvest is MGU-K + MGU-H in MJ.";
+    private static string StintLegend() => "Stint report groups laps by compound changes, pit stops and tyre-age resets. Deg sec/lap is a simple clean-lap pace slope. Metric obs is the number of completed non-pit laps used in aggregate calculations.";
     private static string PitLegend() => "Pit report detects pit laps by pit flag, compound change or tyre-age reset. Loss estimate is rough: pit lap versus average clean non-pit lap.";
 
     private static AnalysisTableColumn Col(string key, string header, double width, string help, bool alignRight = false, bool wrap = false, bool groupStart = false)
@@ -375,16 +369,26 @@ public static class RaceAnalysisDataService
         var notes = new List<string>();
         if (r.PitThisLap) notes.Add("Pit flag");
         if (prev is not null && Compound(prev) != Compound(r)) notes.Add("Compound changed");
+        else if (next is not null && Compound(r) != Compound(next)) notes.Add("Compound changed on out lap");
         if (r.TyreAgeEnd < r.TyreAgeStart) notes.Add("Tyre age reset");
+        else if (next is not null && next.TyreAgeEnd < r.TyreAgeEnd) notes.Add("Tyre age reset on out lap");
         if (next is null) notes.Add("No out lap yet");
         if (r.DamageDeltaMax > 0) notes.Add("Damage on pit lap");
         return notes.Count == 0 ? r.Notes : string.Join(", ", notes);
     }
 
+    private static double AverageWearStart(RaceLapReportRow row)
+    {
+        var values = new[] { row.TyreWearFlStart, row.TyreWearFrStart, row.TyreWearRlStart, row.TyreWearRrStart }
+            .Where(Valid)
+            .ToList();
+        return values.Count == 0 ? double.NaN : values.Average();
+    }
+
     private static string BuildQualityFlags(IReadOnlyList<RaceLapReportRow> rows)
     {
         var flags = new List<string>();
-        if (rows.Any(r => r.Sector1Ms <= 0 || r.Sector2Ms <= 0 || r.Sector3Ms <= 0)) flags.Add("missing sector data");
+        if (rows.Any(r => r.LapTimeMs > 0 && (r.Sector1Ms <= 0 || r.Sector2Ms <= 0 || r.Sector3Ms <= 0))) flags.Add("missing sector data");
         if (rows.Any(r => r.RewindCount > 0)) flags.Add("flashback/rewind detected");
         if (rows.Any(r => MaxDamage(r) >= 95)) flags.Add("suspicious high damage value");
         if (rows.Any(r => r.LapInvalid || r.InvalidCount > 0)) flags.Add("invalid laps detected");

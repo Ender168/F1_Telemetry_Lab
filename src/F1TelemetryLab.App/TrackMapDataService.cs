@@ -10,7 +10,8 @@ public sealed record TrackProfile(
     double TrackLengthM,
     List<TrackPoint> Points,
     List<TrackCorner> Corners,
-    TrackBoundary? Boundary);
+    TrackBoundary? Boundary,
+    string DistanceSource = "geometric_xz");
 
 public sealed record TrackPoint(double DistanceM, double X, double Z);
 public sealed record TrackBoundary(
@@ -231,6 +232,12 @@ public static class RacenetSplineDataService
 
 public static class TrackMapDataService
 {
+    private sealed record SourceTrackPoint(double SourceDistanceM, double X, double Z);
+    private sealed record ParsedTrackGeometry(
+        List<TrackPoint> Points,
+        List<(double SourceDistanceM, double GeometryDistanceM)> DistanceMap,
+        double TrackLengthM);
+
     public static readonly string[] Metrics =
     {
         "segment_loss_ms",
@@ -248,15 +255,16 @@ public static class TrackMapDataService
         RequireTable(con, "analysis_trace_10m");
         var trackId = ReadIntMeta(con, "track_id") ?? -1;
         var trackName = ReadStringMeta(con, "track_name") ?? TrackNames.GetTrackName(trackId);
-        var profile = LoadTrackProfile(rootFolder, trackId, trackName);
+        var trackLength = ReadIntMeta(con, "track_length_m") ?? 0;
+        var profile = LoadTrackProfile(rootFolder, trackId, trackName, trackLength);
 
         var refTrace = CleanTrace(LoadTrace(con, reference));
         var cmpTrace = CleanTrace(LoadTrace(con, compare));
         var values = BuildValues(refTrace, cmpTrace, metric);
         var insights = BuildInsights(values, metric, profile);
         var status = profile is null
-            ? $"Track profile not found for track_id={trackId}. Put Tracks.zip contents into data\\tracks."
-            : $"{profile.TrackName}: {profile.Points.Count:N0} map points, {profile.Corners.Count:N0} labels, {BoundaryStatus(profile)}. {reference.Code} vs {compare.Code}.";
+            ? $"Track profile unavailable for track_id={trackId}; telemetry trace fallback is active."
+            : $"{profile.TrackName}: {profile.Points.Count:N0} map points, {profile.Corners.Count:N0} labels, geometric X/Z distance normalized to {profile.TrackLengthM:0}m, {BoundaryStatus(profile)}. {reference.Code} vs {compare.Code}.";
 
         return new TrackMapRenderData(
             profile,
@@ -278,7 +286,7 @@ public static class TrackMapDataService
             : $"Racenet boundary {profile.Boundary.Points.Count:N0} gates";
     }
 
-    public static TrackProfile? LoadTrackProfile(string rootFolder, int trackId, string fallbackName)
+    public static TrackProfile? LoadTrackProfile(string rootFolder, int trackId, string fallbackName, double gameTrackLengthM = 0)
     {
         if (trackId < 0) return null;
         var roots = CandidateTrackRoots(rootFolder).ToList();
@@ -287,11 +295,15 @@ public static class TrackMapDataService
             var trackPath = Path.Combine(root, $"Track_{trackId}.csv");
             var settingsPath = Path.Combine(root, "Description", $"Track_Settings_{trackId}.csv");
             if (!File.Exists(trackPath)) continue;
-            var points = ParseTrackPoints(trackPath);
-            var (name, length, corners) = File.Exists(settingsPath)
+            var (name, settingsLength, sourceCorners) = File.Exists(settingsPath)
                 ? ParseSettings(settingsPath, fallbackName)
-                : (fallbackName, points.Count > 0 ? points.Max(p => p.DistanceM) : 0.0, new List<TrackCorner>());
+                : (fallbackName, 0.0, new List<TrackCorner>());
+            var targetLength = gameTrackLengthM > 1_000 ? gameTrackLengthM : settingsLength;
+            var geometry = ParseTrackPoints(trackPath, targetLength);
+            var points = geometry.Points;
             if (points.Count == 0) continue;
+            var length = geometry.TrackLengthM;
+            var corners = RemapCorners(sourceCorners, geometry.DistanceMap);
             corners = ApplyManualCornerOverrides(trackId, corners);
             var boundary = RacenetSplineDataService.LoadBoundary(rootFolder, trackId, string.IsNullOrWhiteSpace(name) ? fallbackName : name);
             if (boundary is not null && length > 1000 && boundary.TrackLengthM > 1000)
@@ -334,9 +346,9 @@ public static class TrackMapDataService
         }
     }
 
-    private static List<TrackPoint> ParseTrackPoints(string path)
+    private static ParsedTrackGeometry ParseTrackPoints(string path, double targetLengthM)
     {
-        var points = new List<TrackPoint>();
+        var source = new List<SourceTrackPoint>();
         foreach (var line in File.ReadLines(path))
         {
             if (string.IsNullOrWhiteSpace(line)) continue;
@@ -345,13 +357,62 @@ public static class TrackMapDataService
             if (!double.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var cm)) continue;
             if (!double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var x)) continue;
             if (!double.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out var z)) continue;
-            // Team Telemetry track CSV uses centimeters for distance and for X/Z coordinates.
-            // Telemetry world positions are in meters, so keep the profile in meters too.
-            // Otherwise detail zoom gets one tiny track segment and one lonely telemetry dot,
-            // which is exactly the kind of UI comedy nobody asked for.
-            points.Add(new TrackPoint(cm / 100.0, x / 100.0, z / 100.0));
+            source.Add(new SourceTrackPoint(cm / 100.0, x / 100.0, z / 100.0));
         }
-        return points.OrderBy(p => p.DistanceM).ToList();
+        if (source.Count < 2) return new ParsedTrackGeometry(new List<TrackPoint>(), new List<(double, double)>(), 0);
+
+        var cumulative = new double[source.Count];
+        for (var i = 1; i < source.Count; i++)
+        {
+            var dx = source[i].X - source[i - 1].X;
+            var dz = source[i].Z - source[i - 1].Z;
+            cumulative[i] = cumulative[i - 1] + Math.Sqrt(dx * dx + dz * dz);
+        }
+
+        var closeDx = source[0].X - source[^1].X;
+        var closeDz = source[0].Z - source[^1].Z;
+        var closedLength = cumulative[^1] + Math.Sqrt(closeDx * closeDx + closeDz * closeDz);
+        if (closedLength <= 0) return new ParsedTrackGeometry(new List<TrackPoint>(), new List<(double, double)>(), 0);
+        var normalizedLength = targetLengthM > 1_000 ? targetLengthM : closedLength;
+        var scale = normalizedLength / closedLength;
+
+        var points = source
+            .Select((point, index) => new TrackPoint(cumulative[index] * scale, point.X, point.Z))
+            .ToList();
+        if (points[^1].DistanceM < normalizedLength - 0.5)
+            points.Add(new TrackPoint(normalizedLength, points[0].X, points[0].Z));
+
+        var distanceMap = source
+            .Select((point, index) => (point.SourceDistanceM, cumulative[index] * scale))
+            .OrderBy(point => point.SourceDistanceM)
+            .ToList();
+        return new ParsedTrackGeometry(points, distanceMap, normalizedLength);
+    }
+
+    private static List<TrackCorner> RemapCorners(
+        IReadOnlyList<TrackCorner> corners,
+        IReadOnlyList<(double SourceDistanceM, double GeometryDistanceM)> distanceMap)
+    {
+        if (corners.Count == 0 || distanceMap.Count < 2) return corners.ToList();
+        return corners
+            .Select(corner => corner with { DistanceM = MapSourceDistance(distanceMap, corner.DistanceM) })
+            .OrderBy(corner => corner.DistanceM)
+            .ToList();
+    }
+
+    private static double MapSourceDistance(
+        IReadOnlyList<(double SourceDistanceM, double GeometryDistanceM)> map,
+        double sourceDistanceM)
+    {
+        if (sourceDistanceM <= map[0].SourceDistanceM) return map[0].GeometryDistanceM;
+        if (sourceDistanceM >= map[^1].SourceDistanceM) return map[^1].GeometryDistanceM;
+        var high = 1;
+        while (high < map.Count && map[high].SourceDistanceM < sourceDistanceM) high++;
+        var low = high - 1;
+        var sourceSpan = map[high].SourceDistanceM - map[low].SourceDistanceM;
+        if (sourceSpan <= 0) return map[low].GeometryDistanceM;
+        var t = (sourceDistanceM - map[low].SourceDistanceM) / sourceSpan;
+        return map[low].GeometryDistanceM + (map[high].GeometryDistanceM - map[low].GeometryDistanceM) * t;
     }
 
     private static (string Name, double Length, List<TrackCorner> Corners) ParseSettings(string path, string fallbackName)
@@ -470,26 +531,36 @@ public static class TrackMapDataService
 
     private static List<TrackMapValue> BuildValues(List<TracePoint> reference, List<TracePoint> compare, string metric)
     {
-        var refByD = reference.GroupBy(x => x.DistanceM).ToDictionary(g => g.Key, g => g.Last());
-        var cmpByD = compare.GroupBy(x => x.DistanceM).ToDictionary(g => g.Key, g => g.Last());
-        var common = refByD.Keys.Intersect(cmpByD.Keys).OrderBy(x => x).ToList();
+        var referencePoints = reference
+            .GroupBy(x => x.DistanceM)
+            .Select(g => g.Last())
+            .OrderBy(x => x.DistanceM)
+            .ToList();
+        var comparePoints = compare
+            .GroupBy(x => x.DistanceM)
+            .Select(g => g.Last())
+            .OrderBy(x => x.DistanceM)
+            .ToList();
         var values = new List<TrackMapValue>();
-        double? prevDelta = null;
-        foreach (var d in common)
+        var deltas = new List<(int DistanceM, double DeltaMs)>();
+        foreach (var r in referencePoints)
         {
-            var r = refByD[d];
-            var c = cmpByD[d];
-            var delta = c.TimeMs - r.TimeMs;
+            var compareTime = DistanceSeriesInterpolator.Linear(comparePoints, r.DistanceM, p => p.DistanceM, p => p.TimeMs);
+            var compareSpeed = DistanceSeriesInterpolator.Linear(comparePoints, r.DistanceM, p => p.DistanceM, p => p.Speed);
+            if (compareTime is null) continue;
+            var delta = compareTime.Value - r.TimeMs;
             if (Math.Abs(delta) > 10000) continue;
+            var segmentBaseline = deltas.LastOrDefault(x => x.DistanceM <= r.DistanceM - 30);
+            var hasSegmentBaseline = deltas.Any(x => x.DistanceM <= r.DistanceM - 30);
             var value = metric switch
             {
                 "cumulative_delta_ms" => delta,
-                "speed_loss_kmh" => r.Speed - c.Speed,
-                _ => prevDelta is null ? 0 : delta - prevDelta.Value
+                "speed_loss_kmh" => compareSpeed is null ? double.NaN : r.Speed - compareSpeed.Value,
+                _ => hasSegmentBaseline ? delta - segmentBaseline.DeltaMs : 0
             };
-            prevDelta = delta;
+            deltas.Add((r.DistanceM, delta));
             if (!double.IsNaN(value) && !double.IsInfinity(value) && Math.Abs(value) <= 5000)
-                values.Add(new TrackMapValue(d, value));
+                values.Add(new TrackMapValue(r.DistanceM, value));
         }
         return values;
     }

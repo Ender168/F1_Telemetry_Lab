@@ -8,7 +8,8 @@ public sealed record RaceReportDriverOption(int CarIndex, bool IsPlayer, string 
 {
     public string DisplayName => IsPlayer ? "YOU" : CleanName(DriverName);
     public string Code => CleanShort(ShortName, CarIndex, IsPlayer);
-    public string Label => $"#{CarIndex:00} {Code} {DisplayName}  best {LapOption.FormatLapTime(BestLapMs)}  laps:{TotalLapCount}";
+    public string Identity => LapOption.CompactIdentity(CarIndex, IsPlayer, Code, DisplayName);
+    public string Label => $"#{CarIndex:00} {Identity}  best {LapOption.FormatLapTime(BestLapMs)}  laps:{TotalLapCount}";
     public override string ToString() => Label;
 
     private static string CleanName(string name)
@@ -158,7 +159,10 @@ public static class RaceReportDataService
         using var cmd = con.CreateCommand();
         cmd.CommandText = namesCte + """
         SELECT s.car_idx, MAX(s.is_player) AS is_player, COALESCE(n.name, '') AS name, COALESCE(n.short_name, '') AS short_name,
-               MIN(CASE WHEN s.lap_time_ms > 0 THEN s.lap_time_ms END) AS best_lap_ms,
+               COALESCE(
+                   MIN(CASE WHEN s.clean_lap = 1 AND s.pit_this_lap = 0 AND s.lap_time_ms > 0 THEN s.lap_time_ms END),
+                   MIN(CASE WHEN s.pit_this_lap = 0 AND s.lap_time_ms > 0 THEN s.lap_time_ms END)
+               ) AS best_lap_ms,
                COUNT(*) AS total_laps
         FROM lap_state_summary s
         LEFT JOIN names n ON n.car_idx = s.car_idx
@@ -216,7 +220,7 @@ public static class RaceReportDataService
         var rows = new List<RaceLapReportRow>();
         while (reader.Read()) rows.Add(ReadRow(reader));
 
-        var best = rows.Where(x => x.CleanLap && x.LapTimeMs > 0).OrderBy(x => x.LapTimeMs).FirstOrDefault()
+        var best = rows.Where(x => x.CleanLap && !x.PitThisLap && x.LapTimeMs > 0).OrderBy(x => x.LapTimeMs).FirstOrDefault()
                    ?? rows.Where(x => x.LapTimeMs > 0).OrderBy(x => x.LapTimeMs).FirstOrDefault();
         foreach (var row in rows)
         {
@@ -273,14 +277,14 @@ public static class RaceReportDataService
 
     public static string LegendForView(string view)
     {
-        var common = "Расшифровки: S1/S2/S3 = sector 1/2/3, FL/FR/RL/RR = front-left/front-right/rear-left/rear-right, Δ/change = изменение за этот круг, ERS = Energy Recovery System, DRS = Drag Reduction System, MGU-K/MGU-H = harvested kinetic/heat energy, Clean lap = без invalid/rewind, Position = позиция на финише круга.";
+        var common = "Definitions: S1/S2/S3 = sectors, FL/FR/RL/RR = tyre corners, Δ/change = change during this lap, ERS = Energy Recovery System, DRS = Drag Reduction System, MGU-K/MGU-H = harvested kinetic/heat energy, Clean lap = no invalidation or rewind, Position = position at lap end.";
         var viewText = view switch
         {
-            "Tyres" => " Tyres: FL/FR/RL/RR = передняя левая/передняя правая/задняя левая/задняя правая. Wear FL/FR/RL/RR = износ каждой шины на конец круга. Lap FL/FR/RL/RR = прирост износа именно за выбранный круг. Avg end = средний износ на конец круга. Avg lap Δ = средний прирост износа за выбранный круг. Tyre dmg = повреждение каркаса шины на конец круга. Age laps = возраст комплекта в кругах.",
-            "Fuel/ERS" => " Fuel/ERS: Fuel start/end/used/laps left = топливо в кг и расчёт оставшихся кругов, ERS start/end/min/max = заряд батареи, Deploy = потрачено ERS, Harvest K/H = восстановлено MGU-K/MGU-H, Mode = режим ERS.",
-            "Damage" => " Damage: все значения в %, Wing = крыло, Body = кузовные элементы, Damage change max = максимальный прирост повреждения по любому элементу за круг.",
-            "Full" => " Full: Speed = максимальная скорость на круге, Throttle/Brake/DRS = доля круга с полным газом, торможением и открытым DRS.",
-            _ => " Overview: Compound = визуальный состав шин, Age = возраст комплекта, Wear change = средний прирост износа шин, Damage change = максимальный прирост повреждения за круг."
+            "Tyres" => " Tyres: Wear FL/FR/RL/RR is end-of-lap wear. Lap FL/FR/RL/RR is wear gained during the selected lap. Avg end is mean end wear. Avg lap Δ is mean wear gained. Tyre dmg is carcass damage. Age laps is set age.",
+            "Fuel/ERS" => " Fuel/ERS: Fuel start/end/used/laps left are kilograms and estimated remaining laps. ERS start/end/min/max is battery state, Deploy is spent energy, Harvest K/H is recovered energy, Mode is deployment mode.",
+            "Damage" => " Damage: values are percentages. Wing covers aerodynamic wings, Body covers floor/diffuser/sidepods, and Damage change max is the largest component increase during the lap.",
+            "Full" => " Full: Speed is lap maximum. Throttle/Brake/DRS are the shares of the lap at full throttle, under braking, and with DRS open.",
+            _ => " Overview: Compound is the visual tyre compound, Age is set age, Wear change is mean tyre wear gained, and Damage change is the largest component increase during the lap."
         };
         return common + viewText;
     }
@@ -677,6 +681,6 @@ public static class RaceReportDataService
     private static void RequireTable(SqliteConnection con, string table)
     {
         if (TableExists(con, table)) return;
-        throw new InvalidOperationException($"Table '{table}' not found. Run Analyze selected session first so v0.5.3 can build the Race Report tables.");
+        throw new InvalidOperationException($"Table '{table}' not found. Run Analyze selected session first so v{AppInfo.Version} can build the Race Report tables.");
     }
 }

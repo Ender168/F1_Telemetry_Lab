@@ -1,0 +1,59 @@
+name: build
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_long_tests:
+        description: Run the opt-in long-session benchmark
+        required: false
+        default: false
+        type: boolean
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-self-test:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+          cache: true
+          cache-dependency-path: '**/*.csproj'
+
+      - name: Restore
+        run: dotnet restore F1TelemetryLab.sln
+
+      - name: Build Release
+        run: dotnet build F1TelemetryLab.sln --configuration Release --no-restore
+
+      - name: Run protocol and lap-quality self-tests
+        run: dotnet run --project tests/F1TelemetryLab.SelfTest/F1TelemetryLab.SelfTest.csproj --configuration Release --no-build
+
+      - name: Run regression test suite
+        run: dotnet test tests/F1TelemetryLab.Tests/F1TelemetryLab.Tests.csproj --configuration Release --no-build --logger "console;verbosity=normal"
+
+      - name: Run long-session benchmark
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_long_tests }}
+        env:
+          F1TLAB_RUN_LONG_TESTS: '1'
+        run: dotnet test tests/F1TelemetryLab.Tests/F1TelemetryLab.Tests.csproj --configuration Release --no-build --filter LongSessionBenchmarkRemainsBoundedWhenExplicitlyEnabled
+
+      - name: Publish Windows x64
+        run: dotnet publish src/F1TelemetryLab.App/F1TelemetryLab.App.csproj --configuration Release --runtime win-x64 --self-contained true --output artifacts/F1TelemetryLab-win-x64
+
+      - name: Upload Windows x64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: F1TelemetryLab-v0.10.2-win-x64
+          path: artifacts/F1TelemetryLab-win-x64
+          if-no-files-found: error

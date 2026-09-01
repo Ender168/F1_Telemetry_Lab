@@ -8,8 +8,9 @@ public sealed record LapOption(int CarIndex, int LapNum, bool IsPlayer, bool Cle
 {
     public string DisplayName => IsPlayer ? "YOU" : CleanName(DriverName);
     public string Code => CleanShort(ShortName, CarIndex, IsPlayer);
-    public string Label => $"#{CarIndex:00} {Code} {DisplayName}  {(IsBestLap ? "★ " : "  ")}Lap {LapNum}  {FormatLapTime(LapTimeMs)}  {(CleanLap ? "clean" : "dirty")}  rew:{RewindCount}";
-    public string ShortLabel => $"#{CarIndex:00} {Code} {DisplayName} L{LapNum} {FormatLapTime(LapTimeMs)}";
+    public string Identity => CompactIdentity(CarIndex, IsPlayer, Code, DisplayName);
+    public string Label => $"#{CarIndex:00} {Identity}  {(IsBestLap ? "★ " : "  ")}Lap {LapNum}  {FormatLapTime(LapTimeMs)}  {(CleanLap ? "clean" : "dirty")}  rew:{RewindCount}";
+    public string ShortLabel => $"#{CarIndex:00} {Identity} L{LapNum} {FormatLapTime(LapTimeMs)}";
     public override string ToString() => Label;
 
     public static string FormatLapTime(double ms)
@@ -33,13 +34,22 @@ public sealed record LapOption(int CarIndex, int LapNum, bool IsPlayer, bool Cle
         if (clean.Length >= 2) return clean.Length > 4 ? clean[..4] : clean;
         return isPlayer ? "YOU" : $"C{carIndex:00}";
     }
+
+    internal static string CompactIdentity(int carIndex, bool isPlayer, string code, string displayName)
+    {
+        if (isPlayer) return "YOU";
+        if (string.Equals(code, $"C{carIndex:00}", StringComparison.OrdinalIgnoreCase)) return displayName;
+        if (string.Equals(code, displayName, StringComparison.OrdinalIgnoreCase)) return displayName;
+        return $"{code} {displayName}";
+    }
 }
 
 public sealed record DriverOption(int CarIndex, bool IsPlayer, string DriverName, string ShortName, double BestCleanLapMs, int CleanLapCount, int TotalLapCount)
 {
     public string DisplayName => IsPlayer ? "YOU" : CleanName(DriverName);
     public string Code => CleanShort(ShortName, CarIndex, IsPlayer);
-    public string Label => $"#{CarIndex:00} {Code} {DisplayName}  best {LapOption.FormatLapTime(BestCleanLapMs)}  clean:{CleanLapCount}/{TotalLapCount}";
+    public string Identity => LapOption.CompactIdentity(CarIndex, IsPlayer, Code, DisplayName);
+    public string Label => $"#{CarIndex:00} {Identity}  best {LapOption.FormatLapTime(BestCleanLapMs)}  clean:{CleanLapCount}/{TotalLapCount}";
     public override string ToString() => Label;
 
     private static string CleanName(string name)
@@ -111,8 +121,12 @@ public static class CompareDataService
                COALESCE(n.name, '') AS name,
                COALESCE(n.short_name, '') AS short_name
         FROM lap_summary s
+        LEFT JOIN lap_state_summary st
+          ON st.session_uid = s.session_uid
+         AND st.car_idx = s.car_idx
+         AND st.lap_num = s.lap_num
         LEFT JOIN names n ON n.car_idx = s.car_idx
-        WHERE s.lap_num > 0 AND s.lap_time_ms > 0
+        WHERE s.lap_num > 0 AND s.lap_time_ms > 0 AND COALESCE(st.pit_this_lap, 0) = 0
         """ + (cleanOnly ? " AND s.clean_lap = 1 " : " ") + """
         ORDER BY s.is_player DESC, s.car_idx ASC, s.clean_lap DESC, s.lap_time_ms ASC, s.lap_num ASC
         """;
@@ -220,9 +234,13 @@ public static class CompareDataService
     {
         var best = LoadBestCleanLaps(sessionFolder, 50);
         var you = best.FirstOrDefault(x => x.IsPlayer);
+        var reference = best.FirstOrDefault(x => !x.IsPlayer);
         var result = new List<LapOption>();
+        if (reference is not null) result.Add(reference);
         if (you is not null) result.Add(you);
-        result.AddRange(best.Where(x => you is null || x.CarIndex != you.CarIndex).Take(Math.Max(0, totalSlots - result.Count)));
+        result.AddRange(best
+            .Where(x => (you is null || x.CarIndex != you.CarIndex) && (reference is null || x.CarIndex != reference.CarIndex))
+            .Take(Math.Max(0, totalSlots - result.Count)));
         return result.Take(totalSlots).ToList();
     }
 
@@ -230,9 +248,13 @@ public static class CompareDataService
     {
         var best = LoadBestAvailableLaps(sessionFolder, 50);
         var you = best.FirstOrDefault(x => x.IsPlayer);
+        var reference = best.FirstOrDefault(x => !x.IsPlayer);
         var result = new List<LapOption>();
+        if (reference is not null) result.Add(reference);
         if (you is not null) result.Add(you);
-        result.AddRange(best.Where(x => you is null || x.CarIndex != you.CarIndex).Take(Math.Max(0, totalSlots - result.Count)));
+        result.AddRange(best
+            .Where(x => (you is null || x.CarIndex != you.CarIndex) && (reference is null || x.CarIndex != reference.CarIndex))
+            .Take(Math.Max(0, totalSlots - result.Count)));
         return result.Take(totalSlots).ToList();
     }
 
@@ -252,12 +274,25 @@ public static class CompareDataService
             var cleanRaw = raw.Select(x => (x.lap, points: CleanTimeTrace(x.points))).ToList();
             var reference = cleanRaw[0].points
                 .GroupBy(x => x.DistanceBinM)
-                .ToDictionary(g => g.Key, g => g.Last().TimeMs);
-            return cleanRaw.Select((item, idx) => new CompareSeries(SeriesName(item.lap, idx), item.points
-                .Where(p => reference.ContainsKey(p.DistanceBinM))
-                .Select(p => new ComparePoint(p.DistanceBinM, p.TimeMs - reference[p.DistanceBinM]))
-                .Where(p => !double.IsNaN(p.Value) && !double.IsInfinity(p.Value) && Math.Abs(p.Value) <= 10000)
-                .ToList())).ToList();
+                .Select(g => g.Last())
+                .OrderBy(x => x.DistanceBinM)
+                .ToList();
+            return cleanRaw.Select((item, idx) => new CompareSeries(
+                SeriesName(item.lap, idx),
+                reference.Select(referencePoint =>
+                    {
+                        var compareTime = DistanceSeriesInterpolator.Linear(
+                            item.points,
+                            referencePoint.DistanceBinM,
+                            p => p.DistanceBinM,
+                            p => p.TimeMs);
+                        return compareTime is null
+                            ? null
+                            : new ComparePoint(referencePoint.DistanceBinM, compareTime.Value - referencePoint.TimeMs);
+                    })
+                    .Where(p => p is not null && !double.IsNaN(p.Value) && !double.IsInfinity(p.Value) && Math.Abs(p.Value) <= 10000)
+                    .Select(p => p!)
+                    .ToList())).ToList();
         }
 
         return raw.Select((item, idx) => new CompareSeries(SeriesName(item.lap, idx), item.points
@@ -358,7 +393,8 @@ public static class CompareDataService
 
     private static string SeriesName(LapOption lap, int index)
     {
-        return $"{lap.Code} | #{lap.CarIndex:00} {lap.DisplayName} | Lap {lap.LapNum} | {LapOption.FormatLapTime(lap.LapTimeMs)} | {(lap.CleanLap ? "clean" : "dirty")}";
+        var role = index == 0 ? "REF" : "CMP";
+        return $"{role} | #{lap.CarIndex:00} {lap.Identity} | Lap {lap.LapNum} | {LapOption.FormatLapTime(lap.LapTimeMs)} | {(lap.CleanLap ? "clean" : "dirty")}";
     }
 
     private static bool TableExists(SqliteConnection con, string table)

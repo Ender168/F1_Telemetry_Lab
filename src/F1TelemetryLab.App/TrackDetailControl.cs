@@ -7,7 +7,7 @@ namespace F1TelemetryLab;
 
 public sealed class TrackDetailControl : Control
 {
-    private const double ApproxTrackWidthM = 12.0;
+    private const double ViewportPaddingM = 12.0;
 
     private TrackMapRenderData? _data;
     private TrackMapInsight? _selectedInsight;
@@ -51,14 +51,14 @@ public sealed class TrackDetailControl : Control
         var dimBrush = new SolidColorBrush(Color.FromRgb(150, 160, 170));
         if (_data?.Profile is null || _data.Profile.Points.Count < 2)
         {
-            DrawText(context, "Detail data not loaded. Построй Track Map или Best vs YOU, потом выбирай top-zone.", 16, textBrush, new Point(24, 24));
+            DrawText(context, "Detail data not loaded. Build Track Map or Best vs YOU, then select a top zone.", 16, textBrush, new Point(24, 24));
             return;
         }
 
         var insight = _selectedInsight ?? _data.Insights.FirstOrDefault();
         if (insight is null)
         {
-            DrawText(context, "No top-zones found. Тут нечего приближать, трагедия без кульминации.", 16, textBrush, new Point(24, 24));
+            DrawText(context, "No meaningful gain or loss zones were found for this comparison.", 16, textBrush, new Point(24, 24));
             return;
         }
 
@@ -90,7 +90,7 @@ public sealed class TrackDetailControl : Control
         var p90 = absValues.Count == 0 ? 1.0 : absValues[(int)Math.Clamp(Math.Floor(absValues.Count * 0.90), 0, absValues.Count - 1)];
         if (p90 < 1) p90 = 1;
 
-        var viewport = BuildViewport(points, boundaryPoints, refTrace, cmpTrace, ApproxTrackWidthM);
+        var viewport = BuildViewport(points, boundaryPoints, refTrace, cmpTrace, ViewportPaddingM);
         var plot = new Rect(40, 72, Math.Max(20, bounds.Width - 80), Math.Max(20, bounds.Height - 152));
         var focus = NearestPoint(allPoints, insight.PeakDistanceM);
         var transform = BuildTransformCentered(viewport, plot, focus.X, focus.Z);
@@ -109,7 +109,7 @@ public sealed class TrackDetailControl : Control
         DrawLegend(context, bounds, insight, hasBoundary);
 
         if (hasBoundary) DrawTrackBoundary(context, boundaryPoints, MapRaw);
-        else DrawTrackCorridor(context, points, transform, ApproxTrackWidthM);
+        else DrawGeometryReference(context, points, transform);
 
         for (var i = 1; i < points.Count; i++)
         {
@@ -214,7 +214,7 @@ public sealed class TrackDetailControl : Control
         var maxOffset = zoneDeviation.Count == 0 ? 0 : zoneDeviation.Max(p => p.OffsetMeters);
         var limitsText = hasBoundary
             ? "Track surface, white lines and limits are from the embedded Austria Racenet spline."
-            : $"No spline boundary loaded; using approximate {ApproxTrackWidthM:0.#}m corridor fallback.";
+            : "No verified spline boundary; only the geometric reference and measured trajectories are drawn.";
         var info = $"Actual path offset: avg {avgOffset:0.00}m, max {maxOffset:0.00}m. {limitsText}";
         DrawText(context, info, 12, dimBrush, new Point(18, bounds.Height - 34));
     }
@@ -239,7 +239,7 @@ public sealed class TrackDetailControl : Control
         }
         else
         {
-            DrawLegendLine(context, x, y + 25, Color.FromRgb(210, 215, 222), "approx track limits / asphalt");
+            DrawLegendLine(context, x, y + 25, Color.FromRgb(210, 215, 222), "geometry reference (not limits)");
             DrawLegendLine(context, x, y + 43, Color.FromArgb(245, 80, 170, 255), "Reference path");
             DrawLegendLine(context, x, y + 61, Color.FromArgb(245, 255, 216, 84), "Compare path");
             DrawLegendLine(context, x, y + 79, InsightColor(insight.Kind, 245), "selected top-zone");
@@ -352,6 +352,20 @@ public sealed class TrackDetailControl : Control
         DrawPolyline(context, right, edge);
     }
 
+    private static void DrawGeometryReference(DrawingContext context, List<TrackPoint> points, ViewTransform transform)
+    {
+        if (points.Count < 2) return;
+        var shadow = new Pen(new SolidColorBrush(Color.FromArgb(180, 7, 10, 14)), 6.0);
+        var line = new Pen(new SolidColorBrush(Color.FromArgb(210, 210, 215, 222)), 2.0);
+        for (var i = 1; i < points.Count; i++)
+        {
+            var from = transform.Map(points[i - 1].X, points[i - 1].Z);
+            var to = transform.Map(points[i].X, points[i].Z);
+            context.DrawLine(shadow, from, to);
+            context.DrawLine(line, from, to);
+        }
+    }
+
     private static List<Point> BuildOffsetPolyline(List<TrackPoint> points, ViewTransform transform, double offsetM)
     {
         var result = new List<Point>();
@@ -401,20 +415,30 @@ public sealed class TrackDetailControl : Control
         List<TrackMapTracePoint> cmpTrace,
         Func<double, double, Point> mapRaw)
     {
-        var refByBin = refTrace.GroupBy(p => RoundTo10(p.DistanceM)).ToDictionary(g => g.Key, g => g.Last());
-        var cmpByBin = cmpTrace.GroupBy(p => RoundTo10(p.DistanceM)).ToDictionary(g => g.Key, g => g.Last());
+        var referenceTrace = refTrace
+            .GroupBy(p => RoundTo10(p.DistanceM))
+            .Select(g => g.Last())
+            .OrderBy(p => p.DistanceM)
+            .ToList();
+        var compareTrace = cmpTrace
+            .GroupBy(p => RoundTo10(p.DistanceM))
+            .Select(g => g.Last())
+            .OrderBy(p => p.DistanceM)
+            .ToList();
         var result = new List<ScreenDeviationPoint>();
-        foreach (var bin in refByBin.Keys.Intersect(cmpByBin.Keys).OrderBy(x => x))
+        foreach (var r in referenceTrace)
         {
-            var r = refByBin[bin];
-            var c = cmpByBin[bin];
-            var reference = mapRaw(r.X, r.Z);
-            var compare = mapRaw(c.X, c.Z);
-            var dx = compare.X - reference.X;
-            var dy = compare.Y - reference.Y;
-            var offsetMeters = Math.Sqrt(Math.Pow(c.X - r.X, 2) + Math.Pow(c.Z - r.Z, 2));
+            var compareX = DistanceSeriesInterpolator.Linear(compareTrace, r.DistanceM, p => p.DistanceM, p => p.X);
+            var compareZ = DistanceSeriesInterpolator.Linear(compareTrace, r.DistanceM, p => p.DistanceM, p => p.Z);
+            if (compareX is null || compareZ is null) continue;
+            var bin = RoundTo10(r.DistanceM);
+            var referencePoint = mapRaw(r.X, r.Z);
+            var comparePoint = mapRaw(compareX.Value, compareZ.Value);
+            var dx = comparePoint.X - referencePoint.X;
+            var dy = comparePoint.Y - referencePoint.Y;
+            var offsetMeters = Math.Sqrt(Math.Pow(compareX.Value - r.X, 2) + Math.Pow(compareZ.Value - r.Z, 2));
             var offsetPixels = Math.Sqrt(dx * dx + dy * dy);
-            result.Add(new ScreenDeviationPoint(bin, reference, compare, offsetMeters, offsetPixels));
+            result.Add(new ScreenDeviationPoint(bin, referencePoint, comparePoint, offsetMeters, offsetPixels));
         }
         return result;
     }

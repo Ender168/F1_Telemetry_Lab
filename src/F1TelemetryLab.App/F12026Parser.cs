@@ -14,7 +14,11 @@ public static class F12026Parser
     private const int MotionSize2026 = 54;
     private const int CarStatusSize2026 = 59;
     private const int CarDamageSize2026 = 46;
+    private const int CarSetupSize2026 = 50;
     private const int ParticipantSize2026 = 60;
+    private const int FinalClassificationSize2026 = 46;
+    private const int TyreSetSize2026 = 10;
+    private const int MaxTyreSets2026 = 20;
 
     public static bool TryParseHeader(ReadOnlySpan<byte> data, out PacketHeader header)
     {
@@ -44,14 +48,14 @@ public static class F12026Parser
         }
     }
 
-    public static List<CarTelemetrySample> ParseCarTelemetryPacket(ReadOnlySpan<byte> data, DateTimeOffset receivedAt)
+    public static List<CarTelemetrySample> ParseCarTelemetryPacket(ReadOnlySpan<byte> data, DateTimeOffset receivedAt, int? activeCars = null)
     {
         var samples = new List<CarTelemetrySample>(MaxCars2026);
         if (!TryParseHeader(data, out var h)) return samples;
         if (h.PacketFormat != 2026 || h.PacketId != 6) return samples;
 
         var offset = HeaderSize;
-        for (var i = 0; i < MaxCars2026; i++)
+        for (var i = 0; i < ParseCarCount(activeCars, h); i++)
         {
             if (offset + CarTelemetrySize2026 > data.Length) break;
             var c = data.Slice(offset, CarTelemetrySize2026);
@@ -65,7 +69,7 @@ public static class F12026Parser
 
             if (speed <= 450 && throttle >= -0.01f && throttle <= 1.01f && brake >= -0.01f && brake <= 1.01f && steer >= -1.1f && steer <= 1.1f)
             {
-                samples.Add(new CarTelemetrySample(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.PlayerCarIndex, i,
+                samples.Add(new CarTelemetrySample(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.OverallFrameIdentifier, h.PlayerCarIndex, i,
                     h.PlayerCarIndex == i, speed, throttle, brake, steer, gear, rpm, drs));
             }
             offset += CarTelemetrySize2026;
@@ -74,14 +78,70 @@ public static class F12026Parser
         return samples;
     }
 
-    public static List<LapDataSample> ParseLapDataPacket(ReadOnlySpan<byte> data, DateTimeOffset receivedAt)
+    public static List<CarSetupSample> ParseCarSetupPacket(ReadOnlySpan<byte> data, DateTimeOffset receivedAt, int? activeCars = null)
+    {
+        var samples = new List<CarSetupSample>(MaxCars2026);
+        if (!TryParseHeader(data, out var h)) return samples;
+        if (h.PacketFormat != AppInfo.SupportedPacketFormat || h.PacketId != 5) return samples;
+
+        var fullSetupArrayEnd = HeaderSize + CarSetupSize2026 * MaxCars2026;
+        if (data.Length < fullSetupArrayEnd) return samples;
+        var nextFrontWing = data.Length >= fullSetupArrayEnd + sizeof(float)
+            ? F32(data, fullSetupArrayEnd)
+            : (float?)null;
+
+        var offset = HeaderSize;
+        for (var i = 0; i < ParseCarCount(activeCars, h); i++)
+        {
+            if (offset + CarSetupSize2026 > data.Length) break;
+            var c = data.Slice(offset, CarSetupSize2026);
+            samples.Add(new CarSetupSample(
+                receivedAt,
+                h.SessionUid,
+                h.SessionTime,
+                h.FrameIdentifier,
+                h.OverallFrameIdentifier,
+                h.PlayerCarIndex,
+                i,
+                h.PlayerCarIndex == i,
+                c[0],
+                c[1],
+                c[2],
+                c[3],
+                F32(c, 4),
+                F32(c, 8),
+                F32(c, 12),
+                F32(c, 16),
+                c[20],
+                c[21],
+                c[22],
+                c[23],
+                c[24],
+                c[25],
+                c[26],
+                c[27],
+                c[28],
+                F32(c, 29),
+                F32(c, 33),
+                F32(c, 37),
+                F32(c, 41),
+                c[45],
+                F32(c, 46),
+                h.PlayerCarIndex == i ? nextFrontWing : null));
+            offset += CarSetupSize2026;
+        }
+
+        return samples;
+    }
+
+    public static List<LapDataSample> ParseLapDataPacket(ReadOnlySpan<byte> data, DateTimeOffset receivedAt, int? activeCars = null)
     {
         var samples = new List<LapDataSample>(MaxCars2026);
         if (!TryParseHeader(data, out var h)) return samples;
         if (h.PacketFormat != 2026 || h.PacketId != 2) return samples;
 
         var offset = HeaderSize;
-        for (var i = 0; i < MaxCars2026; i++)
+        for (var i = 0; i < ParseCarCount(activeCars, h); i++)
         {
             if (offset + LapDataSize2026 > data.Length) break;
             var c = data.Slice(offset, LapDataSize2026);
@@ -110,7 +170,7 @@ public static class F12026Parser
             p += 2; // pit lane time ms
             p += 2; // pit stop timer ms
             p += 1; // should serve pen
-            // speed trap fields are not required for v0.2 summary
+            // Speed-trap fields are not part of the current lap summary model.
 
             samples.Add(new LapDataSample(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.OverallFrameIdentifier, h.PlayerCarIndex, i,
                 h.PlayerCarIndex == i, lastLap, currentLap, SectorMs(s1ms, s1min), SectorMs(s2ms, s2min), SectorMs(frontMs, frontMin), SectorMs(leaderMs, leaderMin),
@@ -122,14 +182,14 @@ public static class F12026Parser
         return samples;
     }
 
-    public static List<MotionSample> ParseMotionPacket(ReadOnlySpan<byte> data, DateTimeOffset receivedAt)
+    public static List<MotionSample> ParseMotionPacket(ReadOnlySpan<byte> data, DateTimeOffset receivedAt, int? activeCars = null)
     {
         var samples = new List<MotionSample>(MaxCars2026);
         if (!TryParseHeader(data, out var h)) return samples;
         if (h.PacketFormat != 2026 || h.PacketId != 0) return samples;
 
         var offset = HeaderSize;
-        for (var i = 0; i < MaxCars2026; i++)
+        for (var i = 0; i < ParseCarCount(activeCars, h); i++)
         {
             if (offset + MotionSize2026 > data.Length) break;
             var c = data.Slice(offset, MotionSize2026);
@@ -139,29 +199,29 @@ public static class F12026Parser
             var gLong = I16(c, 38) / 1000f;
             var gVert = I16(c, 40) / 1000f;
             var yaw = F32(c, 42); var pitch = F32(c, 46); var roll = F32(c, 50);
-            samples.Add(new MotionSample(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.PlayerCarIndex, i, h.PlayerCarIndex == i,
+            samples.Add(new MotionSample(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.OverallFrameIdentifier, h.PlayerCarIndex, i, h.PlayerCarIndex == i,
                 x, y, z, vx, vy, vz, gLat, gLong, gVert, yaw, pitch, roll));
             offset += MotionSize2026;
         }
         return samples;
     }
 
-    public static List<CarStatusSample> ParseCarStatusPacket(ReadOnlySpan<byte> data, DateTimeOffset receivedAt)
+    public static List<CarStatusSample> ParseCarStatusPacket(ReadOnlySpan<byte> data, DateTimeOffset receivedAt, int? activeCars = null)
     {
         var samples = new List<CarStatusSample>(MaxCars2026);
         if (!TryParseHeader(data, out var h)) return samples;
         if (h.PacketFormat != 2026 || h.PacketId != 7) return samples;
 
         var offset = HeaderSize;
-        for (var i = 0; i < MaxCars2026; i++)
+        for (var i = 0; i < ParseCarCount(activeCars, h); i++)
         {
             if (offset + CarStatusSize2026 > data.Length) break;
             var c = data.Slice(offset, CarStatusSize2026);
             var frontBrakeBias = c[3];
             var fuelInTank = F32(c, 5);
             var fuelRemainingLaps = F32(c, 13);
-            // F1 25 2026 Season Pack CarStatusData includes uint16 m_drsActivationDistance at bytes 23-24.
-            // Everything after it starts at byte 25. Reading from byte 24 turns ERS into comedy-grade nonsense.
+            // The 2026 CarStatusData layout includes uint16 m_drsActivationDistance at bytes 23-24.
+            // All tyre and ERS fields therefore begin at byte 25.
             var actualTyreCompound = c[25];
             var visualTyreCompound = c[26];
             var tyreAge = unchecked((sbyte)c[27]);
@@ -173,21 +233,22 @@ public static class F12026Parser
             var harvestMguh = F32(c, 46);
             var harvestLimit = F32(c, 50);
             var deployed = F32(c, 54);
-            samples.Add(new CarStatusSample(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.PlayerCarIndex, i, h.PlayerCarIndex == i,
-                frontBrakeBias, fuelInTank, fuelRemainingLaps, actualTyreCompound, visualTyreCompound, tyreAge, ice, mguk, ers, ersMode, harvestMguk, harvestMguh, harvestLimit, deployed));
+            var networkPaused = c[58] != 0;
+            samples.Add(new CarStatusSample(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.OverallFrameIdentifier, h.PlayerCarIndex, i, h.PlayerCarIndex == i,
+                frontBrakeBias, fuelInTank, fuelRemainingLaps, actualTyreCompound, visualTyreCompound, tyreAge, ice, mguk, ers, ersMode, harvestMguk, harvestMguh, harvestLimit, deployed, networkPaused));
             offset += CarStatusSize2026;
         }
         return samples;
     }
 
-    public static List<CarDamageSample> ParseCarDamagePacket(ReadOnlySpan<byte> data, DateTimeOffset receivedAt)
+    public static List<CarDamageSample> ParseCarDamagePacket(ReadOnlySpan<byte> data, DateTimeOffset receivedAt, int? activeCars = null)
     {
         var samples = new List<CarDamageSample>(MaxCars2026);
         if (!TryParseHeader(data, out var h)) return samples;
         if (h.PacketFormat != 2026 || h.PacketId != 10) return samples;
 
         var offset = HeaderSize;
-        for (var i = 0; i < MaxCars2026; i++)
+        for (var i = 0; i < ParseCarCount(activeCars, h); i++)
         {
             if (offset + CarDamageSize2026 > data.Length) break;
             var c = data.Slice(offset, CarDamageSize2026);
@@ -195,11 +256,45 @@ public static class F12026Parser
             var avg = (rl + rr + fl + fr) / 4f;
             var tyreDmgRl = c[16]; var tyreDmgRr = c[17]; var tyreDmgFl = c[18]; var tyreDmgFr = c[19];
             var wingFl = c[28]; var wingFr = c[29]; var rearWing = c[30]; var floor = c[31]; var diffuser = c[32]; var sidepod = c[33];
-            samples.Add(new CarDamageSample(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.PlayerCarIndex, i, h.PlayerCarIndex == i,
+            samples.Add(new CarDamageSample(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.OverallFrameIdentifier, h.PlayerCarIndex, i, h.PlayerCarIndex == i,
                 rl, rr, fl, fr, avg, tyreDmgRl, tyreDmgRr, tyreDmgFl, tyreDmgFr, wingFl, wingFr, rearWing, floor, diffuser, sidepod));
             offset += CarDamageSize2026;
         }
         return samples;
+    }
+
+    public static TyreSetPacketSample? ParseTyreSetsPacket(ReadOnlySpan<byte> data, DateTimeOffset receivedAt)
+    {
+        if (!TryParseHeader(data, out var h) || h.PacketFormat != AppInfo.SupportedPacketFormat || h.PacketId != 12) return null;
+        if (data.Length < HeaderSize + 1 + MaxTyreSets2026 * TyreSetSize2026 + 1) return null;
+        var carIndex = data[HeaderSize];
+        if (carIndex >= MaxCars2026) return null;
+        var baseOffset = HeaderSize + 1;
+        var sets = new List<TyreSetInfo>(MaxTyreSets2026);
+        for (var i = 0; i < MaxTyreSets2026; i++)
+        {
+            var row = data.Slice(baseOffset + i * TyreSetSize2026, TyreSetSize2026);
+            sets.Add(new TyreSetInfo(
+                i,
+                row[0],
+                row[1],
+                row[2],
+                row[3] != 0,
+                row[4],
+                row[5],
+                row[6],
+                I16(row, 7),
+                row[9] != 0));
+        }
+
+        return new TyreSetPacketSample(
+            receivedAt,
+            h.SessionUid,
+            h.OverallFrameIdentifier,
+            carIndex,
+            h.PlayerCarIndex == carIndex,
+            data[baseOffset + MaxTyreSets2026 * TyreSetSize2026],
+            sets);
     }
 
     public static EventSample? ParseEventPacket(ReadOnlySpan<byte> data, DateTimeOffset receivedAt)
@@ -253,10 +348,12 @@ public static class F12026Parser
                 other = data[offset + 1];
                 details["vehicle1_idx"] = vehicle;
                 details["vehicle2_idx"] = other;
+                if (offset + 3 <= data.Length) details["severity"] = data[offset + 2];
             }
-            else if (code == "FLBK")
+            else if (code == "FLBK" && offset + 8 <= data.Length)
             {
-                details["note"] = "Flashback/Rewind event";
+                details["flashback_frame_identifier"] = U32(data, offset);
+                details["flashback_session_time"] = F32(data, offset + 4);
             }
         }
         catch
@@ -265,7 +362,7 @@ public static class F12026Parser
         }
 
         var json = JsonSerializer.Serialize(details);
-        return new EventSample(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.PlayerCarIndex, code, name, vehicle, other, json);
+        return new EventSample(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.OverallFrameIdentifier, h.PlayerCarIndex, code, name, vehicle, other, json);
     }
 
     public static List<ParticipantSample> ParseParticipantsPacket(ReadOnlySpan<byte> data, DateTimeOffset receivedAt)
@@ -274,29 +371,40 @@ public static class F12026Parser
         if (!TryParseHeader(data, out var h)) return samples;
         if (h.PacketFormat != 2026 || h.PacketId != 4) return samples;
 
-        var offset = HeaderSize + 1; // m_numActiveCars
-        if (data.Length <= offset) return samples;
-
-        // F1 25 public spec uses 22 participant entries, while some 2026 packets use 24 car slots.
-        // Career/2026 modes may expose 24 participant rows. Read by actual packet length and validate names later,
-        // instead of worshipping a magic number like a spreadsheet cult.
+        if (data.Length <= HeaderSize) return samples;
+        var activeCars = data[HeaderSize];
+        var offset = HeaderSize + 1;
         var available = Math.Max(0, (data.Length - offset) / ParticipantSize2026);
-        var count = Math.Clamp(available, 0, MaxCars2026);
+        var count = Math.Min(MaxCars2026, available);
 
         for (var i = 0; i < count; i++)
         {
             if (offset + ParticipantSize2026 > data.Length) break;
             var c = data.Slice(offset, ParticipantSize2026);
-            var driverId = c[1];
-            var name = DecodeName(c.Slice(10, 48));
-            // Do not auto-map F1 Generic by driver_id here. In the 2026 Season Pack participant layout can differ
-            // between modes and our current parser may read driver_id from the wrong byte. Wrong famous names are
-            // worse than honest generic labels; aliases/short codes are the reliable layer.
-            // In the 2026 Season Pack the ParticipantData row observed in real packets is 60 bytes.
-            // The displayed driver name starts at byte 10 and uses 48 bytes.
-            // A previous 58-byte layout read shifted bytes and turned HULKENBERG/PIASTRI/etc into F1 Generic,
-            // which is exactly the sort of tiny offset error that makes humans blame the game.
-            samples.Add(new ParticipantSample(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, i, c[0], driverId, c[3], c[5], name, c[58], c[59]));
+            var driverId = U16(c, 1);
+            var teamId = U16(c, 5);
+            var name = DecodeName(c.Slice(10, 32));
+            var expectedActive = i < activeCars;
+            var isPlayerSlot = h.PlayerCarIndex == i || h.SecondaryPlayerCarIndex == i;
+            if (!expectedActive && !isPlayerSlot && !HasAnyNonZero(c))
+            {
+                offset += ParticipantSize2026;
+                continue;
+            }
+            samples.Add(new ParticipantSample(
+                receivedAt,
+                h.SessionUid,
+                h.SessionTime,
+                h.FrameIdentifier,
+                h.OverallFrameIdentifier,
+                i,
+                c[0],
+                driverId,
+                teamId,
+                c[8],
+                name,
+                c[42],
+                c[43]));
             offset += ParticipantSize2026;
         }
         return samples;
@@ -309,18 +417,62 @@ public static class F12026Parser
         if (h.PacketFormat != 2026 || h.PacketId != 4) return null;
         var active = data.Length > HeaderSize ? data[HeaderSize] : 0;
         var payload = Math.Max(0, data.Length - HeaderSize - 1);
-        var rows58 = payload / 60;
-        var rows57 = payload / 58;
+        var rows60 = payload / 60;
+        var rows58 = payload / 58;
         var firstNames = new List<string>();
         var offset = HeaderSize + 1;
-        for (var i = 0; i < Math.Min(rows58, 8); i++)
+        for (var i = 0; i < Math.Min(rows60, 8); i++)
         {
             if (offset + 60 > data.Length) break;
-            var raw = data.Slice(offset + 10, 48);
+            var raw = data.Slice(offset + 10, 32);
             firstNames.Add(DecodeName(raw));
             offset += 60;
         }
-        return new ParticipantPacketDebug(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, data.Length, active, rows58, rows57, string.Join(" | ", firstNames));
+        return new ParticipantPacketDebug(receivedAt, h.SessionUid, h.SessionTime, h.FrameIdentifier, h.OverallFrameIdentifier, data.Length, active, rows60, rows58, string.Join(" | ", firstNames));
+    }
+
+    public static List<FinalClassificationSample> ParseFinalClassificationPacket(ReadOnlySpan<byte> data, DateTimeOffset receivedAt)
+    {
+        var samples = new List<FinalClassificationSample>(MaxCars2026);
+        if (!TryParseHeader(data, out var h)) return samples;
+        if (h.PacketFormat != AppInfo.SupportedPacketFormat || h.PacketId != 8) return samples;
+        if (data.Length <= HeaderSize) return samples;
+
+        var numCars = Math.Min(data[HeaderSize], (byte)MaxCars2026);
+        var offset = HeaderSize + 1;
+        for (var i = 0; i < MaxCars2026; i++)
+        {
+            if (offset + FinalClassificationSize2026 > data.Length) break;
+            var c = data.Slice(offset, FinalClassificationSize2026);
+            if (i >= numCars && i != h.PlayerCarIndex && c[0] == 0 && c[5] <= 1)
+            {
+                offset += FinalClassificationSize2026;
+                continue;
+            }
+            samples.Add(new FinalClassificationSample(
+                receivedAt,
+                h.SessionUid,
+                h.SessionTime,
+                h.FrameIdentifier,
+                h.OverallFrameIdentifier,
+                i,
+                h.PlayerCarIndex == i,
+                c[0],
+                c[1],
+                c[2],
+                c[3],
+                c[4],
+                c[5],
+                U32(c, 7),
+                F64(c, 11),
+                c[19],
+                c[20],
+                c[21],
+                c[6]));
+            offset += FinalClassificationSize2026;
+        }
+
+        return samples;
     }
 
     public static SessionMetadata? TryParseSessionMetadata(ReadOnlySpan<byte> data, DateTimeOffset startedAt)
@@ -348,12 +500,59 @@ public static class F12026Parser
         };
     }
 
+    public static SessionControlSample? TryParseSessionControl(ReadOnlySpan<byte> data, DateTimeOffset receivedAt)
+    {
+        if (!TryParseHeader(data, out var h)) return null;
+        if (h.PacketFormat != AppInfo.SupportedPacketFormat || h.PacketId != 1) return null;
+
+        // PacketSessionData 2026 keeps the safety-car and network flags after the fixed
+        // 21-element marshal-zone array: payload offsets 124 and 125 respectively.
+        // The ERS assist flag follows 64 eight-byte weather forecast samples and the
+        // intervening fixed fields at payload offset 661. A short diagnostic fixture
+        // can omit that tail, in which case -1 means "not observed".
+        const int minimumPayloadSize = 126;
+        if (data.Length < HeaderSize + minimumPayloadSize) return null;
+        var payload = data.Slice(HeaderSize);
+        return new SessionControlSample(
+            receivedAt,
+            h.SessionUid,
+            h.SessionTime,
+            payload[0],
+            payload[3],
+            U16(payload, 4),
+            payload[6],
+            unchecked((sbyte)payload[7]),
+            payload[8],
+            payload[14] != 0,
+            payload[15] != 0,
+            payload[124],
+            payload[125] != 0,
+            payload.Length > 661 ? payload[661] : -1);
+    }
+
     private static int SectorMs(ushort msPart, byte minPart) => minPart * 60000 + msPart;
+    private static int ParseCarCount(int? activeCars, PacketHeader header)
+    {
+        // 2026 packets contain fixed 24-element arrays. m_numActiveCars is a count,
+        // not the highest vehicle index: online grids can have holes after disconnects,
+        // so a player at index 21 may remain active while the count is only 20.
+        _ = activeCars;
+        _ = header;
+        return MaxCars2026;
+    }
+
+    private static bool HasAnyNonZero(ReadOnlySpan<byte> value)
+    {
+        foreach (var item in value)
+            if (item != 0) return true;
+        return false;
+    }
     private static ushort U16(ReadOnlySpan<byte> s, int o) => BinaryPrimitives.ReadUInt16LittleEndian(s.Slice(o, 2));
     private static short I16(ReadOnlySpan<byte> s, int o) => BinaryPrimitives.ReadInt16LittleEndian(s.Slice(o, 2));
     private static uint U32(ReadOnlySpan<byte> s, int o) => BinaryPrimitives.ReadUInt32LittleEndian(s.Slice(o, 4));
     private static ulong U64(ReadOnlySpan<byte> s, int o) => BinaryPrimitives.ReadUInt64LittleEndian(s.Slice(o, 8));
     private static float F32(ReadOnlySpan<byte> s, int o) => BitConverter.ToSingle(s.Slice(o, 4));
+    private static double F64(ReadOnlySpan<byte> s, int o) => BitConverter.ToDouble(s.Slice(o, 8));
 
     private static string DecodeName(ReadOnlySpan<byte> raw)
     {
