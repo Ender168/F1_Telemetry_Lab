@@ -24,6 +24,27 @@ public enum ErsTacticalMode
     Defend
 }
 
+public enum ErsTacticalIntensity
+{
+    None,
+    Pressure,
+    Critical
+}
+
+public enum ErsEnergyState
+{
+    Deficit,
+    OnPlan,
+    Surplus
+}
+
+public enum ErsDrsRequirement
+{
+    Any,
+    Active,
+    Inactive
+}
+
 public enum ErsRuleCondition
 {
     Always,
@@ -32,8 +53,16 @@ public enum ErsRuleCondition
     Neutral,
     Attack,
     Defend,
+    AttackPressure,
+    AttackCritical,
+    DefendPressure,
+    DefendCritical,
     Battle,
     HighBattery,
+    EnergyDeficit,
+    EnergySurplus,
+    ClosingLaps,
+    FinalLap,
     AttackOrHighBattery,
     DefendOrHighBattery,
     BattleOrHighBattery
@@ -109,10 +138,44 @@ public sealed class ErsControlProfile
     public int DefendPriorityMarginMs { get; set; } = 200;
 
     public int MinimumControlSpeedKph { get; set; } = 30;
+    public ErsTacticalPlan? Tactical { get; set; }
+    public ErsEnergyPlan? EnergyPlan { get; set; }
     public List<ErsControlRule> Rules { get; set; } = new();
 
     [JsonIgnore]
     public string SourcePath { get; set; } = "";
+}
+
+public sealed class ErsTacticalPlan
+{
+    public int AttackPressureGapMs { get; set; } = 1_800;
+    public int AttackCriticalGapMs { get; set; } = 900;
+    public int DefendPressureGapMs { get; set; } = 1_500;
+    public int DefendCriticalGapMs { get; set; } = 700;
+    public int ExitMarginMs { get; set; } = 250;
+    public int DefendPriorityMarginMs { get; set; } = 200;
+    public int ClosingRateWindowMs { get; set; } = 3_000;
+    public double RapidClosingRateMsPerSecond { get; set; } = -80;
+    public int ClosingRateGapExtensionMs { get; set; } = 400;
+}
+
+public sealed class ErsEnergyPlan
+{
+    public double TargetTolerancePct { get; set; } = 3;
+    public double SurplusReleasePct { get; set; } = 8;
+    public double LowValueReservePct { get; set; } = 10;
+    public int ClosingLaps { get; set; } = 3;
+    public bool FinalLapRelease { get; set; } = true;
+    public double FinalLapFloorPct { get; set; } = 8;
+    public List<ErsEnergyCheckpoint> Checkpoints { get; set; } = new();
+}
+
+public sealed class ErsEnergyCheckpoint
+{
+    public string Id { get; set; } = "";
+    public double DistanceM { get; set; }
+    public double TargetPct { get; set; }
+    public double MinimumPct { get; set; }
 }
 
 public sealed class ErsControlRule
@@ -130,6 +193,13 @@ public sealed class ErsControlRule
     public int? MinimumSpeedKph { get; set; }
     public int? MaximumActiveMs { get; set; }
     public bool OncePerLap { get; set; }
+    public double DeploymentValue { get; set; } = 1;
+    public double? MinimumEnergySurplusPct { get; set; }
+    public double? FinalLapMinimumBatteryPct { get; set; }
+    public ErsDrsRequirement DrsRequirement { get; set; } = ErsDrsRequirement.Any;
+    public int? MinimumLapNumber { get; set; }
+    public int? MaximumLapsRemaining { get; set; }
+    public int? MinimumLapsRemaining { get; set; }
 }
 
 public sealed record ErsControlState(
@@ -163,6 +233,14 @@ public sealed record ErsControlState(
     public bool InDefendRange(int thresholdMs) => GapBehindMs is > 0 && GapBehindMs <= thresholdMs;
 
     public bool InBattle(int thresholdMs) => InAttackRange(thresholdMs) || InDefendRange(thresholdMs);
+
+    public int TotalLaps { get; init; }
+
+    public bool DrsActive { get; init; }
+
+    public int? LapsRemaining => TotalLaps > 0 && LapNumber > 0
+        ? Math.Max(0, TotalLaps - LapNumber + 1)
+        : null;
 }
 
 public sealed record ErsControlDecision(

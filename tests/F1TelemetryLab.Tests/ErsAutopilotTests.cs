@@ -300,10 +300,10 @@ public sealed class ErsAutopilotTests
 
         Assert.Empty(loaded.Warnings);
         var profile = Assert.Single(loaded.Profiles);
-        Assert.Equal("china-race-r03-v1", profile.ProfileId);
+        Assert.Equal("china-race-advanced-v2", profile.ProfileId);
         Assert.Equal(2, profile.TrackId);
         Assert.Equal(new[] { 15, 16, 17 }, profile.SessionTypes);
-        Assert.Contains(profile.Rules, rule => rule.Id == "t13-main-boost" && rule.TargetMode == ErsDeployMode.Boost);
+        Assert.Contains(profile.Rules, rule => rule.Id == "t13-attack-critical-no-drs" && rule.TargetMode == ErsDeployMode.Boost);
     }
 
     private static ErsControlProfile ChinaProfile() => new()

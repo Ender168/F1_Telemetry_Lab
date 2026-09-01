@@ -216,7 +216,11 @@ public sealed class ErsAutopilotService : IDisposable
             gapAhead,
             gapBehind,
             string.IsNullOrEmpty(block),
-            block);
+            block)
+        {
+            TotalLaps = _session.TotalLaps,
+            DrsActive = _telemetry?.Drs == 1
+        };
     }
 
     private string BlockReason(DateTimeOffset now)

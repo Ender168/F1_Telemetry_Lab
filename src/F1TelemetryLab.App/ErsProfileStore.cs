@@ -18,7 +18,8 @@ public sealed record ErsProfileLoadResult(
 public static class ErsProfileStore
 {
     private const string DefaultChinaFileName = "China_Race.json";
-    private const string BuiltInChinaProfileId = "china-race-r03-v1";
+    private const string BuiltInChinaProfileId = "china-race-advanced-v2";
+    private const string LegacyBuiltInChinaProfileId = "china-race-r03-v1";
     private const string ProfileReadmeFileName = "README.md";
     private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
 
@@ -126,11 +127,12 @@ public static class ErsProfileStore
             var installed = JsonSerializer.Deserialize<ErsControlProfile>(File.ReadAllText(source), JsonOptions);
             var existing = JsonSerializer.Deserialize<ErsControlProfile>(File.ReadAllText(target), JsonOptions);
             if (installed is null || existing is null) return;
-            if (!string.Equals(installed.ProfileId, BuiltInChinaProfileId, StringComparison.Ordinal) ||
-                !string.Equals(existing.ProfileId, BuiltInChinaProfileId, StringComparison.Ordinal)) return;
+            if (!string.Equals(installed.ProfileId, BuiltInChinaProfileId, StringComparison.Ordinal)) return;
+            if (!string.Equals(existing.ProfileId, BuiltInChinaProfileId, StringComparison.Ordinal) &&
+                !string.Equals(existing.ProfileId, LegacyBuiltInChinaProfileId, StringComparison.Ordinal)) return;
             if (installed.ProfileRevision <= existing.ProfileRevision) return;
 
-            var backup = target + ".pre-0.10.1.bak";
+            var backup = target + ".pre-0.10.2.bak";
             if (!File.Exists(backup)) File.Copy(target, backup);
             File.Copy(source, target, overwrite: true);
         }
@@ -142,7 +144,7 @@ public static class ErsProfileStore
 
     private static void Validate(ErsControlProfile profile)
     {
-        if (profile.SchemaVersion != 1) throw new InvalidDataException($"Unsupported schema_version {profile.SchemaVersion}.");
+        if (profile.SchemaVersion is < 1 or > 2) throw new InvalidDataException($"Unsupported schema_version {profile.SchemaVersion}.");
         if (profile.ProfileRevision <= 0) throw new InvalidDataException("profile_revision must be positive.");
         if (string.IsNullOrWhiteSpace(profile.ProfileId)) throw new InvalidDataException("profile_id is required.");
         if (profile.TrackId < 0) throw new InvalidDataException("track_id must be non-negative.");
@@ -167,6 +169,12 @@ public static class ErsProfileStore
         if (profile.SessionTypes.Any(value => value is < 0 or > byte.MaxValue))
             throw new InvalidDataException("session_types values must fit in one byte.");
 
+        if (profile.SchemaVersion == 2)
+        {
+            ValidateTacticalPlan(profile);
+            ValidateEnergyPlan(profile);
+        }
+
         var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var rule in profile.Rules)
         {
@@ -180,6 +188,69 @@ public static class ErsProfileStore
                 throw new InvalidDataException($"Rule {rule.Id} minimum_speed_kph must be non-negative.");
             if (rule.MaximumActiveMs is <= 0)
                 throw new InvalidDataException($"Rule {rule.Id} maximum_active_ms must be positive when supplied.");
+            if (rule.DeploymentValue is < 0 or > 1)
+                throw new InvalidDataException($"Rule {rule.Id} deployment_value must be between 0 and 1.");
+            if (rule.MinimumEnergySurplusPct is < -100 or > 100)
+                throw new InvalidDataException($"Rule {rule.Id} minimum_energy_surplus_pct must be between -100 and 100.");
+            if (rule.FinalLapMinimumBatteryPct is < 0 or > 100)
+                throw new InvalidDataException($"Rule {rule.Id} final_lap_minimum_battery_pct must be between 0 and 100.");
+            if (rule.MinimumLapNumber is <= 0)
+                throw new InvalidDataException($"Rule {rule.Id} minimum_lap_number must be positive when supplied.");
+            if (rule.MaximumLapsRemaining is <= 0 || rule.MinimumLapsRemaining is <= 0)
+                throw new InvalidDataException($"Rule {rule.Id} laps-remaining limits must be positive when supplied.");
+            if (rule.MinimumLapsRemaining is not null && rule.MaximumLapsRemaining is not null &&
+                rule.MinimumLapsRemaining > rule.MaximumLapsRemaining)
+                throw new InvalidDataException($"Rule {rule.Id} minimum_laps_remaining must not exceed maximum_laps_remaining.");
+        }
+    }
+
+    private static void ValidateTacticalPlan(ErsControlProfile profile)
+    {
+        var plan = profile.Tactical ?? throw new InvalidDataException("schema_version 2 requires tactical.");
+        if (plan.AttackCriticalGapMs <= 0 || plan.AttackPressureGapMs <= 0 ||
+            plan.DefendCriticalGapMs <= 0 || plan.DefendPressureGapMs <= 0)
+            throw new InvalidDataException("Tactical gap thresholds must be positive.");
+        if (plan.AttackCriticalGapMs >= plan.AttackPressureGapMs)
+            throw new InvalidDataException("attack_critical_gap_ms must be below attack_pressure_gap_ms.");
+        if (plan.DefendCriticalGapMs >= plan.DefendPressureGapMs)
+            throw new InvalidDataException("defend_critical_gap_ms must be below defend_pressure_gap_ms.");
+        if (plan.ExitMarginMs < 0 || plan.DefendPriorityMarginMs < 0 ||
+            plan.ClosingRateGapExtensionMs < 0)
+            throw new InvalidDataException("Tactical margins must be non-negative.");
+        if (plan.ClosingRateWindowMs < 500)
+            throw new InvalidDataException("closing_rate_window_ms must be at least 500.");
+        if (plan.RapidClosingRateMsPerSecond >= 0)
+            throw new InvalidDataException("rapid_closing_rate_ms_per_second must be negative.");
+    }
+
+    private static void ValidateEnergyPlan(ErsControlProfile profile)
+    {
+        var plan = profile.EnergyPlan ?? throw new InvalidDataException("schema_version 2 requires energy_plan.");
+        if (plan.Checkpoints.Count < 2)
+            throw new InvalidDataException("energy_plan.checkpoints must contain at least two points.");
+        if (plan.TargetTolerancePct < 0 || plan.SurplusReleasePct < 0 || plan.LowValueReservePct < 0)
+            throw new InvalidDataException("Energy-plan tolerances must be non-negative.");
+        if (plan.ClosingLaps <= 0)
+            throw new InvalidDataException("energy_plan.closing_laps must be positive.");
+        if (plan.FinalLapFloorPct is < 0 or > 100)
+            throw new InvalidDataException("energy_plan.final_lap_floor_pct must be between 0 and 100.");
+
+        var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var distances = new HashSet<double>();
+        foreach (var point in plan.Checkpoints)
+        {
+            if (string.IsNullOrWhiteSpace(point.Id))
+                throw new InvalidDataException("Every energy checkpoint needs an id.");
+            if (!ids.Add(point.Id))
+                throw new InvalidDataException($"Duplicate energy checkpoint id: {point.Id}.");
+            if (!distances.Add(point.DistanceM))
+                throw new InvalidDataException($"Duplicate energy checkpoint distance: {point.DistanceM}.");
+            if (point.DistanceM < 0 || point.DistanceM >= profile.TrackLengthM)
+                throw new InvalidDataException($"Energy checkpoint {point.Id} is outside the configured track length.");
+            if (point.TargetPct is < 0 or > 100 || point.MinimumPct is < 0 or > 100)
+                throw new InvalidDataException($"Energy checkpoint {point.Id} has a percentage outside 0-100.");
+            if (point.MinimumPct > point.TargetPct)
+                throw new InvalidDataException($"Energy checkpoint {point.Id} minimum_pct must not exceed target_pct.");
         }
     }
 
