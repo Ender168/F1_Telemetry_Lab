@@ -132,7 +132,7 @@ public static class ErsProfileStore
                 !string.Equals(existing.ProfileId, LegacyBuiltInChinaProfileId, StringComparison.Ordinal)) return;
             if (installed.ProfileRevision <= existing.ProfileRevision) return;
 
-            var backup = target + ".pre-0.10.2.bak";
+            var backup = target + ".pre-0.10.3.bak";
             if (!File.Exists(backup)) File.Copy(target, backup);
             File.Copy(source, target, overwrite: true);
         }
@@ -188,6 +188,8 @@ public static class ErsProfileStore
                 throw new InvalidDataException($"Rule {rule.Id} minimum_speed_kph must be non-negative.");
             if (rule.MaximumActiveMs is <= 0)
                 throw new InvalidDataException($"Rule {rule.Id} maximum_active_ms must be positive when supplied.");
+            if (rule.MaximumDeployPct is <= 0 or > 100)
+                throw new InvalidDataException($"Rule {rule.Id} maximum_deploy_pct must be within 0-100 when supplied.");
             if (rule.DeploymentValue is < 0 or > 1)
                 throw new InvalidDataException($"Rule {rule.Id} deployment_value must be between 0 and 1.");
             if (rule.MinimumEnergySurplusPct is < -100 or > 100)
@@ -228,8 +230,13 @@ public static class ErsProfileStore
         var plan = profile.EnergyPlan ?? throw new InvalidDataException("schema_version 2 requires energy_plan.");
         if (plan.Checkpoints.Count < 2)
             throw new InvalidDataException("energy_plan.checkpoints must contain at least two points.");
-        if (plan.TargetTolerancePct < 0 || plan.SurplusReleasePct < 0 || plan.LowValueReservePct < 0)
+        if (plan.TargetTolerancePct < 0 || plan.SurplusReleasePct < 0 || plan.LowValueReservePct < 0 ||
+            plan.ConserveEnterMarginPct < 0 || plan.ConserveExitMarginPct < 0)
             throw new InvalidDataException("Energy-plan tolerances must be non-negative.");
+        if (plan.ConserveExitMarginPct < plan.ConserveEnterMarginPct)
+            throw new InvalidDataException("energy_plan.conserve_exit_margin_pct must not be below conserve_enter_margin_pct.");
+        if (plan.LearningRate is <= 0 or > 1)
+            throw new InvalidDataException("energy_plan.learning_rate must be within 0-1.");
         if (plan.ClosingLaps <= 0)
             throw new InvalidDataException("energy_plan.closing_laps must be positive.");
         if (plan.FinalLapFloorPct is < 0 or > 100)

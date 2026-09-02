@@ -15,11 +15,14 @@ public sealed class ErsAdvancedProfileTests
         var profile = Assert.Single(loaded.Profiles);
         Assert.Equal(2, profile.SchemaVersion);
         Assert.Equal("china-race-advanced-v2", profile.ProfileId);
+        Assert.Equal(4, profile.ProfileRevision);
         Assert.NotNull(profile.Tactical);
         Assert.NotNull(profile.EnergyPlan);
         Assert.True(profile.EnergyPlan!.Checkpoints.Count >= 8);
         Assert.Contains(profile.Rules, rule => rule.Condition == ErsRuleCondition.FinalLap);
         Assert.Contains(profile.Rules, rule => rule.DrsRequirement == ErsDrsRequirement.Active);
+        Assert.All(profile.Rules.Where(rule => rule.TargetMode > ErsDeployMode.None),
+            rule => Assert.True(rule.MaximumDeployPct > 0));
     }
 
     [Fact]
@@ -38,9 +41,9 @@ public sealed class ErsAdvancedProfileTests
             DeploymentValue = 0.5
         });
         var blockedByBudget = new ErsDecisionEngine(profile).Evaluate(State(distance: 1_500, battery: 34));
-        var allowed = new ErsDecisionEngine(profile).Evaluate(State(distance: 1_500, battery: 36));
+        var allowed = new ErsDecisionEngine(profile).Evaluate(State(distance: 1_500, battery: 44));
 
-        Assert.Equal("default", blockedByBudget.RuleId);
+        Assert.Equal("energy-conserve", blockedByBudget.RuleId);
         Assert.Equal("low-value", allowed.RuleId);
     }
 
@@ -163,7 +166,61 @@ public sealed class ErsAdvancedProfileTests
         var conserve = new ErsDecisionEngine(profile).Evaluate(normalLap);
 
         Assert.Equal("final-release", release.RuleId);
-        Assert.Equal("default", conserve.RuleId);
+        Assert.Equal("energy-conserve", conserve.RuleId);
+    }
+
+    [Fact]
+    public void EnergyBalanceForcesConserveOutsideExplicitRecoveryZones()
+    {
+        var profile = AdvancedProfile();
+        profile.DefaultMode = ErsDeployMode.Medium;
+
+        var decision = new ErsDecisionEngine(profile).Evaluate(State(distance: 1_500, battery: 24));
+
+        Assert.Equal("energy-conserve", decision.RuleId);
+        Assert.Equal(ErsDeployMode.None, decision.TargetMode);
+        Assert.Equal(ErsEnergyState.Conserve, decision.EnergyState);
+        Assert.True(decision.ProjectedNextPct < decision.NextMinimumPct);
+    }
+
+    [Fact]
+    public void DeploymentBudgetStopsAOncePerLapRule()
+    {
+        var profile = AdvancedProfile();
+        profile.Rules.Add(new ErsControlRule
+        {
+            Id = "budgeted",
+            Segment = "budgeted",
+            Priority = 100,
+            StartM = 1_000,
+            EndM = 2_000,
+            TargetMode = ErsDeployMode.Hotlap,
+            Condition = ErsRuleCondition.Always,
+            MaximumDeployPct = 5,
+            OncePerLap = true
+        });
+        var engine = new ErsDecisionEngine(profile);
+        var start = engine.Evaluate(State(distance: 1_500, battery: 60));
+        var stopped = engine.Evaluate(State(at: DateTimeOffset.UnixEpoch.AddSeconds(1), distance: 1_600, battery: 54));
+
+        Assert.Equal("budgeted", start.RuleId);
+        Assert.Equal("default", stopped.RuleId);
+    }
+
+    [Fact]
+    public void SegmentProjectionLearnsFromObservedEnergyDelta()
+    {
+        var profile = AdvancedProfile();
+        var engine = new ErsDecisionEngine(profile);
+        var at = DateTimeOffset.UnixEpoch;
+
+        engine.Evaluate(State(at: at, distance: 1_000, battery: 60));
+        engine.Evaluate(State(at: at.AddSeconds(20), distance: 3_000, battery: 48));
+        engine.Evaluate(State(at: at.AddSeconds(40), distance: 100, battery: 44) with { LapNumber = 6 });
+        var learned = engine.Evaluate(State(at: at.AddSeconds(60), distance: 3_000, battery: 32) with { LapNumber = 6 });
+
+        Assert.Equal("learned", learned.ProjectionSource);
+        Assert.NotEqual(learned.EnergyTargetPct, learned.ProjectedNextPct);
     }
 
     private static ErsControlProfile AdvancedProfile() => new()

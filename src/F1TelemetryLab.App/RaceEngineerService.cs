@@ -29,6 +29,8 @@ public sealed class RaceEngineerService
     private TyreSetPacketSample? _tyreSets;
     private RaceEngineerProfile? _profile;
     private ErsControlProfile? _ersProfile;
+    private ErsAutopilotStatus? _autopilotStatus;
+    private ErsControlDecision? _autopilotDecision;
     private LapAccumulator? _currentLap;
     private ulong _sessionUid;
     private string _lastError = "";
@@ -49,6 +51,12 @@ public sealed class RaceEngineerService
     }
 
     public RaceEngineerSnapshot Snapshot => Volatile.Read(ref _snapshot);
+
+    public void SetAutopilotDecision(ErsAutopilotStatus? status, ErsControlDecision? decision)
+    {
+        _autopilotStatus = status;
+        _autopilotDecision = decision;
+    }
 
     public void ProcessPacket(byte[] payload, DateTimeOffset receivedAt)
     {
@@ -320,6 +328,48 @@ public sealed class RaceEngineerService
         var player = _playerLap;
         if (profile is null || status is null || player is null)
             return RaceEngineerSnapshot.Waiting.Ers;
+
+        if (_autopilotDecision is { } decision)
+        {
+            var aggression = decision.EnergyState switch
+            {
+                ErsEnergyState.Critical => ErsAggressionAdvice.Critical,
+                ErsEnergyState.Conserve => ErsAggressionAdvice.Save,
+                ErsEnergyState.Surplus => ErsAggressionAdvice.Aggressive,
+                _ when decision.TargetMode > ErsDeployMode.Medium => ErsAggressionAdvice.Aggressive,
+                _ => ErsAggressionAdvice.OnPlan
+            };
+            var next = FindNextBoost(player.LapDistance, profile.TrackLengthM);
+            return new ErsRaceAdvice(
+                true,
+                decision.BatteryPct,
+                (int)decision.CurrentMode,
+                decision.EnergyMinimumPct,
+                decision.EnergyTargetPct,
+                aggression,
+                null,
+                decision.Segment,
+                next.Segment,
+                next.DistanceM,
+                AdviceConfidence.High,
+                decision.Reason)
+            {
+                TacticalMode = decision.TacticalMode,
+                TacticalIntensity = decision.TacticalIntensity,
+                EnergyState = decision.EnergyState,
+                TargetMode = decision.TargetMode,
+                RuleId = decision.RuleId,
+                ProjectedNextPct = decision.ProjectedNextPct,
+                NextMinimumPct = decision.NextMinimumPct,
+                NextCheckpointId = decision.NextCheckpointId,
+                ProjectionSource = decision.ProjectionSource,
+                RuleBudgetRemainingPct = decision.RuleBudgetRemainingPct,
+                AutomationState = _autopilotStatus?.State ?? "Decision",
+                GapAheadMs = decision.GapAheadMs,
+                GapBehindMs = decision.GapBehindMs
+            };
+        }
+
         var battery = EnergyPct(status.ErsStoreEnergy, profile.ErsBatteryCapacityJ);
         var band = profile.EnergyBand(player.LapDistance);
         var gapAhead = player.DeltaToCarInFrontMs;
@@ -427,6 +477,8 @@ public sealed class RaceEngineerService
         _tyreSets = null;
         _profile = null;
         _ersProfile = null;
+        _autopilotStatus = null;
+        _autopilotDecision = null;
         _currentLap = null;
         _lapRows.Clear();
         _completedLaps.Clear();

@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "profile_revision": 3,
+  "profile_revision": 4,
   "profile_id": "china-race-advanced-v2",
   "display_name": "China advanced race ERS reference",
   "selection_priority": 150,
@@ -36,9 +36,13 @@
     "target_tolerance_pct": 3,
     "surplus_release_pct": 8,
     "low_value_reserve_pct": 12,
+    "conserve_enter_margin_pct": 1,
+    "conserve_exit_margin_pct": 4,
+    "learning_rate": 0.25,
+    "conserve_mode": "none",
     "closing_laps": 3,
     "final_lap_release": true,
-    "final_lap_floor_pct": 10,
+    "final_lap_floor_pct": 12,
     "checkpoints": [
       { "id": "start-finish", "distance_m": 0, "target_pct": 42, "minimum_pct": 30 },
       { "id": "t1-exit", "distance_m": 600, "target_pct": 38, "minimum_pct": 27 },
@@ -76,6 +80,7 @@
       "minimum_throttle_pct": 85,
       "minimum_speed_kph": 150,
       "maximum_active_ms": 6500,
+      "maximum_deploy_pct": 32,
       "once_per_lap": true,
       "deployment_value": 1.0
     },
@@ -93,6 +98,7 @@
       "minimum_throttle_pct": 90,
       "minimum_speed_kph": 150,
       "maximum_active_ms": 3000,
+      "maximum_deploy_pct": 16,
       "once_per_lap": true,
       "deployment_value": 0.95
     },
@@ -109,6 +115,7 @@
       "minimum_throttle_pct": 85,
       "minimum_speed_kph": 150,
       "maximum_active_ms": 5500,
+      "maximum_deploy_pct": 30,
       "once_per_lap": true,
       "deployment_value": 1.0
     },
@@ -125,6 +132,7 @@
       "minimum_throttle_pct": 85,
       "minimum_speed_kph": 150,
       "maximum_active_ms": 5000,
+      "maximum_deploy_pct": 28,
       "once_per_lap": true,
       "deployment_value": 1.0,
       "drs_requirement": "inactive"
@@ -142,6 +150,7 @@
       "minimum_throttle_pct": 90,
       "minimum_speed_kph": 220,
       "maximum_active_ms": 3000,
+      "maximum_deploy_pct": 16,
       "once_per_lap": true,
       "deployment_value": 1.0,
       "drs_requirement": "active"
@@ -159,6 +168,7 @@
       "minimum_throttle_pct": 85,
       "minimum_speed_kph": 150,
       "maximum_active_ms": 5500,
+      "maximum_deploy_pct": 28,
       "once_per_lap": true,
       "deployment_value": 1.0,
       "maximum_laps_remaining": 3,
@@ -177,6 +187,7 @@
       "minimum_throttle_pct": 85,
       "minimum_speed_kph": 150,
       "maximum_active_ms": 5000,
+      "maximum_deploy_pct": 22,
       "once_per_lap": true,
       "deployment_value": 0.95
     },
@@ -193,6 +204,7 @@
       "minimum_throttle_pct": 85,
       "minimum_speed_kph": 150,
       "maximum_active_ms": 5000,
+      "maximum_deploy_pct": 22,
       "once_per_lap": true,
       "deployment_value": 0.95,
       "drs_requirement": "inactive"
@@ -210,6 +222,7 @@
       "minimum_throttle_pct": 90,
       "minimum_speed_kph": 230,
       "maximum_active_ms": 2400,
+      "maximum_deploy_pct": 13,
       "once_per_lap": true,
       "deployment_value": 0.95,
       "drs_requirement": "active"
@@ -228,6 +241,7 @@
       "minimum_throttle_pct": 85,
       "minimum_speed_kph": 150,
       "maximum_active_ms": 5200,
+      "maximum_deploy_pct": 24,
       "once_per_lap": true,
       "deployment_value": 1.0,
       "minimum_lap_number": 2
@@ -245,6 +259,7 @@
       "minimum_throttle_pct": 85,
       "minimum_speed_kph": 150,
       "maximum_active_ms": 5200,
+      "maximum_deploy_pct": 22,
       "once_per_lap": true,
       "deployment_value": 1.0
     },
@@ -261,6 +276,7 @@
       "minimum_throttle_pct": 90,
       "minimum_speed_kph": 150,
       "maximum_active_ms": 2800,
+      "maximum_deploy_pct": 14,
       "once_per_lap": true,
       "deployment_value": 0.9
     },
@@ -277,6 +293,7 @@
       "minimum_throttle_pct": 90,
       "minimum_speed_kph": 150,
       "maximum_active_ms": 2800,
+      "maximum_deploy_pct": 14,
       "once_per_lap": true,
       "deployment_value": 0.9
     },
@@ -293,6 +310,7 @@
       "minimum_throttle_pct": 90,
       "minimum_speed_kph": 150,
       "maximum_active_ms": 2600,
+      "maximum_deploy_pct": 12,
       "once_per_lap": true,
       "deployment_value": 0.85,
       "maximum_laps_remaining": 3,
@@ -311,6 +329,7 @@
       "minimum_throttle_pct": 90,
       "minimum_speed_kph": 150,
       "maximum_active_ms": 2500,
+      "maximum_deploy_pct": 10,
       "once_per_lap": true,
       "deployment_value": 0.85
     },
@@ -327,6 +346,7 @@
       "minimum_throttle_pct": 90,
       "minimum_speed_kph": 150,
       "maximum_active_ms": 2500,
+      "maximum_deploy_pct": 10,
       "once_per_lap": true,
       "deployment_value": 0.85
     },
@@ -344,6 +364,7 @@
       "minimum_throttle_pct": 90,
       "minimum_speed_kph": 150,
       "maximum_active_ms": 2300,
+      "maximum_deploy_pct": 9,
       "once_per_lap": true,
       "deployment_value": 0.8,
       "minimum_lap_number": 2
@@ -361,6 +382,7 @@
       "minimum_throttle_pct": 90,
       "minimum_speed_kph": 120,
       "maximum_active_ms": 1700,
+      "maximum_deploy_pct": 9,
       "once_per_lap": true,
       "deployment_value": 0.6
     },
@@ -377,6 +399,7 @@
       "minimum_throttle_pct": 90,
       "minimum_speed_kph": 120,
       "maximum_active_ms": 1600,
+      "maximum_deploy_pct": 8,
       "once_per_lap": true,
       "deployment_value": 0.55
     },
@@ -393,6 +416,7 @@
       "minimum_throttle_pct": 90,
       "minimum_speed_kph": 120,
       "maximum_active_ms": 1600,
+      "maximum_deploy_pct": 7,
       "once_per_lap": true,
       "deployment_value": 0.55
     },
@@ -409,6 +433,7 @@
       "minimum_throttle_pct": 90,
       "minimum_speed_kph": 120,
       "maximum_active_ms": 1500,
+      "maximum_deploy_pct": 6,
       "once_per_lap": true,
       "deployment_value": 0.5
     },
@@ -426,6 +451,7 @@
       "minimum_throttle_pct": 90,
       "minimum_speed_kph": 120,
       "maximum_active_ms": 1400,
+      "maximum_deploy_pct": 6,
       "once_per_lap": true,
       "deployment_value": 0.45,
       "minimum_lap_number": 2

@@ -77,7 +77,34 @@ public sealed record ErsRaceAdvice(
     string NextBoostSegment,
     int? DistanceToNextBoostM,
     AdviceConfidence Confidence,
-    string Reason);
+    string Reason)
+{
+    public ErsTacticalMode TacticalMode { get; init; } = ErsTacticalMode.Neutral;
+
+    public ErsTacticalIntensity TacticalIntensity { get; init; } = ErsTacticalIntensity.None;
+
+    public ErsEnergyState EnergyState { get; init; } = ErsEnergyState.Balanced;
+
+    public ErsDeployMode TargetMode { get; init; } = ErsDeployMode.Medium;
+
+    public string RuleId { get; init; } = "";
+
+    public double ProjectedNextPct { get; init; }
+
+    public double NextMinimumPct { get; init; }
+
+    public string NextCheckpointId { get; init; } = "";
+
+    public string ProjectionSource { get; init; } = "profile";
+
+    public double? RuleBudgetRemainingPct { get; init; }
+
+    public string AutomationState { get; init; } = "";
+
+    public int? GapAheadMs { get; init; }
+
+    public int? GapBehindMs { get; init; }
+}
 
 public sealed record RaceEngineerSnapshot(
     DateTimeOffset UpdatedAt,
@@ -173,9 +200,11 @@ public static class RaceEngineerText
             : $"After pit {position} · loss {value.PitLossSeconds:0.0} ± {value.UncertaintySeconds:0.0}s · traffic {traffic}";
     }
 
-    private static string FormatErs(ErsRaceAdvice value, bool russian)
+    public static string FormatErs(ErsRaceAdvice value, bool russian)
     {
         if (!value.Available) return russian ? "Ожидание данных ERS" : "Waiting for ERS data";
+        if (!string.IsNullOrWhiteSpace(value.RuleId))
+            return $"{FormatErsEnergy(value, russian)} · {FormatErsTactical(value, russian)} · {FormatErsAction(value, russian)}";
         var stance = (value.Aggression, russian) switch
         {
             (ErsAggressionAdvice.Critical, true) => "КРИТИЧНО: минимальный расход",
@@ -207,6 +236,56 @@ public static class RaceEngineerText
             _ => russian ? "заряд в целевом коридоре" : "battery is inside the target corridor"
         };
         return $"{value.BatteryPct:0}% · {stance}{duration} · {(russian ? "цель" : "target")} {value.TargetMinPct:0}-{value.TargetMaxPct:0}% · {explanation}{next}";
+    }
+
+    public static string FormatErsEnergy(ErsRaceAdvice value, bool russian)
+    {
+        if (!value.Available) return russian ? "Ожидание данных ERS" : "Waiting for ERS data";
+        var state = value.EnergyState switch
+        {
+            ErsEnergyState.Critical => russian ? "КРИТИЧЕСКИЙ РЕЗЕРВ" : "CRITICAL RESERVE",
+            ErsEnergyState.Conserve => "CONSERVE",
+            ErsEnergyState.Surplus => russian ? "ИЗБЫТОК" : "SURPLUS",
+            _ => russian ? "БАЛАНС" : "BALANCED"
+        };
+        var projection = string.IsNullOrWhiteSpace(value.NextCheckpointId)
+            ? ""
+            : russian
+                ? $" · {value.NextCheckpointId}: прогноз {value.ProjectedNextPct:0}% / минимум {value.NextMinimumPct:0}%"
+                : $" · {value.NextCheckpointId}: projected {value.ProjectedNextPct:0}% / minimum {value.NextMinimumPct:0}%";
+        return russian
+            ? $"{value.BatteryPct:0}% · {state} · коридор {value.TargetMinPct:0}-{value.TargetMaxPct:0}%{projection}"
+            : $"{value.BatteryPct:0}% · {state} · corridor {value.TargetMinPct:0}-{value.TargetMaxPct:0}%{projection}";
+    }
+
+    public static string FormatErsTactical(ErsRaceAdvice value, bool russian)
+    {
+        if (!value.Available) return russian ? "Ожидание ситуации" : "Waiting for race context";
+        var mode = value.TacticalMode.ToString().ToUpperInvariant();
+        var intensity = value.TacticalIntensity == ErsTacticalIntensity.None
+            ? ""
+            : " " + value.TacticalIntensity.ToString().ToUpperInvariant();
+        var ahead = value.GapAheadMs is > 0 ? $"A {value.GapAheadMs.Value / 1000d:0.00}s" : "A --";
+        var behind = value.GapBehindMs is > 0 ? $"D {value.GapBehindMs.Value / 1000d:0.00}s" : "D --";
+        return $"{mode}{intensity} · {ahead} · {behind}";
+    }
+
+    public static string FormatErsAction(ErsRaceAdvice value, bool russian)
+    {
+        if (!value.Available) return russian ? "Ожидание решения" : "Waiting for decision";
+        var budget = value.RuleBudgetRemainingPct is null
+            ? ""
+            : russian
+                ? $" · бюджет {value.RuleBudgetRemainingPct:0.0}%"
+                : $" · budget {value.RuleBudgetRemainingPct:0.0}%";
+        var rule = string.IsNullOrWhiteSpace(value.RuleId) ? "default" : value.RuleId;
+        var current = Enum.IsDefined(typeof(ErsDeployMode), value.CurrentMode)
+            ? ((ErsDeployMode)value.CurrentMode).ToString()
+            : value.CurrentMode.ToString(CultureInfo.InvariantCulture);
+        var automation = string.IsNullOrWhiteSpace(value.AutomationState) ? "" : $" · {value.AutomationState}";
+        return russian
+            ? $"{current} → {value.TargetMode} · {rule}{budget}{automation}"
+            : $"{current} → {value.TargetMode} · {rule}{budget}{automation}";
     }
 
     public static string Compound(int visualCompound) => visualCompound switch

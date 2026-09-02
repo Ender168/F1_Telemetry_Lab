@@ -47,6 +47,7 @@ public sealed class UdpRecorder : IAsyncDisposable
     private RaceEngineerService? _raceEngineer;
     private ErsAutopilotOptions _ersOptions = new() { OperatingMode = ErsAutopilotOperatingMode.Off };
     private ErsAutopilotStatus _lastErsStatus = ErsAutopilotStatus.Initial(ErsAutopilotOperatingMode.Off);
+    private ErsControlDecision? _lastErsDecision;
     private RaceEngineerSnapshot _lastRaceEngineerSnapshot = RaceEngineerSnapshot.Waiting;
     private string _rootFolder = "";
     private string _winRarPath = "";
@@ -66,6 +67,7 @@ public sealed class UdpRecorder : IAsyncDisposable
     public long CarSamplesSeen => Interlocked.Read(ref _carSamplesSeen);
     public IReadOnlyList<LiveCarRow> LiveCars => _liveCars.Values.OrderBy(x => x.CarIndex).ToList();
     public ErsAutopilotStatus ErsStatus => _ersAutopilot?.Status ?? _lastErsStatus;
+    public ErsControlDecision? ErsDecision => _ersAutopilot?.LastDecision ?? _lastErsDecision;
     public RaceEngineerSnapshot RaceEngineer => _raceEngineer?.Snapshot ?? _lastRaceEngineerSnapshot;
     public RecordingQualitySnapshot Quality => new(
         PacketsSeen,
@@ -115,6 +117,7 @@ public sealed class UdpRecorder : IAsyncDisposable
 
             _ersOptions = ersOptions ?? new ErsAutopilotOptions { OperatingMode = ErsAutopilotOperatingMode.Off };
             _lastErsStatus = ErsAutopilotStatus.Initial(_ersOptions.OperatingMode);
+            _lastErsDecision = null;
             var ersProfiles = ErsProfileStore.Load(rootFolder);
             var raceProfiles = RaceEngineerProfileStore.Load(rootFolder);
             _raceEngineer = new RaceEngineerService(
@@ -229,6 +232,7 @@ public sealed class UdpRecorder : IAsyncDisposable
             _writerTask = null;
         }
         _lastErsStatus = _ersAutopilot?.Status ?? _lastErsStatus;
+        _lastErsDecision = _ersAutopilot?.LastDecision ?? _lastErsDecision;
         _lastRaceEngineerSnapshot = _raceEngineer?.Snapshot ?? _lastRaceEngineerSnapshot;
         try { _ersAutopilot?.Dispose(); }
         catch (Exception ex) { Log?.Invoke("ERS audit close warning: " + ex.Message); }
@@ -380,8 +384,9 @@ public sealed class UdpRecorder : IAsyncDisposable
             await foreach (var packet in queue.Reader.ReadAllAsync())
             {
                 Interlocked.Decrement(ref _queueDepth);
-                _raceEngineer?.ProcessPacket(packet.Payload, packet.ReceivedAt);
                 _ersAutopilot?.ProcessPacket(packet.Payload, packet.ReceivedAt);
+                _raceEngineer?.SetAutopilotDecision(_ersAutopilot?.Status, _ersAutopilot?.LastDecision);
+                _raceEngineer?.ProcessPacket(packet.Payload, packet.ReceivedAt);
 
                 var storageDecision = _rawStoragePolicy.Evaluate(packet.Header, packet.Payload, _metadata?.SessionType ?? -1);
                 if (storageDecision == RawPacketStorageDecision.Store)
