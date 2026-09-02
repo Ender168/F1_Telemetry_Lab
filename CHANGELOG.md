@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.4
+
+- Fixed the locked full-screen Race Engineer overlay intercepting mouse input intended for the game or desktop.
+- Added a native Windows `WM_NCHITTEST` pass-through guard in addition to layered transparent window styles.
+- Forced Win32 frame-style refresh when switching between editable and locked overlay states.
+
 ## 0.10.3
 
 ### Continuous Energy Manager

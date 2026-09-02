@@ -30,6 +30,7 @@ public sealed class RaceEngineerOverlayWindow : Window
     private Point _dragPointerStart;
     private Point _dragWidgetStart;
     private bool _editMode;
+    private bool _win32HookInstalled;
     private double _screenWidth = 1920;
     private double _screenHeight = 1080;
 
@@ -63,9 +64,14 @@ public sealed class RaceEngineerOverlayWindow : Window
         Opened += (_, _) =>
         {
             ConfigureForPrimaryScreen();
+            InstallWin32ClickThroughHook();
             SetEditMode(false);
         };
-        Closed += (_, _) => SaveLayout();
+        Closed += (_, _) =>
+        {
+            RemoveWin32ClickThroughHook();
+            SaveLayout();
+        };
         UpdateSnapshot(RaceEngineerSnapshot.Waiting);
     }
 
@@ -89,6 +95,31 @@ public sealed class RaceEngineerOverlayWindow : Window
         {
             SaveLayout();
         }
+    }
+
+    private void InstallWin32ClickThroughHook()
+    {
+        if (_win32HookInstalled || !OperatingSystem.IsWindows()) return;
+        Win32Properties.AddWndProcHookCallback(this, OverlayWndProc);
+        _win32HookInstalled = true;
+    }
+
+    private void RemoveWin32ClickThroughHook()
+    {
+        if (!_win32HookInstalled || !OperatingSystem.IsWindows()) return;
+        Win32Properties.RemoveWndProcHookCallback(this, OverlayWndProc);
+        _win32HookInstalled = false;
+    }
+
+    private IntPtr OverlayWndProc(IntPtr window, uint message, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (!_editMode && message == WindowsOverlayInterop.WmNcHitTest)
+        {
+            handled = true;
+            return WindowsOverlayInterop.HtTransparent;
+        }
+
+        return IntPtr.Zero;
     }
 
     public void UpdateSnapshot(RaceEngineerSnapshot snapshot)
@@ -417,9 +448,18 @@ public sealed class RaceEngineerOverlayWindow : Window
 
 internal static class WindowsOverlayInterop
 {
+    public const uint WmNcHitTest = 0x0084;
+    public static readonly IntPtr HtTransparent = new(-1);
+
     private const int GwlExStyle = -20;
     private const long WsExTransparent = 0x00000020L;
+    private const long WsExLayered = 0x00080000L;
     private const long WsExNoActivate = 0x08000000L;
+    private const uint SwpNoSize = 0x0001;
+    private const uint SwpNoMove = 0x0002;
+    private const uint SwpNoZOrder = 0x0004;
+    private const uint SwpNoActivate = 0x0010;
+    private const uint SwpFrameChanged = 0x0020;
 
     public static void SetClickThrough(Window window, bool enabled)
     {
@@ -428,9 +468,11 @@ internal static class WindowsOverlayInterop
         if (handle is null || !string.Equals(handle.HandleDescriptor, "HWND", StringComparison.OrdinalIgnoreCase)) return;
         var current = GetWindowLongPtr(handle.Handle, GwlExStyle).ToInt64();
         var updated = enabled
-            ? current | WsExTransparent | WsExNoActivate
+            ? current | WsExTransparent | WsExLayered | WsExNoActivate
             : current & ~WsExTransparent & ~WsExNoActivate;
         SetWindowLongPtr(handle.Handle, GwlExStyle, new IntPtr(updated));
+        SetWindowPos(handle.Handle, IntPtr.Zero, 0, 0, 0, 0,
+            SwpNoSize | SwpNoMove | SwpNoZOrder | SwpNoActivate | SwpFrameChanged);
     }
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
@@ -438,4 +480,14 @@ internal static class WindowsOverlayInterop
 
     [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
     private static extern IntPtr SetWindowLongPtr(IntPtr window, int index, IntPtr value);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetWindowPos(
+        IntPtr window,
+        IntPtr insertAfter,
+        int x,
+        int y,
+        int width,
+        int height,
+        uint flags);
 }
