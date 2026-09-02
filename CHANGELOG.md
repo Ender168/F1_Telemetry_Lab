@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.5
+
+- Detached the Race Engineer overlay from the main application window so it stays visible when F1 receives focus.
+- Reasserted the native topmost state without activating the overlay whenever focus moves to the game.
+- Preserved the v0.10.4 mouse click-through safeguards for the locked layout.
+
 ## 0.10.4
 
 - Fixed the locked full-screen Race Engineer overlay intercepting mouse input intended for the game or desktop.

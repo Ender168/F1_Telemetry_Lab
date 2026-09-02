@@ -72,6 +72,10 @@ public sealed class RaceEngineerOverlayWindow : Window
             RemoveWin32ClickThroughHook();
             SaveLayout();
         };
+        Deactivated += (_, _) =>
+        {
+            if (!_editMode) WindowsOverlayInterop.EnsureTopmost(this);
+        };
         UpdateSnapshot(RaceEngineerSnapshot.Waiting);
     }
 
@@ -93,6 +97,8 @@ public sealed class RaceEngineerOverlayWindow : Window
         }
         else
         {
+            Topmost = true;
+            WindowsOverlayInterop.EnsureTopmost(this);
             SaveLayout();
         }
     }
@@ -455,9 +461,9 @@ internal static class WindowsOverlayInterop
     private const long WsExTransparent = 0x00000020L;
     private const long WsExLayered = 0x00080000L;
     private const long WsExNoActivate = 0x08000000L;
+    private static readonly IntPtr HwndTopmost = new(-1);
     private const uint SwpNoSize = 0x0001;
     private const uint SwpNoMove = 0x0002;
-    private const uint SwpNoZOrder = 0x0004;
     private const uint SwpNoActivate = 0x0010;
     private const uint SwpFrameChanged = 0x0020;
 
@@ -471,8 +477,17 @@ internal static class WindowsOverlayInterop
             ? current | WsExTransparent | WsExLayered | WsExNoActivate
             : current & ~WsExTransparent & ~WsExNoActivate;
         SetWindowLongPtr(handle.Handle, GwlExStyle, new IntPtr(updated));
-        SetWindowPos(handle.Handle, IntPtr.Zero, 0, 0, 0, 0,
-            SwpNoSize | SwpNoMove | SwpNoZOrder | SwpNoActivate | SwpFrameChanged);
+        SetWindowPos(handle.Handle, HwndTopmost, 0, 0, 0, 0,
+            SwpNoSize | SwpNoMove | SwpNoActivate | SwpFrameChanged);
+    }
+
+    public static void EnsureTopmost(Window window)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var handle = window.TryGetPlatformHandle();
+        if (handle is null || !string.Equals(handle.HandleDescriptor, "HWND", StringComparison.OrdinalIgnoreCase)) return;
+        SetWindowPos(handle.Handle, HwndTopmost, 0, 0, 0, 0,
+            SwpNoSize | SwpNoMove | SwpNoActivate);
     }
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]

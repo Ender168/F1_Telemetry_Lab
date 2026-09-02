@@ -2169,7 +2169,9 @@ public sealed class MainWindow : Window
             };
         }
         _raceOverlayWindow.UpdateSnapshot(_recorder.RaceEngineer);
-        _raceOverlayWindow.Show(this);
+        // Keep the overlay independent from the main window. A Win32 owned window can be
+        // pushed behind a borderless game when its owner loses focus.
+        _raceOverlayWindow.Show();
         _raceOverlayButton.Content = string.Equals(_settings.Language, "ru", StringComparison.OrdinalIgnoreCase) ? "Скрыть оверлей" : "Hide overlay";
     }
 
