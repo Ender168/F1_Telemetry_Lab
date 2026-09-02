@@ -331,7 +331,7 @@ public sealed class RaceEngineerService
 
         if (_autopilotDecision is { } decision)
         {
-            var aggression = decision.EnergyState switch
+            var decisionAggression = decision.EnergyState switch
             {
                 ErsEnergyState.Critical => ErsAggressionAdvice.Critical,
                 ErsEnergyState.Conserve => ErsAggressionAdvice.Save,
@@ -339,18 +339,18 @@ public sealed class RaceEngineerService
                 _ when decision.TargetMode > ErsDeployMode.Medium => ErsAggressionAdvice.Aggressive,
                 _ => ErsAggressionAdvice.OnPlan
             };
-            var next = FindNextBoost(player.LapDistance, profile.TrackLengthM);
+            var decisionNext = FindNextBoost(player.LapDistance, profile.TrackLengthM);
             return new ErsRaceAdvice(
                 true,
                 decision.BatteryPct,
                 (int)decision.CurrentMode,
                 decision.EnergyMinimumPct,
                 decision.EnergyTargetPct,
-                aggression,
+                decisionAggression,
                 null,
                 decision.Segment,
-                next.Segment,
-                next.DistanceM,
+                decisionNext.Segment,
+                decisionNext.DistanceM,
                 AdviceConfidence.High,
                 decision.Reason)
             {

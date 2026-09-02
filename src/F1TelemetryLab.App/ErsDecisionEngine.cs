@@ -487,7 +487,7 @@ public sealed class ErsDecisionEngine
             reason = "Energy guard downgraded Boost to Hotlap. " + reason;
         }
 
-        var remainingBudget = rule.MaximumDeployPct is null
+        double? remainingBudget = rule.MaximumDeployPct is null
             ? null
             : Math.Max(0, rule.MaximumDeployPct.Value - Math.Max(0, _activeRuleStartBatteryPct - state.BatteryPct));
         return WithContext(new ErsControlDecision(
