@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.10.5
+
+- Detached the Race Engineer overlay from the main application window so it stays visible when F1 receives focus.
+- Reasserted the native topmost state without activating the overlay whenever focus moves to the game.
+- Preserved the v0.10.4 mouse click-through safeguards for the locked layout.
+
+## 0.10.4
+
+- Fixed the locked full-screen Race Engineer overlay intercepting mouse input intended for the game or desktop.
+- Added a native Windows `WM_NCHITTEST` pass-through guard in addition to layered transparent window styles.
+- Forced Win32 frame-style refresh when switching between editable and locked overlay states.
+
+## 0.10.3
+
+### Continuous Energy Manager
+
+- Энергетический баланс проверяется при каждом решении, включая участки без специальных recovery-правил.
+- Добавлены состояния `CRITICAL`, `CONSERVE`, `BALANCED` и `SURPLUS` с гистерезисом входа и выхода.
+- Прогноз SOC до следующей контрольной точки обучается по фактическому изменению заряда между сегментами; до накопления данных используется профильная траектория.
+- Каждая зона расхода получила лимит `maximum_deploy_pct` в дополнение к страховочному `maximum_active_ms`.
+- В `CONSERVE` обычное расходование блокируется, а критическая атака или защита автоматически понижается с Boost до Hotlap.
+
+### Modular Race Overlay
+
+- Overlay разделён на шесть независимо перемещаемых боксов: круги, шины, пит, энергия ERS, тактическое состояние ERS и текущая команда.
+- Добавлены отдельное редактирование раскладки, масштабирование, скрытие, восстановление и сохранение позиций для разрешения экрана.
+- После закрепления Overlay становится click-through и не перехватывает управление мышью.
+- Цвета отражают темп, износ, трафик, энергетическое и тактическое состояние.
+- ERS-боксы используют фактическое решение автопилота, а не отдельную упрощённую рекомендацию Race Engineer.
+
 ## 0.10.2
 
 ### Advanced China ERS reference

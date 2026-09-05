@@ -33,8 +33,9 @@ public enum ErsTacticalIntensity
 
 public enum ErsEnergyState
 {
-    Deficit,
-    OnPlan,
+    Critical,
+    Conserve,
+    Balanced,
     Surplus
 }
 
@@ -164,6 +165,10 @@ public sealed class ErsEnergyPlan
     public double TargetTolerancePct { get; set; } = 3;
     public double SurplusReleasePct { get; set; } = 8;
     public double LowValueReservePct { get; set; } = 10;
+    public double ConserveEnterMarginPct { get; set; } = 1;
+    public double ConserveExitMarginPct { get; set; } = 4;
+    public double LearningRate { get; set; } = 0.25;
+    public ErsDeployMode ConserveMode { get; set; } = ErsDeployMode.None;
     public int ClosingLaps { get; set; } = 3;
     public bool FinalLapRelease { get; set; } = true;
     public double FinalLapFloorPct { get; set; } = 8;
@@ -192,6 +197,7 @@ public sealed class ErsControlRule
     public double? MinimumThrottlePct { get; set; }
     public int? MinimumSpeedKph { get; set; }
     public int? MaximumActiveMs { get; set; }
+    public double? MaximumDeployPct { get; set; }
     public bool OncePerLap { get; set; }
     public double DeploymentValue { get; set; } = 1;
     public double? MinimumEnergySurplusPct { get; set; }
@@ -257,6 +263,26 @@ public sealed record ErsControlDecision(
     int? GapAheadMs,
     int? GapBehindMs)
 {
+    public ErsTacticalMode TacticalMode { get; init; } = ErsTacticalMode.Neutral;
+
+    public ErsTacticalIntensity TacticalIntensity { get; init; } = ErsTacticalIntensity.None;
+
+    public ErsEnergyState EnergyState { get; init; } = ErsEnergyState.Balanced;
+
+    public double EnergyTargetPct { get; init; }
+
+    public double EnergyMinimumPct { get; init; }
+
+    public double ProjectedNextPct { get; init; }
+
+    public double NextMinimumPct { get; init; }
+
+    public string NextCheckpointId { get; init; } = "";
+
+    public string ProjectionSource { get; init; } = "profile";
+
+    public double? RuleBudgetRemainingPct { get; init; }
+
     public static ErsControlDecision BlockedDecision(ErsControlState state, string reason) => new(
         state.ReceivedAt,
         true,
@@ -282,6 +308,8 @@ public sealed record ErsAutopilotStatus(
     double? BatteryPct,
     string Detail)
 {
+    public ErsControlDecision? Decision { get; init; }
+
     public static ErsAutopilotStatus Initial(ErsAutopilotOperatingMode mode) => new(
         mode,
         mode == ErsAutopilotOperatingMode.Off ? "Off" : "Waiting",
@@ -306,7 +334,8 @@ public sealed record ErsAutopilotStatus(
             var deploy = CurrentMode is null || TargetMode is null ? "" : $" | {CurrentMode} -> {TargetMode}";
             var profile = string.IsNullOrWhiteSpace(ProfileId) ? "" : $" | {ProfileId}";
             var segment = string.IsNullOrWhiteSpace(Segment) ? "" : $" | {Segment}";
-            return $"{mode} | {State}{profile}{segment}{deploy}{battery}\n{Detail}";
+            var energy = Decision is null ? "" : $" | {Decision.EnergyState}";
+            return $"{mode} | {State}{profile}{segment}{deploy}{battery}{energy}\n{Detail}";
         }
     }
 }

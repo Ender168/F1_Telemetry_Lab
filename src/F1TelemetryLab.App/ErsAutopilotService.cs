@@ -26,6 +26,7 @@ public sealed class ErsAutopilotService : IDisposable
     private string _lastDecisionSignature = "";
     private string _lastInternalError = "";
     private ulong _sessionUid;
+    private ErsControlDecision? _lastDecision;
 
     public ErsAutopilotService(
         ErsAutopilotOptions options,
@@ -54,6 +55,8 @@ public sealed class ErsAutopilotService : IDisposable
     }
 
     public ErsAutopilotStatus Status => Volatile.Read(ref _publicStatus);
+
+    public ErsControlDecision? LastDecision => Volatile.Read(ref _lastDecision);
 
     public void ProcessPacket(byte[] payload, DateTimeOffset receivedAt)
     {
@@ -158,6 +161,7 @@ public sealed class ErsAutopilotService : IDisposable
         if (_profile is null || _engine is null || _session is null) return;
         var state = BuildState(now);
         var decision = _engine.Evaluate(state);
+        Volatile.Write(ref _lastDecision, decision);
         AuditDecisionTransition(decision);
 
         if (decision.Blocked)
@@ -402,7 +406,10 @@ public sealed class ErsAutopilotService : IDisposable
             current,
             target,
             battery,
-            detail));
+            detail)
+        {
+            Decision = Volatile.Read(ref _lastDecision)
+        });
     }
 
     private void ResetForSession(ulong sessionUid)
@@ -420,6 +427,7 @@ public sealed class ErsAutopilotService : IDisposable
         _retryCount = 0;
         _lastDecisionSignature = "";
         _lastInternalError = "";
+        Volatile.Write(ref _lastDecision, null);
         Volatile.Write(ref _publicStatus, ErsAutopilotStatus.Initial(_options.OperatingMode));
     }
 

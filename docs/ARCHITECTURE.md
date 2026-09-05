@@ -27,14 +27,14 @@ flowchart TD
     LAP --> TYRE["Tyre life range"]
     P --> GAP["Live gaps"]
     GAP --> PIT["Post-pit position range"]
-    P --> ENERGY["Track energy corridor"]
-    ENERGY --> ERS["ERS aggression advice"]
+    P --> ENERGY["Continuous Energy Manager"]
+    ENERGY --> ERS["Shared autopilot decision"]
     TYRE --> UI["Main UI + overlay"]
     PIT --> UI
     ERS --> UI
 ```
 
-`RaceEngineerService` хранит только короткое live-состояние. Завершение круга подтверждается сменой `lap_num` и ненулевым `last_lap_time_ms`. Только завершённые clean non-pit non-SC laps становятся наблюдениями износа.
+`RaceEngineerService` хранит только короткое live-состояние. Завершение круга подтверждается сменой `lap_num` и ненулевым `last_lap_time_ms`. Только завершённые clean non-pit non-SC laps становятся наблюдениями износа. ERS-блок получает фактическое решение `ErsDecisionEngine`, поэтому UI и управляющий контур используют один источник.
 
 `RaceEngineerProfile` выбирается по `track_id + session_type`. Пользовательские профили лежат в `<root>/race_profiles`. Generic fallback имеет low confidence. `RaceProfileLearningService` после анализа обновляет средний износ по compound и green-flag pit loss. `session_uid` фиксируется в learned model, поэтому повторный анализ идемпотентен.
 
@@ -80,7 +80,7 @@ WinRAR.exe t -idq -y <archive>.rar
 
 ## UI composition
 
-Верхний shell содержит Live, Sessions, Analysis, Race и Settings. Live дополнен четырьмя Race Engineer cards. `RaceEngineerOverlayWindow` является frameless transparent topmost window, которое получает тот же immutable snapshot.
+Верхний shell содержит Live, Sessions, Analysis, Race и Settings. Live дополнен четырьмя Race Engineer cards. `RaceEngineerOverlayWindow` является прозрачным topmost-контейнером с шестью независимо перемещаемыми боксами. Раскладка хранится отдельно, а закреплённое окно работает в click-through режиме.
 
 Sessions позволяет вручную создать краткий XLSX. `RaceSummaryWorkbookExporter` читает только `session.sqlite` и создаёт листы Laps, Tyres, Pits, ERS и Quality. XLSX не входит в RAR.
 
@@ -108,7 +108,8 @@ Sessions позволяет вручную создать краткий XLSX. `
 | `RaceEngineerProfileStore` | базовые и learned track profiles |
 | `RaceProfileLearningService` | идемпотентное обучение после анализа |
 | `ErsAutopilotService` | safety blocks, feedback loop и audit |
+| `ErsDecisionEngine` | тактический режим, постоянный SOC-баланс, CONSERVE и лимиты расхода |
 | `TelemetryDatabase` | raw, live audit, snapshots и metadata |
-| `RaceEngineerOverlayWindow` | topmost live overlay |
+| `RaceEngineerOverlayWindow` | модульный topmost live overlay и редактирование раскладки |
 | `RaceSummaryWorkbookExporter` | ручной краткий XLSX |
 | `SessionPackager` | verified maximum-compression RAR5 |

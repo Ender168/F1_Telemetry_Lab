@@ -46,6 +46,7 @@ public sealed class MainWindow : Window
     private TextBlock _raceErsText = null!;
     private TextBlock _raceAdvisorConfidenceText = null!;
     private Button _raceOverlayButton = null!;
+    private Button _raceOverlayLayoutButton = null!;
     private RaceEngineerOverlayWindow? _raceOverlayWindow;
     private Button _startButton = null!;
     private Button _stopButton = null!;
@@ -208,6 +209,7 @@ public sealed class MainWindow : Window
         ["Pit stop"] = "Пит-стоп",
         ["Open overlay"] = "Открыть оверлей",
         ["Hide overlay"] = "Скрыть оверлей",
+        ["Edit overlay"] = "Настроить оверлей",
         ["Export race summary"] = "Экспорт краткого Excel",
         ["Open race profiles"] = "Открыть профили гонок",
         ["Auto RAR after Stop"] = "Авто-RAR после остановки",
@@ -463,6 +465,8 @@ public sealed class MainWindow : Window
         };
         _raceOverlayButton = new Button { Content = "Open overlay", Width = 125 };
         _raceOverlayButton.Click += (_, _) => ToggleRaceEngineerOverlay();
+        _raceOverlayLayoutButton = new Button { Content = "Edit overlay", Width = 125 };
+        _raceOverlayLayoutButton.Click += (_, _) => ToggleRaceEngineerOverlayLayout();
         var openProfiles = new Button { Content = "Open race profiles", Width = 150 };
         openProfiles.Click += (_, _) => OpenRaceProfilesFolder();
 
@@ -477,7 +481,12 @@ public sealed class MainWindow : Window
         });
         Grid.SetColumn(_raceAdvisorConfidenceText, 1);
         header.Children.Add(_raceAdvisorConfidenceText);
-        var headerActions = new WrapPanel { Orientation = Orientation.Horizontal, ItemSpacing = 8, Children = { openProfiles, _raceOverlayButton } };
+        var headerActions = new WrapPanel
+        {
+            Orientation = Orientation.Horizontal,
+            ItemSpacing = 8,
+            Children = { openProfiles, _raceOverlayButton, _raceOverlayLayoutButton }
+        };
         Grid.SetColumn(headerActions, 2);
         header.Children.Add(headerActions);
 
@@ -2160,9 +2169,16 @@ public sealed class MainWindow : Window
             };
         }
         _raceOverlayWindow.UpdateSnapshot(_recorder.RaceEngineer);
-        _raceOverlayWindow.Show(this);
-        _raceOverlayWindow.Activate();
+        // Keep the overlay independent from the main window. A Win32 owned window can be
+        // pushed behind a borderless game when its owner loses focus.
+        _raceOverlayWindow.Show();
         _raceOverlayButton.Content = string.Equals(_settings.Language, "ru", StringComparison.OrdinalIgnoreCase) ? "Скрыть оверлей" : "Hide overlay";
+    }
+
+    private void ToggleRaceEngineerOverlayLayout()
+    {
+        if (_raceOverlayWindow?.IsVisible != true) ShowRaceEngineerOverlay();
+        _raceOverlayWindow?.ToggleEditMode();
     }
 
     private async void OnWindowClosing(object? sender, WindowClosingEventArgs e)

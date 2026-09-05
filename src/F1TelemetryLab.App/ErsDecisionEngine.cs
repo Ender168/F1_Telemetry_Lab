@@ -17,11 +17,14 @@ public sealed class ErsDecisionEngine
         double DeltaToTargetPct,
         string NextCheckpointId,
         double NextTargetPct,
-        double ProjectedNextPct);
+        double NextMinimumPct,
+        double ProjectedNextPct,
+        string ProjectionSource);
 
     private readonly ErsControlProfile _profile;
     private readonly List<ErsEnergyCheckpoint> _checkpoints;
     private readonly Queue<GapObservation> _gapHistory = new();
+    private readonly Dictionary<int, double> _segmentEnergyDeltaPct = new();
     private readonly HashSet<(int Lap, string RuleId)> _finishedRules = new();
     private bool _recoveryActive;
     private ErsTacticalMode _tacticalMode = ErsTacticalMode.Neutral;
@@ -30,6 +33,12 @@ public sealed class ErsDecisionEngine
     private string? _activeRuleId;
     private int _activeRuleLap = -1;
     private DateTimeOffset _activeRuleStartedAt;
+    private double _activeRuleStartBatteryPct;
+    private int _energySegmentIndex = -1;
+    private double _energySegmentStartBatteryPct;
+    private int _energySegmentLap = -1;
+    private bool _energySegmentCompleteStart;
+    private bool _conserveActive;
 
     public ErsDecisionEngine(ErsControlProfile profile)
     {
@@ -42,17 +51,18 @@ public sealed class ErsDecisionEngine
     public ErsControlDecision Evaluate(ErsControlState state)
     {
         UpdateGapHistory(state);
+        if (state.AutomationAllowed) UpdateEnergyTelemetry(state);
         var tactical = UpdateTacticalContext(state);
         var energy = BuildEnergyContext(state);
         if (!state.AutomationAllowed)
-            return ErsControlDecision.BlockedDecision(state, $"{ModePrefix(tactical)} {state.BlockReason}");
+            return WithContext(ErsControlDecision.BlockedDecision(state, $"{ModePrefix(tactical)} {state.BlockReason}"), tactical, energy);
 
         UpdateLapState(state);
         UpdateRecoveryState(state.BatteryPct);
 
         var activeRule = ContinueActiveRule(state, tactical, energy);
         if (activeRule is not null)
-            return Decision(state, activeRule, Explain(activeRule, state, tactical, energy));
+            return Decision(state, activeRule, tactical, energy, Explain(activeRule, state, tactical, energy));
 
         var selected = _profile.Rules
             .Where(rule => !_finishedRules.Contains((state.LapNumber, rule.Id)))
@@ -67,23 +77,27 @@ public sealed class ErsDecisionEngine
             _activeRuleId = selected.Id;
             _activeRuleLap = state.LapNumber;
             _activeRuleStartedAt = state.ReceivedAt;
+            _activeRuleStartBatteryPct = state.BatteryPct;
             MarkOncePerLapSelection(selected, state);
-            return Decision(state, selected, Explain(selected, state, tactical, energy));
+            return Decision(state, selected, tactical, energy, Explain(selected, state, tactical, energy));
         }
 
-        return new ErsControlDecision(
+        var baseline = energy.State is ErsEnergyState.Critical or ErsEnergyState.Conserve
+            ? _profile.EnergyPlan?.ConserveMode ?? ErsDeployMode.None
+            : _profile.DefaultMode;
+        return WithContext(new ErsControlDecision(
             state.ReceivedAt,
             false,
             state.CurrentMode,
-            _profile.DefaultMode,
-            "default",
-            "Normal lap baseline",
-            $"{ModePrefix(tactical)} Baseline {_profile.DefaultMode}. {EnergySummary(state, energy, tactical)}",
+            baseline,
+            energy.State is ErsEnergyState.Critical or ErsEnergyState.Conserve ? "energy-conserve" : "default",
+            energy.State is ErsEnergyState.Critical or ErsEnergyState.Conserve ? "Energy conservation" : "Normal lap baseline",
+            $"{ModePrefix(tactical)} Baseline {baseline}. {EnergySummary(state, energy, tactical)}",
             state.BatteryPct,
             state.LapNumber,
             state.LapDistanceM,
             state.GapAheadMs,
-            state.GapBehindMs);
+            state.GapBehindMs), tactical, energy);
     }
 
     private ErsControlRule? ContinueActiveRule(ErsControlState state, TacticalContext tactical, EnergyContext energy)
@@ -99,11 +113,13 @@ public sealed class ErsDecisionEngine
         var stillMatches = Matches(rule, state, tactical, energy);
         var expired = rule.MaximumActiveMs is > 0 &&
             state.ReceivedAt - _activeRuleStartedAt >= TimeSpan.FromMilliseconds(rule.MaximumActiveMs.Value);
+        var deployBudgetSpent = rule.MaximumDeployPct is > 0 &&
+            _activeRuleStartBatteryPct - state.BatteryPct >= rule.MaximumDeployPct.Value;
         var higherPriorityRuleMatches = _profile.Rules.Any(candidate =>
             candidate.Priority > rule.Priority &&
             !_finishedRules.Contains((state.LapNumber, candidate.Id)) &&
             Matches(candidate, state, tactical, energy));
-        if (stillMatches && !expired && !higherPriorityRuleMatches) return rule;
+        if (stillMatches && !expired && !deployBudgetSpent && !higherPriorityRuleMatches) return rule;
 
         ClearActiveRule(markFinished: rule.OncePerLap);
         return null;
@@ -116,6 +132,7 @@ public sealed class ErsDecisionEngine
         _activeRuleId = null;
         _activeRuleLap = -1;
         _activeRuleStartedAt = default;
+        _activeRuleStartBatteryPct = 0;
     }
 
     private bool Matches(ErsControlRule rule, ErsControlState state, TacticalContext tactical, EnergyContext energy)
@@ -145,6 +162,12 @@ public sealed class ErsDecisionEngine
             if (state.BatteryPct < dynamicFloor) return false;
             if (rule.MinimumEnergySurplusPct is not null &&
                 energy.DeltaToTargetPct < rule.MinimumEnergySurplusPct.Value) return false;
+
+            var tacticalEmergency = rule.Condition is ErsRuleCondition.AttackCritical or ErsRuleCondition.DefendCritical;
+            var raceRelease = rule.Condition is ErsRuleCondition.FinalLap or ErsRuleCondition.ClosingLaps;
+            if (energy.State is ErsEnergyState.Critical && !raceRelease) return false;
+            if (energy.State == ErsEnergyState.Conserve && !tacticalEmergency && !raceRelease) return false;
+            if (energy.ProjectedNextPct < energy.NextMinimumPct && !tacticalEmergency && !raceRelease) return false;
         }
 
         var legacyBattle = state.InBattle(_profile.BattleGapMs);
@@ -162,7 +185,7 @@ public sealed class ErsDecisionEngine
             ErsRuleCondition.DefendCritical => tactical is { Mode: ErsTacticalMode.Defend, Intensity: ErsTacticalIntensity.Critical },
             ErsRuleCondition.Battle => legacyBattle,
             ErsRuleCondition.HighBattery => state.BatteryPct >= _profile.HighBatteryPct,
-            ErsRuleCondition.EnergyDeficit => energy.State == ErsEnergyState.Deficit,
+            ErsRuleCondition.EnergyDeficit => energy.State is ErsEnergyState.Critical or ErsEnergyState.Conserve,
             ErsRuleCondition.EnergySurplus => energy.State == ErsEnergyState.Surplus,
             ErsRuleCondition.ClosingLaps => IsClosingLaps(state),
             ErsRuleCondition.FinalLap => state.LapsRemaining is <= 1,
@@ -276,15 +299,19 @@ public sealed class ErsDecisionEngine
     {
         if (_profile.EnergyPlan is null || _checkpoints.Count < 2)
         {
-            var legacyState = state.BatteryPct <= _profile.RecoveryEnterPct
-                ? ErsEnergyState.Deficit
+            var legacyState = state.BatteryPct <= _profile.CriticalBatteryPct
+                ? ErsEnergyState.Critical
+                : state.BatteryPct <= _profile.RecoveryEnterPct
+                    ? ErsEnergyState.Conserve
                 : state.BatteryPct >= _profile.HighBatteryPct
                     ? ErsEnergyState.Surplus
-                    : ErsEnergyState.OnPlan;
+                    : ErsEnergyState.Balanced;
             return new EnergyContext(legacyState, _profile.RecoveryExitPct, _profile.RecoveryEnterPct,
-                state.BatteryPct - _profile.RecoveryExitPct, "legacy", _profile.RecoveryExitPct, state.BatteryPct);
+                state.BatteryPct - _profile.RecoveryExitPct, "legacy", _profile.RecoveryExitPct,
+                _profile.RecoveryEnterPct, state.BatteryPct, "legacy");
         }
 
+        var plan = _profile.EnergyPlan;
         var distance = NormalizedDistance(state.LapDistanceM);
         var nextIndex = _checkpoints.FindIndex(point => point.DistanceM > distance);
         if (nextIndex < 0) nextIndex = 0;
@@ -304,13 +331,81 @@ public sealed class ErsDecisionEngine
         var target = Lerp(previous.TargetPct, next.TargetPct, progress);
         var minimum = Lerp(previous.MinimumPct, next.MinimumPct, progress);
         var delta = state.BatteryPct - target;
-        var energyState = state.BatteryPct < minimum || delta < -_profile.EnergyPlan.TargetTolerancePct
-            ? ErsEnergyState.Deficit
-            : delta >= _profile.EnergyPlan.SurplusReleasePct
-                ? ErsEnergyState.Surplus
-                : ErsEnergyState.OnPlan;
+        var projectionSource = "profile";
         var projectedNext = state.BatteryPct + (next.TargetPct - target);
-        return new EnergyContext(energyState, target, minimum, delta, next.Id, next.TargetPct, projectedNext);
+        if (_segmentEnergyDeltaPct.TryGetValue(nextIndex, out var learnedSegmentDelta))
+        {
+            projectedNext = state.BatteryPct + learnedSegmentDelta * (1 - progress);
+            projectionSource = "learned";
+        }
+
+        if (state.BatteryPct <= _profile.CriticalBatteryPct)
+        {
+            _conserveActive = true;
+            return new EnergyContext(ErsEnergyState.Critical, target, minimum, delta, next.Id,
+                next.TargetPct, next.MinimumPct, projectedNext, projectionSource);
+        }
+
+        if (_conserveActive)
+        {
+            var exit = plan.ConserveExitMarginPct;
+            _conserveActive = state.BatteryPct < minimum + exit ||
+                              projectedNext < next.MinimumPct + exit ||
+                              delta < -plan.TargetTolerancePct + exit;
+        }
+        else
+        {
+            var enter = plan.ConserveEnterMarginPct;
+            _conserveActive = state.BatteryPct < minimum + enter ||
+                              projectedNext < next.MinimumPct + enter ||
+                              delta < -plan.TargetTolerancePct;
+        }
+
+        var energyState = _conserveActive
+            ? ErsEnergyState.Conserve
+            : delta >= plan.SurplusReleasePct && projectedNext >= next.MinimumPct + plan.ConserveExitMarginPct
+                ? ErsEnergyState.Surplus
+                : ErsEnergyState.Balanced;
+        return new EnergyContext(energyState, target, minimum, delta, next.Id, next.TargetPct,
+            next.MinimumPct, projectedNext, projectionSource);
+    }
+
+    private void UpdateEnergyTelemetry(ErsControlState state)
+    {
+        if (_profile.EnergyPlan is null || _checkpoints.Count < 2 || state.LapNumber <= 0) return;
+        var distance = NormalizedDistance(state.LapDistanceM);
+        var nextIndex = _checkpoints.FindIndex(point => point.DistanceM > distance);
+        if (nextIndex < 0) nextIndex = 0;
+
+        if (_energySegmentIndex < 0 || state.LapNumber < _energySegmentLap)
+        {
+            var rewind = _energySegmentIndex >= 0 && state.LapNumber < _energySegmentLap;
+            if (rewind) _segmentEnergyDeltaPct.Clear();
+            _energySegmentIndex = nextIndex;
+            _energySegmentStartBatteryPct = state.BatteryPct;
+            _energySegmentLap = state.LapNumber;
+            _energySegmentCompleteStart = false;
+            return;
+        }
+
+        if (nextIndex == _energySegmentIndex) return;
+        var forwardLap = state.LapNumber == _energySegmentLap || state.LapNumber == _energySegmentLap + 1;
+        if (_energySegmentCompleteStart && forwardLap)
+        {
+            var observedDelta = state.BatteryPct - _energySegmentStartBatteryPct;
+            if (observedDelta is >= -80 and <= 80)
+            {
+                var rate = Math.Clamp(_profile.EnergyPlan.LearningRate, 0.01, 1);
+                _segmentEnergyDeltaPct[_energySegmentIndex] = _segmentEnergyDeltaPct.TryGetValue(_energySegmentIndex, out var current)
+                    ? current + rate * (observedDelta - current)
+                    : observedDelta;
+            }
+        }
+
+        _energySegmentIndex = nextIndex;
+        _energySegmentStartBatteryPct = state.BatteryPct;
+        _energySegmentLap = state.LapNumber;
+        _energySegmentCompleteStart = true;
     }
 
     private static double Lerp(double start, double end, double progress) => start + (end - start) * progress;
@@ -376,19 +471,55 @@ public sealed class ErsDecisionEngine
         return ((distanceM % length) + length) % length;
     }
 
-    private static ErsControlDecision Decision(ErsControlState state, ErsControlRule rule, string reason) => new(
-        state.ReceivedAt,
-        false,
-        state.CurrentMode,
-        rule.TargetMode,
-        rule.Id,
-        rule.Segment,
-        reason,
-        state.BatteryPct,
-        state.LapNumber,
-        state.LapDistanceM,
-        state.GapAheadMs,
-        state.GapBehindMs);
+    private ErsControlDecision Decision(
+        ErsControlState state,
+        ErsControlRule rule,
+        TacticalContext tactical,
+        EnergyContext energy,
+        string reason)
+    {
+        var target = rule.TargetMode;
+        var tacticalEmergency = rule.Condition is ErsRuleCondition.AttackCritical or ErsRuleCondition.DefendCritical;
+        var raceRelease = rule.Condition is ErsRuleCondition.FinalLap or ErsRuleCondition.ClosingLaps;
+        if (energy.State == ErsEnergyState.Conserve && tacticalEmergency && !raceRelease && target == ErsDeployMode.Boost)
+        {
+            target = ErsDeployMode.Hotlap;
+            reason = "Energy guard downgraded Boost to Hotlap. " + reason;
+        }
+
+        double? remainingBudget = rule.MaximumDeployPct is null
+            ? null
+            : Math.Max(0, rule.MaximumDeployPct.Value - Math.Max(0, _activeRuleStartBatteryPct - state.BatteryPct));
+        return WithContext(new ErsControlDecision(
+            state.ReceivedAt,
+            false,
+            state.CurrentMode,
+            target,
+            rule.Id,
+            rule.Segment,
+            reason,
+            state.BatteryPct,
+            state.LapNumber,
+            state.LapDistanceM,
+            state.GapAheadMs,
+            state.GapBehindMs), tactical, energy) with { RuleBudgetRemainingPct = remainingBudget };
+    }
+
+    private static ErsControlDecision WithContext(
+        ErsControlDecision decision,
+        TacticalContext tactical,
+        EnergyContext energy) => decision with
+    {
+        TacticalMode = tactical.Mode,
+        TacticalIntensity = tactical.Intensity,
+        EnergyState = energy.State,
+        EnergyTargetPct = energy.TargetPct,
+        EnergyMinimumPct = energy.MinimumPct,
+        ProjectedNextPct = energy.ProjectedNextPct,
+        NextMinimumPct = energy.NextMinimumPct,
+        NextCheckpointId = energy.NextCheckpointId,
+        ProjectionSource = energy.ProjectionSource
+    };
 
     private string Explain(ErsControlRule rule, ErsControlState state, TacticalContext tactical, EnergyContext energy)
     {
@@ -430,7 +561,7 @@ public sealed class ErsDecisionEngine
         var behindRate = tactical.BehindRateMsPerSecond is null ? "n/a" : $"{tactical.BehindRateMsPerSecond:+0;-0;0} ms/s";
         var laps = state.LapsRemaining?.ToString() ?? "?";
         return $"SOC {state.BatteryPct:0.0}% vs plan {energy.TargetPct:0.0}%/{energy.MinimumPct:0.0}% ({energy.State}); " +
-               $"next {energy.NextCheckpointId} projected {energy.ProjectedNextPct:0.0}% vs {energy.NextTargetPct:0.0}%; " +
+               $"next {energy.NextCheckpointId} projected {energy.ProjectedNextPct:0.0}% vs {energy.NextTargetPct:0.0}%/{energy.NextMinimumPct:0.0}% ({energy.ProjectionSource}); " +
                $"DRS {(state.DrsActive ? "active" : "inactive")}; gaps trend A {aheadRate}, D {behindRate}; laps left {laps}.";
     }
 
