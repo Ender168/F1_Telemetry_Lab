@@ -31,6 +31,7 @@ public sealed class ErsAutopilotService : IDisposable
     private DateTimeOffset _lastDecisionAuditAt;
     private string _lastInternalError = "";
     private ulong _sessionUid;
+    private uint? _flashbackOverallFrame;
     private ErsControlDecision? _lastDecision;
 
     public ErsAutopilotService(
@@ -92,6 +93,22 @@ public sealed class ErsAutopilotService : IDisposable
                     _log?.Invoke(_inputFaultReason);
                 }
                 SetStatus("Emergency stop", "", null, null, null, _inputFaultReason);
+                return;
+            }
+
+            // Overall frames continue across a rewind; ordinary frame/session-time counters do not.
+            // Ignore delayed packets and repeated FLBK deliveries from the abandoned timeline.
+            if (_flashbackOverallFrame is uint cutoff && header.OverallFrameIdentifier <= cutoff) return;
+            if (header.PacketId == 3)
+            {
+                var eventOffset = F12026Parser.HeaderSize;
+                if (payload.Length >= eventOffset + 12 &&
+                    payload.AsSpan(eventOffset, 4).SequenceEqual("FLBK"u8))
+                {
+                    var targetTime = System.Buffers.Binary.BinaryPrimitives.ReadSingleLittleEndian(payload.AsSpan(eventOffset + 8));
+                    if (float.IsFinite(targetTime) && targetTime >= 0)
+                        ResetAfterFlashback(header.OverallFrameIdentifier, now);
+                }
                 return;
             }
 
@@ -363,9 +380,9 @@ public sealed class ErsAutopilotService : IDisposable
             $"{result.Message} Waiting for {_pendingExpectedMode}. {decision.Reason}");
     }
 
-    private bool PollInputRelease(DateTimeOffset now)
+    private bool PollInputRelease(DateTimeOffset now, bool releaseImmediately = false)
     {
-        var result = _inputSink.Poll(now);
+        var result = _inputSink.Poll(releaseImmediately ? DateTimeOffset.MaxValue : now);
         if (result is null) return true;
         _audit.Write(InputLifecycleDecision(now), result.Success ? result.Message : "input-error: " + result.Message);
         if (result.Success)
@@ -445,9 +462,40 @@ public sealed class ErsAutopilotService : IDisposable
         });
     }
 
+    private void ResetAfterFlashback(uint overallFrame, DateTimeOffset now)
+    {
+        var resetDecision = InputLifecycleDecision(now) with
+        {
+            Blocked = true,
+            RuleId = "flashback-reset",
+            Reason = "Confirmed FLBK: cleared ERS timeline state; waiting for fresh Session, Lap, Telemetry and Car Status packets."
+        };
+        // Release any held pulse without disposing the sink, so Live can resume afterwards.
+        if (_options.OperatingMode == ErsAutopilotOperatingMode.Live)
+            PollInputRelease(now, releaseImmediately: true);
+        _flashbackOverallFrame = overallFrame;
+        _engine = _profile is null ? null : new ErsDecisionEngine(_profile);
+        _session = null;
+        _telemetry = null;
+        _carStatus = null;
+        _playerLap = null;
+        _lapRows.Clear();
+        ClearPendingCommand();
+        _pendingSince = default;
+        _lastCommandAt = DateTimeOffset.MinValue;
+        _lastDecisionSignature = "";
+        _lastDecisionAuditAt = default;
+        Volatile.Write(ref _lastDecision, null);
+        _audit.Write(resetDecision, "flashback-reset");
+        _log?.Invoke(resetDecision.Reason);
+        // A rewind never clears a latched F12, input error or feedback failure.
+        SetStatus("Blocked", "", null, null, null, _inputFault ? _inputFaultReason : resetDecision.Reason);
+    }
+
     private void ResetForSession(ulong sessionUid)
     {
         _sessionUid = sessionUid;
+        _flashbackOverallFrame = null;
         _session = null;
         _telemetry = null;
         _carStatus = null;

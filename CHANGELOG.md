@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.9
+
+- Reset the ERS decision engine on confirmed FLBK events, clearing once-per-lap rules, active deployment timers, gap history and learned energy segments from the abandoned timeline.
+- Release pending key pulses, cancel feedback/retries and wait for fresh Session/Lap/Telemetry/Status packets before resuming; ignore delayed pre-flashback packets and duplicate events.
+- Keep latched emergency stops and input failures across flashbacks. Add flashback-reset audit events.
+
 ## 0.10.8
 
 - Enable ERS Live control in online races by removing the unconditional network-session block.

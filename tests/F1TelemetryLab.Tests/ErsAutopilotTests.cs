@@ -3,7 +3,7 @@ using F1TelemetryLab;
 
 namespace F1TelemetryLab.Tests;
 
-public sealed class ErsAutopilotTests
+public sealed partial class ErsAutopilotTests
 {
     [Fact]
     public void SessionControlParserReadsOfflinePauseAndSafetyFlagsFrom2026Layout()
