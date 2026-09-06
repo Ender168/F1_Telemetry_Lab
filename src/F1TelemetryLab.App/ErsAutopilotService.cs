@@ -2,6 +2,10 @@ namespace F1TelemetryLab;
 
 public sealed class ErsAutopilotService : IDisposable
 {
+    private readonly object _sync = new();
+    private readonly TimeProvider _timeProvider;
+    private bool _stopped;
+    private bool _disposed;
     private readonly ErsAutopilotOptions _options;
     private readonly ErsProfileLoadResult _profiles;
     private readonly IErsInputSink _inputSink;
@@ -24,6 +28,7 @@ public sealed class ErsAutopilotService : IDisposable
     private bool _inputFault;
     private string _inputFaultReason = "";
     private string _lastDecisionSignature = "";
+    private DateTimeOffset _lastDecisionAuditAt;
     private string _lastInternalError = "";
     private ulong _sessionUid;
     private ErsControlDecision? _lastDecision;
@@ -34,8 +39,10 @@ public sealed class ErsAutopilotService : IDisposable
         IErsInputSink inputSink,
         Action<ErsAuditRecord>? auditSink = null,
         Action<ErsControlProfile, ErsAutopilotOptions>? profileSink = null,
-        Action<string>? log = null)
+        Action<string>? log = null,
+        TimeProvider? timeProvider = null)
     {
+        _timeProvider = timeProvider ?? TimeProvider.System;
         _options = options;
         _profiles = profiles;
         _inputSink = inputSink;
@@ -60,11 +67,21 @@ public sealed class ErsAutopilotService : IDisposable
 
     public void ProcessPacket(byte[] payload, DateTimeOffset receivedAt)
     {
+        lock (_sync)
+        {
+            if (_stopped || _disposed) return;
+            ProcessPacketCore(payload, receivedAt);
+        }
+    }
+
+    private void ProcessPacketCore(byte[] payload, DateTimeOffset receivedAt)
+    {
         if (_options.OperatingMode == ErsAutopilotOperatingMode.Off) return;
+        var now = _options.OperatingMode == ErsAutopilotOperatingMode.Live ? _timeProvider.GetUtcNow() : receivedAt;
         try
         {
             if (!F12026Parser.TryParseHeader(payload, out var header) || header.PacketFormat != AppInfo.SupportedPacketFormat) return;
-            if (_options.OperatingMode == ErsAutopilotOperatingMode.Live && !PollInputRelease(receivedAt)) return;
+            if (_options.OperatingMode == ErsAutopilotOperatingMode.Live && !PollInputRelease(now)) return;
             if (_sessionUid != 0 && header.SessionUid != _sessionUid) ResetForSession(header.SessionUid);
             _sessionUid = header.SessionUid;
             if (_options.OperatingMode == ErsAutopilotOperatingMode.Live && _inputSink.EmergencyStopRequested(_options))
@@ -88,18 +105,18 @@ public sealed class ErsAutopilotService : IDisposable
                     UpdateLapRows(payload, receivedAt);
                     break;
                 case 6:
-                    _telemetry = F12026Parser.ParseCarTelemetryPacket(payload, receivedAt)
+                    _telemetry = F12026Parser.ParseCarTelemetryPacket(payload, receivedAt, onlyCarIndex: header.PlayerCarIndex)
                         .FirstOrDefault(sample => sample.IsPlayer);
                     break;
                 case 7:
-                    _carStatus = F12026Parser.ParseCarStatusPacket(payload, receivedAt)
+                    _carStatus = F12026Parser.ParseCarStatusPacket(payload, receivedAt, onlyCarIndex: header.PlayerCarIndex)
                         .FirstOrDefault(sample => sample.IsPlayer);
                     break;
                 default:
                     return;
             }
 
-            Evaluate(receivedAt);
+            Evaluate(now);
         }
         catch (Exception ex)
         {
@@ -118,10 +135,25 @@ public sealed class ErsAutopilotService : IDisposable
         }
     }
 
+    public void StopInput()
+    {
+        lock (_sync)
+        {
+            if (_stopped) return;
+            _stopped = true;
+            _inputSink.Dispose();
+            SetStatus("Stopped", "", null, null, null, "Recording stopped; ERS input is disabled.");
+        }
+    }
+
     public void Dispose()
     {
-        _inputSink.Dispose();
-        _audit.Dispose();
+        lock (_sync)
+        {
+            if (_disposed) return;
+            try { StopInput(); }
+            finally { _disposed = true; _audit.Dispose(); }
+        }
     }
 
     private void UpdateLapRows(byte[] payload, DateTimeOffset receivedAt)
@@ -390,8 +422,10 @@ public sealed class ErsAutopilotService : IDisposable
 
     private void AuditDecisionTransition(ErsControlDecision decision)
     {
-        var signature = $"{decision.Blocked}|{decision.RuleId}|{decision.TargetMode}|{decision.Reason}";
-        if (string.Equals(signature, _lastDecisionSignature, StringComparison.Ordinal)) return;
+        var signature = $"{decision.Blocked}|{decision.RuleId}|{decision.Segment}|{decision.CurrentMode}|{decision.TargetMode}|{decision.TacticalMode}|{decision.TacticalIntensity}|{decision.EnergyState}|{(decision.Blocked ? decision.Reason : "")}";
+        if (string.Equals(signature, _lastDecisionSignature, StringComparison.Ordinal) &&
+            decision.ReceivedAt - _lastDecisionAuditAt < TimeSpan.FromSeconds(1)) return;
+        _lastDecisionAuditAt = decision.ReceivedAt;
         _lastDecisionSignature = signature;
         _audit.Write(decision, decision.Blocked ? "blocked" : "decision");
     }

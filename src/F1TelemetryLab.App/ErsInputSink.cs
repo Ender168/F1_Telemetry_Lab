@@ -25,6 +25,25 @@ public sealed class WindowsKeyboardErsInputSink : IErsInputSink
     private const uint ScanCode = 0x0008;
     private const uint MapVkToVsc = 0;
     private readonly object _sync = new();
+    private readonly Timer _releaseTimer;
+    private ErsInputResult? _pendingRelease;
+
+    public WindowsKeyboardErsInputSink()
+    {
+        _releaseTimer = new Timer(_ => ReleaseOnTimer(), null, Timeout.Infinite, Timeout.Infinite);
+    }
+
+    private void ReleaseOnTimer()
+    {
+        lock (_sync)
+        {
+            if (_disposed || _pressedScanCode == 0) return;
+            // Key-up must not depend on another UDP packet arriving.
+            _pendingRelease = ReleaseIfDue(DateTimeOffset.MaxValue);
+            if (_pressedScanCode != 0) _releaseTimer.Change(30, Timeout.Infinite);
+        }
+    }
+
     private ushort _pressedScanCode;
     private int _pressedVirtualKey;
     private DateTimeOffset _releaseAt;
@@ -70,7 +89,9 @@ public sealed class WindowsKeyboardErsInputSink : IErsInputSink
 
             _pressedScanCode = scanCode;
             _pressedVirtualKey = virtualKey;
-            _releaseAt = now.AddMilliseconds(Math.Clamp(options.KeyHoldMilliseconds, 30, 250));
+            var holdMs = Math.Clamp(options.KeyHoldMilliseconds, 30, 250);
+            _releaseAt = now.AddMilliseconds(holdMs);
+            _releaseTimer.Change(holdMs, Timeout.Infinite);
             return ErsInputResult.Ok(
                 $"Pressed {ErsProfileStore.VirtualKeyName(virtualKey)} scan-code 0x{scanCode:X2} for {Math.Clamp(options.KeyHoldMilliseconds, 30, 250)} ms ({direction}).");
         }
@@ -82,7 +103,9 @@ public sealed class WindowsKeyboardErsInputSink : IErsInputSink
         lock (_sync)
         {
             if (_disposed) return null;
-            return ReleaseIfDue(now);
+            var result = _pendingRelease ?? ReleaseIfDue(now);
+            _pendingRelease = null;
+            return result;
         }
     }
 
@@ -92,7 +115,7 @@ public sealed class WindowsKeyboardErsInputSink : IErsInputSink
 
     public void Dispose()
     {
-        if (!OperatingSystem.IsWindows()) return;
+        _releaseTimer.Dispose();
         lock (_sync)
         {
             if (_disposed) return;

@@ -206,6 +206,8 @@ public sealed class UdpRecorder : IAsyncDisposable
         var cts = _cts;
         if (cts is null) return _metadata;
 
+        // Stop input before waiting for final packets or draining the write queue.
+        _ersAutopilot?.StopInput();
         await WaitForFinalClassificationIfNeededAsync();
 
         _cts = null;

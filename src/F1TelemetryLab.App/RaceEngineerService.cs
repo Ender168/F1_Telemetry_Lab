@@ -79,13 +79,13 @@ public sealed class RaceEngineerService
                     }
                     break;
                 case 6:
-                    _telemetry = F12026Parser.ParseCarTelemetryPacket(payload, receivedAt).FirstOrDefault(x => x.IsPlayer);
+                    _telemetry = F12026Parser.ParseCarTelemetryPacket(payload, receivedAt, onlyCarIndex: header.PlayerCarIndex).FirstOrDefault(x => x.IsPlayer);
                     break;
                 case 7:
-                    _status = F12026Parser.ParseCarStatusPacket(payload, receivedAt).FirstOrDefault(x => x.IsPlayer);
+                    _status = F12026Parser.ParseCarStatusPacket(payload, receivedAt, onlyCarIndex: header.PlayerCarIndex).FirstOrDefault(x => x.IsPlayer);
                     break;
                 case 10:
-                    _damage = F12026Parser.ParseCarDamagePacket(payload, receivedAt).FirstOrDefault(x => x.IsPlayer);
+                    _damage = F12026Parser.ParseCarDamagePacket(payload, receivedAt, onlyCarIndex: header.PlayerCarIndex).FirstOrDefault(x => x.IsPlayer);
                     break;
                 case 12:
                     var sets = F12026Parser.ParseTyreSetsPacket(payload, receivedAt);

@@ -11,16 +11,6 @@ public static class SessionManifestService
     {
         var databasePath = Path.Combine(sessionFolder, "session.sqlite");
         if (!File.Exists(databasePath)) return;
-        var warnings = new List<string>();
-        try { TelemetryCompletenessService.Enrich(databasePath); }
-        catch (Exception ex) when (ex is SqliteException or IOException or InvalidOperationException)
-        { warnings.Add("telemetry completeness: " + ex.Message); }
-        try { AdditionalTelemetry2026Service.Enrich(databasePath); }
-        catch (Exception ex) when (ex is SqliteException or IOException or InvalidOperationException)
-        { warnings.Add("additional telemetry: " + ex.Message); }
-        try { SessionStorageOptimizer.Optimize(databasePath); }
-        catch (Exception ex) when (ex is SqliteException or IOException or InvalidOperationException)
-        { warnings.Add("storage optimization: " + ex.Message); }
 
         using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
         {
@@ -33,13 +23,25 @@ public static class SessionManifestService
         DatabaseSchemaMigrator.Apply(connection);
         if (analyzedAt is not null) SetMeta(connection, "analyzed_at", analyzedAt.Value.ToString("O"));
         SetMeta(connection, "database_size_bytes", new FileInfo(databasePath).Length.ToString(CultureInfo.InvariantCulture));
-        SetMeta(connection, "finalization_warning", string.Join(" | ", warnings));
         if (!string.IsNullOrWhiteSpace(archivePath) && File.Exists(archivePath))
         {
             SetMeta(connection, "archive_name", Path.GetFileName(archivePath));
             SetMeta(connection, "archive_size_bytes", new FileInfo(archivePath).Length.ToString(CultureInfo.InvariantCulture));
             SetMeta(connection, "packaged_at", DateTimeOffset.Now.ToString("O"));
         }
+    }
+
+    public static void FinalizeDatabase(string databasePath, Action<string>? log = null)
+    {
+        log?.Invoke("Finalizing player thermal and extended telemetry...");
+        TelemetryCompletenessService.Enrich(databasePath, log, playerOnly: true);
+        AdditionalTelemetry2026Service.Enrich(databasePath, log);
+        SessionStorageOptimizer.Optimize(databasePath, log);
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        SetMeta(connection, "analyzed_at", DateTimeOffset.Now.ToString("O"));
+        SetMeta(connection, "database_size_bytes", new FileInfo(databasePath).Length.ToString(CultureInfo.InvariantCulture));
+        SetMeta(connection, "finalization_warning", "");
     }
 
     private static void SetMeta(SqliteConnection connection, string key, string value)

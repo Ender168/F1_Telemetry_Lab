@@ -474,6 +474,56 @@ public sealed class ErsAutopilotTests
         }
     }
 
+    [Fact]
+    public void QueuedOldPacketsCannotSendLiveCommands()
+    {
+        WithService(new FakeInputSink(), (service, input) =>
+        {
+            var stale = DateTimeOffset.UtcNow.AddSeconds(-10);
+            service.ProcessPacket(SessionPacket(false, 0), stale);
+            service.ProcessPacket(LapPacket(3_500), stale);
+            service.ProcessPacket(TelemetryPacket(), stale);
+            service.ProcessPacket(StatusPacket(ErsDeployMode.Medium), stale);
+            Assert.Equal(0, input.TapCount);
+            Assert.Equal("Blocked", service.Status.State);
+        });
+    }
+
+    [Fact]
+    public void StopInputPreventsCommandsFromRemainingQueuedPackets()
+    {
+        WithService(new FakeInputSink(), (service, input) =>
+        {
+            service.StopInput();
+            var now = DateTimeOffset.UtcNow;
+            service.ProcessPacket(SessionPacket(false, 0), now);
+            service.ProcessPacket(LapPacket(3_500), now);
+            service.ProcessPacket(TelemetryPacket(), now);
+            service.ProcessPacket(StatusPacket(ErsDeployMode.Medium), now);
+            Assert.Equal(0, input.TapCount);
+            Assert.Equal("Stopped", service.Status.State);
+        });
+    }
+
+    [Fact]
+    public void ChangingDistanceDoesNotFloodDecisionAudit()
+    {
+        var records = new List<ErsAuditRecord>();
+        var profiles = new ErsProfileLoadResult("", new[] { ChinaProfile() }, Array.Empty<string>());
+        using var service = new ErsAutopilotService(
+            new ErsAutopilotOptions { OperatingMode = ErsAutopilotOperatingMode.DryRun },
+            profiles, new FakeInputSink(), records.Add);
+        var now = DateTimeOffset.UtcNow;
+        service.ProcessPacket(SessionPacket(false, 0), now);
+        service.ProcessPacket(TelemetryPacket(), now);
+        service.ProcessPacket(StatusPacket(ErsDeployMode.Medium), now);
+        for (var i = 0; i < 100; i++)
+            service.ProcessPacket(LapPacket(3_500 + i), now.AddMilliseconds(i * 5));
+        Assert.Single(records.Where(x => x.Action == "decision"));
+        service.ProcessPacket(LapPacket(3_650), now.AddMilliseconds(1_000));
+        Assert.Equal(2, records.Count(x => x.Action == "decision"));
+    }
+
     private sealed class FakeInputSink : IErsInputSink
     {
         public bool EmergencyStop { get; set; }
