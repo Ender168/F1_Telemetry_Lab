@@ -116,6 +116,8 @@ public sealed record RaceEngineerSnapshot(
     PitPositionAdvice Pit,
     ErsRaceAdvice Ers)
 {
+    public IReadOnlyList<NearbyCarSnapshot> NearbyCars { get; init; } = Array.Empty<NearbyCarSnapshot>();
+
     public static RaceEngineerSnapshot Waiting { get; } = new(
         DateTimeOffset.MinValue,
         "",
@@ -165,8 +167,55 @@ public static class RaceEngineerText
         if (laps.Count == 0) return russian ? "Ожидание первого завершённого круга" : "Waiting for the first completed lap";
         return string.Join("  |  ", laps.TakeLast(3).Select(lap =>
         {
-            var flag = lap.PitLap ? " PIT" : !lap.Clean ? " INVALID" : "";
-            return $"L{lap.LapNumber} {LapOption.FormatLapTime(lap.LapTimeMs)}{flag}";
+            return FormatLap(lap.LapNumber, lap.LapTimeMs, lap.Clean, lap.PitLap, lap.SafetyCarAffected);
+        }));
+    }
+
+    private static string FormatLap(int number, uint time, bool? valid, bool pit, bool safetyCar)
+    {
+        var flag = pit ? " PIT" : safetyCar ? " SC/VSC" : valid == false ? " INVALID" : "";
+        return $"L{number} {LapOption.FormatLapTime(time)}{flag}";
+    }
+
+    public static NearbyCarSnapshot? Neighbour(RaceEngineerSnapshot snapshot, int offset, DateTimeOffset now)
+    {
+        var player = snapshot.NearbyCars.FirstOrDefault(x => x.IsPlayer);
+        if (player is null || now - player.PositionReceivedAt > TimeSpan.FromSeconds(5)) return null;
+        return snapshot.NearbyCars.FirstOrDefault(x => x.Position == player.Position + offset &&
+            !x.IsPlayer && now - x.PositionReceivedAt <= TimeSpan.FromSeconds(5));
+    }
+
+    public static string DriverName(NearbyCarSnapshot car, bool russian)
+    {
+        if (car.IsPlayer) return russian ? "ТЫ" : "YOU";
+        var name = new string(car.Name.Where(c => !char.IsControl(c)).ToArray()).Trim();
+        return string.IsNullOrEmpty(name) ? $"CAR {car.CarIndex}" : name;
+    }
+
+    public static string FormatOpponentLaps(NearbyCarSnapshot? car, bool russian)
+    {
+        if (car is null) return russian ? "Нет гонщика на соседней позиции" : "No driver in the adjacent position";
+        if (car.LastLaps.Count == 0) return russian ? "Ожидание завершённых кругов" : "Waiting for completed laps";
+        return string.Join("  |  ", car.LastLaps.TakeLast(3).Select(lap =>
+            FormatLap(lap.LapNumber, lap.LapTimeMs, lap.Valid, lap.PitLap, lap.SafetyCarAffected)));
+    }
+
+    public static string FormatNearbyTyres(RaceEngineerSnapshot snapshot, bool russian, DateTimeOffset now)
+    {
+        var player = snapshot.NearbyCars.FirstOrDefault(x => x.IsPlayer);
+        if (player is null || now - player.PositionReceivedAt > TimeSpan.FromSeconds(5))
+            return russian ? "Ожидание позиций" : "Waiting for positions";
+        return string.Join("\n", snapshot.NearbyCars.OrderBy(x => x.Position).Select(car =>
+        {
+            var name = DriverName(car, russian);
+            if (name.Length > 12) name = name[..11] + "…";
+            var fresh = car.TyresReceivedAt is { } at && now - at <= TimeSpan.FromSeconds(5) &&
+                        now - car.PositionReceivedAt <= TimeSpan.FromSeconds(5);
+            var compound = fresh ? car.VisualCompound switch
+            { 16 => "S", 17 => "M", 18 => "H", 7 => "I", 8 => "W", _ => "?" } : "?";
+            var age = fresh && car.TyreAgeLaps is { } laps ? laps.ToString(CultureInfo.InvariantCulture) : "?";
+            var pit = car.InPit ? " PIT" : "";
+            return $"{(car.IsPlayer ? ">" : " ")}P{car.Position,-2} {name,-12} {compound} {age,2}{(russian ? " кр." : " L")}{pit}";
         }));
     }
 

@@ -114,3 +114,16 @@ GitHub Actions выполняет Release build, self-tests, xUnit-регрес�
 ## Лицензия и товарные знаки
 
 Проект не аффилирован с Electronic Arts или Formula 1. Названия игр и серий принадлежат соответствующим правообладателям. Перед распространением приложения добавьте выбранную лицензию в `LICENSE`.
+
+
+### Nearby-driver overlay (0.10.7)
+
+Open **Race Engineer → Open overlay → Edit overlay** (Russian: **Открыть оверлей → Настроить оверлей**).
+Three additional cards appear alongside the existing widgets:
+
+- **TYRES · AGE / ШИНЫ · ВОЗРАСТ**: the player and race positions ±2, including names, compound and laps on the current set. Place it next to the game's upper-left leaderboard. `0` is a fresh set; `?` means unavailable or stale data, not an estimated age. S/M/H are Soft/Medium/Hard; I/W are Intermediate/Wet.
+- **AHEAD / ВПЕРЕДИ** and **BEHIND / СЗАДИ**: the last three completed laps of the driver one race position ahead or behind. Cards follow overtakes and use the same lap-time format as the player's card. PIT, INVALID and observed SC/VSC laps retain their labels. Current unfinished laps are excluded.
+
+Drag the cards beside your existing lap panel, adjust their scale with ± or the mouse wheel, then **Lock / Закрепить**. The saved layout persists across launches. **Show all / Показать все** restores hidden cards without resetting their positions. At the front/back of the field there may be fewer than five nearby rows. Neighbours are selected by race position, not physical proximity to a lapped car.
+
+The cards work while recording UDP. Missing opponent telemetry is shown explicitly; no tyre age is inferred from wear. Recent lap history can fill in from the game's Session History packets after Lap Data identifies the current lap.

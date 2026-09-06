@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.7
+
+- Added a movable nearby-tyres card for the player and up to two race positions ahead/behind, showing the current compound and actual laps on that set.
+- Added separate ahead/behind cards with each opponent's last three completed laps, using the same time/flag formatting as the player's card.
+- Track histories by car slot so overtakes change the displayed neighbour without mixing lap times. Packet 11 can backfill completed laps after joining a session late.
+- Clear stale/future data on session changes and flashbacks; display unknown tyre ages as `?` and keep new-tyre age zero valid.
+- Existing overlay positions and visibility settings are retained; the three new cards support drag, scale, hide and click-through locking.
+
+
 ## 0.10.6
 
 - Analyze lap quality one car at a time to reduce memory use on long recordings, preserving all 24 slots and existing flashback rules.
