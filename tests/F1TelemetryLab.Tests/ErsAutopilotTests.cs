@@ -137,35 +137,64 @@ public sealed class ErsAutopilotTests
         var state = State(DateTimeOffset.UnixEpoch, distance: 3_500, battery: 70, throttle: 100) with
         {
             AutomationAllowed = false,
-            BlockReason = "Online session detected."
+            BlockReason = "Game is paused."
         };
 
         var decision = new ErsDecisionEngine(ChinaProfile()).Evaluate(state);
 
         Assert.True(decision.Blocked);
         Assert.Equal(decision.CurrentMode, decision.TargetMode);
-        Assert.Contains("Online", decision.Reason);
+        Assert.Contains("Game is paused", decision.Reason);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void LiveServiceSendsCommandsAndConfirmsTelemetryInOnlineAndOfflineSessions(bool isNetworkGame)
+    {
+        var audit = new List<ErsAuditRecord>();
+        WithService(new FakeInputSink(), (service, sink) =>
+        {
+            var now = DateTimeOffset.UtcNow;
+            service.ProcessPacket(SessionPacket(isNetworkGame, ersAssist: 0), now);
+            service.ProcessPacket(LapPacket(distance: 3_500), now);
+            service.ProcessPacket(TelemetryPacket(), now);
+            service.ProcessPacket(StatusPacket(ErsDeployMode.Medium), now);
+
+            Assert.Equal("Key sent", service.Status.State);
+            Assert.Equal(1, sink.TapCount);
+
+            service.ProcessPacket(StatusPacket(ErsDeployMode.Hotlap), now);
+            Assert.Contains(audit, row => row.Action == "telemetry-confirmed" && row.CurrentMode == "Hotlap");
+        }, audit);
     }
 
     [Fact]
-    public void LiveServiceHardBlocksOnlineSessionsBeforeInput()
+    public void OnlineSessionStillBlocksInputWhileNetworkPaused()
     {
         WithService(new FakeInputSink(), (service, sink) =>
         {
-            service.ProcessPacket(SessionPacket(isNetworkGame: true, ersAssist: 0), DateTimeOffset.UtcNow);
-
+            var now = DateTimeOffset.UtcNow;
+            var status = StatusPacket(ErsDeployMode.Medium);
+            status[F12026Parser.HeaderSize + 58] = 1;
+            service.ProcessPacket(SessionPacket(true, 0), now);
+            service.ProcessPacket(LapPacket(3_500), now);
+            service.ProcessPacket(TelemetryPacket(), now);
+            service.ProcessPacket(status, now);
             Assert.Equal("Blocked", service.Status.State);
-            Assert.Contains("Online", service.Status.Detail);
+            Assert.Contains("Game is paused", service.Status.Detail);
             Assert.Equal(0, sink.TapCount);
         });
     }
 
-    [Fact]
-    public void LiveServiceRequiresInGameErsAssistOff()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void LiveServiceRequiresInGameErsAssistOff(bool isNetworkGame)
     {
         WithService(new FakeInputSink(), (service, sink) =>
         {
-            service.ProcessPacket(SessionPacket(isNetworkGame: false, ersAssist: 1), DateTimeOffset.UtcNow);
+            service.ProcessPacket(SessionPacket(isNetworkGame: isNetworkGame, ersAssist: 1), DateTimeOffset.UtcNow);
 
             Assert.Equal("Blocked", service.Status.State);
             Assert.Contains("ERS Assist off", service.Status.Detail);
@@ -173,17 +202,19 @@ public sealed class ErsAutopilotTests
         });
     }
 
-    [Fact]
-    public void EmergencyStopRemainsLatchedForTheRecording()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void EmergencyStopRemainsLatchedForTheRecording(bool isNetworkGame)
     {
         var input = new FakeInputSink { EmergencyStop = true };
         WithService(input, (service, sink) =>
         {
-            service.ProcessPacket(SessionPacket(isNetworkGame: false, ersAssist: 0), DateTimeOffset.UtcNow);
+            service.ProcessPacket(SessionPacket(isNetworkGame: isNetworkGame, ersAssist: 0), DateTimeOffset.UtcNow);
             Assert.Equal("Emergency stop", service.Status.State);
 
             sink.EmergencyStop = false;
-            service.ProcessPacket(SessionPacket(isNetworkGame: false, ersAssist: 0), DateTimeOffset.UtcNow);
+            service.ProcessPacket(SessionPacket(isNetworkGame: isNetworkGame, ersAssist: 0), DateTimeOffset.UtcNow);
 
             Assert.Equal("Blocked", service.Status.State);
             Assert.Contains("Emergency stop F12", service.Status.Detail);
@@ -455,7 +486,7 @@ public sealed class ErsAutopilotTests
         return packet;
     }
 
-    private static void WithService(FakeInputSink input, Action<ErsAutopilotService, FakeInputSink> test)
+    private static void WithService(FakeInputSink input, Action<ErsAutopilotService, FakeInputSink> test, List<ErsAuditRecord>? audit = null)
     {
         var folder = Path.Combine(Path.GetTempPath(), $"f1tlab-ers-service-{Guid.NewGuid():N}");
         Directory.CreateDirectory(folder);
@@ -465,7 +496,8 @@ public sealed class ErsAutopilotTests
             using var service = new ErsAutopilotService(
                 new ErsAutopilotOptions { OperatingMode = ErsAutopilotOperatingMode.Live },
                 profiles,
-                input);
+                input,
+                audit is null ? null : audit.Add);
             test(service, input);
         }
         finally
@@ -474,13 +506,15 @@ public sealed class ErsAutopilotTests
         }
     }
 
-    [Fact]
-    public void QueuedOldPacketsCannotSendLiveCommands()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void QueuedOldPacketsCannotSendLiveCommands(bool isNetworkGame)
     {
         WithService(new FakeInputSink(), (service, input) =>
         {
             var stale = DateTimeOffset.UtcNow.AddSeconds(-10);
-            service.ProcessPacket(SessionPacket(false, 0), stale);
+            service.ProcessPacket(SessionPacket(isNetworkGame, 0), stale);
             service.ProcessPacket(LapPacket(3_500), stale);
             service.ProcessPacket(TelemetryPacket(), stale);
             service.ProcessPacket(StatusPacket(ErsDeployMode.Medium), stale);

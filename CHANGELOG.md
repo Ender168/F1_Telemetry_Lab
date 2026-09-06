@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.8
+
+- Enable ERS Live control in online races by removing the unconditional network-session block.
+- Update startup and settings guidance to describe online/offline support.
+- Verify online command delivery and telemetry feedback, while retaining ERS Assist, emergency stop, stale-data and network-pause checks.
+
 ## 0.10.7
 
 - Added a movable nearby-tyres card for the player and up to two race positions ahead/behind, showing the current compound and actual laps on that set.

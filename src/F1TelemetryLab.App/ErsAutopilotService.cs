@@ -55,7 +55,7 @@ public sealed class ErsAutopilotService : IDisposable
         _log?.Invoke(options.OperatingMode switch
         {
             ErsAutopilotOperatingMode.Live =>
-                $"ERS autopilot LIVE: profile feedback controls {ErsProfileStore.VirtualKeyName(options.DecreaseVirtualKey)}/{ErsProfileStore.VirtualKeyName(options.IncreaseVirtualKey)}. Online sessions are always blocked; F12 stops input for the rest of the recording.",
+                $"ERS autopilot LIVE: profile feedback controls {ErsProfileStore.VirtualKeyName(options.DecreaseVirtualKey)}/{ErsProfileStore.VirtualKeyName(options.IncreaseVirtualKey)}. Online and offline sessions are supported; F12 stops input for the rest of the recording.",
             ErsAutopilotOperatingMode.DryRun => "ERS autopilot DRY-RUN: decisions are logged, no keys are sent.",
             _ => "ERS autopilot is off."
         });
@@ -265,7 +265,6 @@ public sealed class ErsAutopilotService : IDisposable
             ? "Live ERS input is blocked until the next recording."
             : _inputFaultReason;
         if (_session is null) return "Waiting for Session packet 1.";
-        if (_session.IsNetworkGame) return "Online session detected. Automatic input is hard-blocked.";
         if (_options.OperatingMode == ErsAutopilotOperatingMode.Live && _session.ErsAssist < 0)
             return "Waiting for the 2026 ERS Assist flag before enabling live input.";
         if (_options.OperatingMode == ErsAutopilotOperatingMode.Live && _session.ErsAssist != 0)
