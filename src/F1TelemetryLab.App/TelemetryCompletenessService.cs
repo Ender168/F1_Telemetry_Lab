@@ -50,7 +50,8 @@ public static class TelemetryCompletenessService
         var relevantRawCount = CountRelevantRawPackets(write);
         var previousVersion = ReadMetaInt(write, "telemetry_completeness_version");
         var previousCount = ReadMetaLong(write, "telemetry_completeness_raw_packets");
-        var alreadyComplete = previousVersion == CompletenessVersion &&
+        var alreadyComplete = (playerOnly || ReadMetaInt(write, "telemetry_completeness_player_only") == 0) &&
+                              previousVersion == CompletenessVersion &&
                               previousCount == relevantRawCount &&
                               (!TableExists(write, "car_telemetry") || ColumnExists(write, "car_telemetry", "tyre_inner_temp_fl")) &&
                               TableExists(write, "motion_ex_player") &&
@@ -123,6 +124,7 @@ public static class TelemetryCompletenessService
 
         ImproveClassification(write, packet8Seen);
         UpdateSessionKindMetadata(write, eventCodes, packet8Seen);
+        SetMeta(write, "telemetry_completeness_player_only", playerOnly ? "1" : "0");
         SetMeta(write, "telemetry_completeness_version", CompletenessVersion.ToString(CultureInfo.InvariantCulture));
         SetMeta(write, "telemetry_completeness_raw_packets", relevantRawCount.ToString(CultureInfo.InvariantCulture));
         SetMeta(write, "extended_telemetry_rows_updated", telemetryRows.ToString(CultureInfo.InvariantCulture));

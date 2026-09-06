@@ -27,6 +27,8 @@ public sealed class WindowsKeyboardErsInputSink : IErsInputSink
     private readonly object _sync = new();
     private readonly Timer _releaseTimer;
     private ErsInputResult? _pendingRelease;
+    private long _pressedAtTimestamp;
+    private int _holdMilliseconds;
 
     public WindowsKeyboardErsInputSink()
     {
@@ -38,8 +40,16 @@ public sealed class WindowsKeyboardErsInputSink : IErsInputSink
         lock (_sync)
         {
             if (_disposed || _pressedScanCode == 0) return;
+            // A previously queued callback may run after a new tap. Respect the new deadline.
+            var remaining = _holdMilliseconds - Stopwatch.GetElapsedTime(_pressedAtTimestamp).TotalMilliseconds;
+            if (remaining > 0)
+            {
+                _releaseTimer.Change((int)Math.Ceiling(remaining), Timeout.Infinite);
+                return;
+            }
             // Key-up must not depend on another UDP packet arriving.
-            _pendingRelease = ReleaseIfDue(DateTimeOffset.MaxValue);
+            var result = ReleaseIfDue(DateTimeOffset.MaxValue);
+            _pendingRelease ??= result;
             if (_pressedScanCode != 0) _releaseTimer.Change(30, Timeout.Infinite);
         }
     }
@@ -90,6 +100,8 @@ public sealed class WindowsKeyboardErsInputSink : IErsInputSink
             _pressedScanCode = scanCode;
             _pressedVirtualKey = virtualKey;
             var holdMs = Math.Clamp(options.KeyHoldMilliseconds, 30, 250);
+            _holdMilliseconds = holdMs;
+            _pressedAtTimestamp = Stopwatch.GetTimestamp();
             _releaseAt = now.AddMilliseconds(holdMs);
             _releaseTimer.Change(holdMs, Timeout.Infinite);
             return ErsInputResult.Ok(
@@ -115,10 +127,10 @@ public sealed class WindowsKeyboardErsInputSink : IErsInputSink
 
     public void Dispose()
     {
-        _releaseTimer.Dispose();
         lock (_sync)
         {
             if (_disposed) return;
+            _releaseTimer.Dispose();
             if (_pressedScanCode != 0)
             {
                 _ = SendInput(1, new[] { KeyboardInput(_pressedScanCode, ScanCode | KeyUp) }, Marshal.SizeOf<Input>());

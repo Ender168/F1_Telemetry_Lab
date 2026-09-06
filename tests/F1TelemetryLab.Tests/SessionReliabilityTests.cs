@@ -98,6 +98,32 @@ public sealed class SessionReliabilityTests
     }
 
     [Fact]
+    public void ClassificationFromAnotherSessionIsNeverAppliedToLatestLapSession()
+    {
+        WithDatabase((folder, path) =>
+        {
+            using (var db = new TelemetryDatabase(path))
+            {
+                var laps = Packet(2, 57 * 24, 1);
+                BinaryPrimitives.WriteUInt64LittleEndian(laps.AsSpan(7), 92);
+                var row = laps.AsSpan(F12026Parser.HeaderSize + 21 * 57, 57);
+                row[32] = 1; row[33] = 1;
+                Store(db, laps, DateTimeOffset.UnixEpoch);
+                var finals = Packet(8, 1 + 46 * 24, 2);
+                finals[F12026Parser.HeaderSize] = 1;
+                finals[F12026Parser.HeaderSize + 1] = 1;
+                finals[F12026Parser.HeaderSize + 2] = 29;
+                finals[F12026Parser.HeaderSize + 6] = 3;
+                Store(db, finals, DateTimeOffset.UnixEpoch.AddSeconds(1));
+            }
+            AnalysisEngine.AnalyzeSession(folder);
+            using var con = Open(path);
+            Assert.Equal(0, Scalar(con, "SELECT COUNT(*) FROM final_classification WHERE classification_source='official_udp'"));
+            Assert.Equal(1, Scalar(con, "SELECT COUNT(*) FROM final_classification WHERE car_idx=21 AND classification_is_official=0"));
+        });
+    }
+
+    [Fact]
     public void FailedFinalizationDoesNotReplaceOriginalDatabase()
     {
         WithDatabase((folder, path) =>

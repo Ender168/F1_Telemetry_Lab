@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.10.6
+
+- Analyze lap quality one car at a time to reduce memory use on long recordings, preserving all 24 slots and existing flashback rules.
+- Decode only the player slot for live telemetry/status/damage consumers; enrich only retained player thermal detail during finalization.
+- Finish enrichment, compaction, analysis metadata and SQLite integrity verification on a staging database before replacing the source.
+- Count selected official classification rows, not repeated packet 8 deliveries; support classification-only recordings without mixing session UIDs.
+- Reuse the session-counter SQL command and commit its update with the corresponding raw packet.
+- Use wall-clock freshness for live ERS, release keyboard pulses independently of UDP arrivals, and disable input before stop-time queue draining.
+- Keep ERS decision transitions and a one-second heartbeat instead of writing every distance-dependent reason; preserve commands and feedback.
+- Preserve the previous RAR until the replacement passes verification, and drain WinRAR stdout/stderr concurrently.
+
+
 ## 0.10.5
 
 - Detached the Race Engineer overlay from the main application window so it stays visible when F1 receives focus.

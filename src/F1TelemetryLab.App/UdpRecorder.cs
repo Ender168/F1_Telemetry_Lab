@@ -207,7 +207,8 @@ public sealed class UdpRecorder : IAsyncDisposable
         if (cts is null) return _metadata;
 
         // Stop input before waiting for final packets or draining the write queue.
-        _ersAutopilot?.StopInput();
+        try { _ersAutopilot?.StopInput(); }
+        catch (Exception ex) { Log?.Invoke("ERS input stop warning: " + ex.Message); }
         await WaitForFinalClassificationIfNeededAsync();
 
         _cts = null;

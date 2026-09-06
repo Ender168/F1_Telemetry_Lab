@@ -519,7 +519,7 @@ public sealed class ErsAutopilotTests
         service.ProcessPacket(StatusPacket(ErsDeployMode.Medium), now);
         for (var i = 0; i < 100; i++)
             service.ProcessPacket(LapPacket(3_500 + i), now.AddMilliseconds(i * 5));
-        Assert.Single(records.Where(x => x.Action == "decision"));
+        Assert.Single(records, x => x.Action == "decision");
         service.ProcessPacket(LapPacket(3_650), now.AddMilliseconds(1_000));
         Assert.Equal(2, records.Count(x => x.Action == "decision"));
     }

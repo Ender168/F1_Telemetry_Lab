@@ -48,7 +48,7 @@ public sealed class AnalysisPackTests
             Assert.Contains("-m5", add);
             Assert.Contains("-md128m", add);
             Assert.Equal("session.sqlite", add[^1]);
-            Assert.Single(add, x => !x.StartsWith('-') && x != "a" && x != rar);
+            Assert.Single(add, x => !x.StartsWith('-') && x != "a" && x != add[^2]);
             Assert.Equal("t", runner.Calls[1][0]);
 
             var extracted = Path.Combine(root, "snapshot.sqlite");
@@ -70,6 +70,38 @@ public sealed class AnalysisPackTests
         {
             SqliteConnection.ClearAllPools();
             try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void FailedArchiveVerificationPreservesPreviousArchive()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "f1-pack-failure-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        try
+        {
+            var database = Path.Combine(folder, "session.sqlite");
+            using (var db = new TelemetryDatabase(database)) { }
+            var archive = Path.Combine(folder, "race.rar");
+            File.WriteAllText(archive, "previous verified archive");
+            Assert.Throws<InvalidDataException>(() => SessionPackager.CreateRar(folder, database, "race",
+                processRunner: new FailingRarRunner()));
+            Assert.Equal("previous verified archive", File.ReadAllText(archive));
+            Assert.Empty(Directory.GetFiles(folder, "*.pending.rar"));
+        }
+        finally { SqliteConnection.ClearAllPools(); Directory.Delete(folder, true); }
+    }
+
+    private sealed class FailingRarRunner : IRarProcessRunner
+    {
+        public RarProcessResult Run(string executablePath, string workingDirectory, IReadOnlyList<string> arguments)
+        {
+            if (arguments[0] == "a")
+            {
+                File.WriteAllText(arguments[^2], "broken archive");
+                return new RarProcessResult(0, "", "");
+            }
+            return new RarProcessResult(2, "", "Injected CRC failure");
         }
     }
 
