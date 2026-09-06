@@ -10,8 +10,8 @@ public sealed class RaceEngineerTests
     {
         var layout = OverlayLayoutService.Default(1920, 1080);
 
-        Assert.Equal(6, layout.Widgets.Count);
-        Assert.Equal(6, layout.Widgets.Select(x => x.Id).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+        Assert.Equal(9, layout.Widgets.Count);
+        Assert.Equal(9, layout.Widgets.Select(x => x.Id).Distinct(StringComparer.OrdinalIgnoreCase).Count());
         Assert.Contains(layout.Widgets, x => x.Id == "ers-energy");
         Assert.Contains(layout.Widgets, x => x.Id == "ers-tactical");
         Assert.Contains(layout.Widgets, x => x.Id == "ers-action");

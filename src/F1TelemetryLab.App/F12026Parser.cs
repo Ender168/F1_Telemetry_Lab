@@ -48,14 +48,17 @@ public static class F12026Parser
         }
     }
 
-    public static List<CarTelemetrySample> ParseCarTelemetryPacket(ReadOnlySpan<byte> data, DateTimeOffset receivedAt, int? activeCars = null)
+    public static List<CarTelemetrySample> ParseCarTelemetryPacket(ReadOnlySpan<byte> data, DateTimeOffset receivedAt, int? activeCars = null, int? onlyCarIndex = null)
     {
-        var samples = new List<CarTelemetrySample>(MaxCars2026);
+        var samples = new List<CarTelemetrySample>(onlyCarIndex.HasValue ? 1 : MaxCars2026);
         if (!TryParseHeader(data, out var h)) return samples;
         if (h.PacketFormat != 2026 || h.PacketId != 6) return samples;
 
-        var offset = HeaderSize;
-        for (var i = 0; i < ParseCarCount(activeCars, h); i++)
+        var first = onlyCarIndex ?? 0;
+        var end = onlyCarIndex.HasValue ? first + 1 : ParseCarCount(activeCars, h);
+        if (first < 0 || first >= MaxCars2026 || end > MaxCars2026) return samples;
+        var offset = HeaderSize + first * CarTelemetrySize2026;
+        for (var i = first; i < end; i++)
         {
             if (offset + CarTelemetrySize2026 > data.Length) break;
             var c = data.Slice(offset, CarTelemetrySize2026);
@@ -206,14 +209,17 @@ public static class F12026Parser
         return samples;
     }
 
-    public static List<CarStatusSample> ParseCarStatusPacket(ReadOnlySpan<byte> data, DateTimeOffset receivedAt, int? activeCars = null)
+    public static List<CarStatusSample> ParseCarStatusPacket(ReadOnlySpan<byte> data, DateTimeOffset receivedAt, int? activeCars = null, int? onlyCarIndex = null)
     {
-        var samples = new List<CarStatusSample>(MaxCars2026);
+        var samples = new List<CarStatusSample>(onlyCarIndex.HasValue ? 1 : MaxCars2026);
         if (!TryParseHeader(data, out var h)) return samples;
         if (h.PacketFormat != 2026 || h.PacketId != 7) return samples;
 
-        var offset = HeaderSize;
-        for (var i = 0; i < ParseCarCount(activeCars, h); i++)
+        var first = onlyCarIndex ?? 0;
+        var end = onlyCarIndex.HasValue ? first + 1 : ParseCarCount(activeCars, h);
+        if (first < 0 || first >= MaxCars2026 || end > MaxCars2026) return samples;
+        var offset = HeaderSize + first * CarStatusSize2026;
+        for (var i = first; i < end; i++)
         {
             if (offset + CarStatusSize2026 > data.Length) break;
             var c = data.Slice(offset, CarStatusSize2026);
@@ -241,14 +247,17 @@ public static class F12026Parser
         return samples;
     }
 
-    public static List<CarDamageSample> ParseCarDamagePacket(ReadOnlySpan<byte> data, DateTimeOffset receivedAt, int? activeCars = null)
+    public static List<CarDamageSample> ParseCarDamagePacket(ReadOnlySpan<byte> data, DateTimeOffset receivedAt, int? activeCars = null, int? onlyCarIndex = null)
     {
-        var samples = new List<CarDamageSample>(MaxCars2026);
+        var samples = new List<CarDamageSample>(onlyCarIndex.HasValue ? 1 : MaxCars2026);
         if (!TryParseHeader(data, out var h)) return samples;
         if (h.PacketFormat != 2026 || h.PacketId != 10) return samples;
 
-        var offset = HeaderSize;
-        for (var i = 0; i < ParseCarCount(activeCars, h); i++)
+        var first = onlyCarIndex ?? 0;
+        var end = onlyCarIndex.HasValue ? first + 1 : ParseCarCount(activeCars, h);
+        if (first < 0 || first >= MaxCars2026 || end > MaxCars2026) return samples;
+        var offset = HeaderSize + first * CarDamageSize2026;
+        for (var i = first; i < end; i++)
         {
             if (offset + CarDamageSize2026 > data.Length) break;
             var c = data.Slice(offset, CarDamageSize2026);

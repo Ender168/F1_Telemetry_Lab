@@ -2,6 +2,10 @@ namespace F1TelemetryLab;
 
 public sealed class ErsAutopilotService : IDisposable
 {
+    private readonly object _sync = new();
+    private readonly TimeProvider _timeProvider;
+    private bool _stopped;
+    private bool _disposed;
     private readonly ErsAutopilotOptions _options;
     private readonly ErsProfileLoadResult _profiles;
     private readonly IErsInputSink _inputSink;
@@ -24,8 +28,10 @@ public sealed class ErsAutopilotService : IDisposable
     private bool _inputFault;
     private string _inputFaultReason = "";
     private string _lastDecisionSignature = "";
+    private DateTimeOffset _lastDecisionAuditAt;
     private string _lastInternalError = "";
     private ulong _sessionUid;
+    private uint? _flashbackOverallFrame;
     private ErsControlDecision? _lastDecision;
 
     public ErsAutopilotService(
@@ -34,8 +40,10 @@ public sealed class ErsAutopilotService : IDisposable
         IErsInputSink inputSink,
         Action<ErsAuditRecord>? auditSink = null,
         Action<ErsControlProfile, ErsAutopilotOptions>? profileSink = null,
-        Action<string>? log = null)
+        Action<string>? log = null,
+        TimeProvider? timeProvider = null)
     {
+        _timeProvider = timeProvider ?? TimeProvider.System;
         _options = options;
         _profiles = profiles;
         _inputSink = inputSink;
@@ -48,7 +56,7 @@ public sealed class ErsAutopilotService : IDisposable
         _log?.Invoke(options.OperatingMode switch
         {
             ErsAutopilotOperatingMode.Live =>
-                $"ERS autopilot LIVE: profile feedback controls {ErsProfileStore.VirtualKeyName(options.DecreaseVirtualKey)}/{ErsProfileStore.VirtualKeyName(options.IncreaseVirtualKey)}. Online sessions are always blocked; F12 stops input for the rest of the recording.",
+                $"ERS autopilot LIVE: profile feedback controls {ErsProfileStore.VirtualKeyName(options.DecreaseVirtualKey)}/{ErsProfileStore.VirtualKeyName(options.IncreaseVirtualKey)}. Online and offline sessions are supported; F12 stops input for the rest of the recording.",
             ErsAutopilotOperatingMode.DryRun => "ERS autopilot DRY-RUN: decisions are logged, no keys are sent.",
             _ => "ERS autopilot is off."
         });
@@ -60,11 +68,21 @@ public sealed class ErsAutopilotService : IDisposable
 
     public void ProcessPacket(byte[] payload, DateTimeOffset receivedAt)
     {
+        lock (_sync)
+        {
+            if (_stopped || _disposed) return;
+            ProcessPacketCore(payload, receivedAt);
+        }
+    }
+
+    private void ProcessPacketCore(byte[] payload, DateTimeOffset receivedAt)
+    {
         if (_options.OperatingMode == ErsAutopilotOperatingMode.Off) return;
+        var now = _options.OperatingMode == ErsAutopilotOperatingMode.Live ? _timeProvider.GetUtcNow() : receivedAt;
         try
         {
             if (!F12026Parser.TryParseHeader(payload, out var header) || header.PacketFormat != AppInfo.SupportedPacketFormat) return;
-            if (_options.OperatingMode == ErsAutopilotOperatingMode.Live && !PollInputRelease(receivedAt)) return;
+            if (_options.OperatingMode == ErsAutopilotOperatingMode.Live && !PollInputRelease(now)) return;
             if (_sessionUid != 0 && header.SessionUid != _sessionUid) ResetForSession(header.SessionUid);
             _sessionUid = header.SessionUid;
             if (_options.OperatingMode == ErsAutopilotOperatingMode.Live && _inputSink.EmergencyStopRequested(_options))
@@ -78,6 +96,22 @@ public sealed class ErsAutopilotService : IDisposable
                 return;
             }
 
+            // Overall frames continue across a rewind; ordinary frame/session-time counters do not.
+            // Ignore delayed packets and repeated FLBK deliveries from the abandoned timeline.
+            if (_flashbackOverallFrame is uint cutoff && header.OverallFrameIdentifier <= cutoff) return;
+            if (header.PacketId == 3)
+            {
+                var eventOffset = F12026Parser.HeaderSize;
+                if (payload.Length >= eventOffset + 12 &&
+                    payload.AsSpan(eventOffset, 4).SequenceEqual("FLBK"u8))
+                {
+                    var targetTime = System.Buffers.Binary.BinaryPrimitives.ReadSingleLittleEndian(payload.AsSpan(eventOffset + 8));
+                    if (float.IsFinite(targetTime) && targetTime >= 0)
+                        ResetAfterFlashback(header.OverallFrameIdentifier, now);
+                }
+                return;
+            }
+
             switch (header.PacketId)
             {
                 case 1:
@@ -88,18 +122,18 @@ public sealed class ErsAutopilotService : IDisposable
                     UpdateLapRows(payload, receivedAt);
                     break;
                 case 6:
-                    _telemetry = F12026Parser.ParseCarTelemetryPacket(payload, receivedAt)
+                    _telemetry = F12026Parser.ParseCarTelemetryPacket(payload, receivedAt, onlyCarIndex: header.PlayerCarIndex)
                         .FirstOrDefault(sample => sample.IsPlayer);
                     break;
                 case 7:
-                    _carStatus = F12026Parser.ParseCarStatusPacket(payload, receivedAt)
+                    _carStatus = F12026Parser.ParseCarStatusPacket(payload, receivedAt, onlyCarIndex: header.PlayerCarIndex)
                         .FirstOrDefault(sample => sample.IsPlayer);
                     break;
                 default:
                     return;
             }
 
-            Evaluate(receivedAt);
+            Evaluate(now);
         }
         catch (Exception ex)
         {
@@ -118,10 +152,25 @@ public sealed class ErsAutopilotService : IDisposable
         }
     }
 
+    public void StopInput()
+    {
+        lock (_sync)
+        {
+            if (_stopped) return;
+            _stopped = true;
+            _inputSink.Dispose();
+            SetStatus("Stopped", "", null, null, null, "Recording stopped; ERS input is disabled.");
+        }
+    }
+
     public void Dispose()
     {
-        _inputSink.Dispose();
-        _audit.Dispose();
+        lock (_sync)
+        {
+            if (_disposed) return;
+            try { StopInput(); }
+            finally { _disposed = true; _audit.Dispose(); }
+        }
     }
 
     private void UpdateLapRows(byte[] payload, DateTimeOffset receivedAt)
@@ -233,7 +282,6 @@ public sealed class ErsAutopilotService : IDisposable
             ? "Live ERS input is blocked until the next recording."
             : _inputFaultReason;
         if (_session is null) return "Waiting for Session packet 1.";
-        if (_session.IsNetworkGame) return "Online session detected. Automatic input is hard-blocked.";
         if (_options.OperatingMode == ErsAutopilotOperatingMode.Live && _session.ErsAssist < 0)
             return "Waiting for the 2026 ERS Assist flag before enabling live input.";
         if (_options.OperatingMode == ErsAutopilotOperatingMode.Live && _session.ErsAssist != 0)
@@ -332,9 +380,9 @@ public sealed class ErsAutopilotService : IDisposable
             $"{result.Message} Waiting for {_pendingExpectedMode}. {decision.Reason}");
     }
 
-    private bool PollInputRelease(DateTimeOffset now)
+    private bool PollInputRelease(DateTimeOffset now, bool releaseImmediately = false)
     {
-        var result = _inputSink.Poll(now);
+        var result = _inputSink.Poll(releaseImmediately ? DateTimeOffset.MaxValue : now);
         if (result is null) return true;
         _audit.Write(InputLifecycleDecision(now), result.Success ? result.Message : "input-error: " + result.Message);
         if (result.Success)
@@ -390,8 +438,10 @@ public sealed class ErsAutopilotService : IDisposable
 
     private void AuditDecisionTransition(ErsControlDecision decision)
     {
-        var signature = $"{decision.Blocked}|{decision.RuleId}|{decision.TargetMode}|{decision.Reason}";
-        if (string.Equals(signature, _lastDecisionSignature, StringComparison.Ordinal)) return;
+        var signature = $"{decision.Blocked}|{decision.RuleId}|{decision.Segment}|{decision.CurrentMode}|{decision.TargetMode}|{decision.TacticalMode}|{decision.TacticalIntensity}|{decision.EnergyState}|{(decision.Blocked ? decision.Reason : "")}";
+        if (string.Equals(signature, _lastDecisionSignature, StringComparison.Ordinal) &&
+            decision.ReceivedAt - _lastDecisionAuditAt < TimeSpan.FromSeconds(1)) return;
+        _lastDecisionAuditAt = decision.ReceivedAt;
         _lastDecisionSignature = signature;
         _audit.Write(decision, decision.Blocked ? "blocked" : "decision");
     }
@@ -412,9 +462,40 @@ public sealed class ErsAutopilotService : IDisposable
         });
     }
 
+    private void ResetAfterFlashback(uint overallFrame, DateTimeOffset now)
+    {
+        var resetDecision = InputLifecycleDecision(now) with
+        {
+            Blocked = true,
+            RuleId = "flashback-reset",
+            Reason = "Confirmed FLBK: cleared ERS timeline state; waiting for fresh Session, Lap, Telemetry and Car Status packets."
+        };
+        // Release any held pulse without disposing the sink, so Live can resume afterwards.
+        if (_options.OperatingMode == ErsAutopilotOperatingMode.Live)
+            PollInputRelease(now, releaseImmediately: true);
+        _flashbackOverallFrame = overallFrame;
+        _engine = _profile is null ? null : new ErsDecisionEngine(_profile);
+        _session = null;
+        _telemetry = null;
+        _carStatus = null;
+        _playerLap = null;
+        _lapRows.Clear();
+        ClearPendingCommand();
+        _pendingSince = default;
+        _lastCommandAt = DateTimeOffset.MinValue;
+        _lastDecisionSignature = "";
+        _lastDecisionAuditAt = default;
+        Volatile.Write(ref _lastDecision, null);
+        _audit.Write(resetDecision, "flashback-reset");
+        _log?.Invoke(resetDecision.Reason);
+        // A rewind never clears a latched F12, input error or feedback failure.
+        SetStatus("Blocked", "", null, null, null, _inputFault ? _inputFaultReason : resetDecision.Reason);
+    }
+
     private void ResetForSession(ulong sessionUid)
     {
         _sessionUid = sessionUid;
+        _flashbackOverallFrame = null;
         _session = null;
         _telemetry = null;
         _carStatus = null;

@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.10.9
+
+- Reset the ERS decision engine on confirmed FLBK events, clearing once-per-lap rules, active deployment timers, gap history and learned energy segments from the abandoned timeline.
+- Release pending key pulses, cancel feedback/retries and wait for fresh Session/Lap/Telemetry/Status packets before resuming; ignore delayed pre-flashback packets and duplicate events.
+- Keep latched emergency stops and input failures across flashbacks. Add flashback-reset audit events.
+
+## 0.10.8
+
+- Enable ERS Live control in online races by removing the unconditional network-session block.
+- Update startup and settings guidance to describe online/offline support.
+- Verify online command delivery and telemetry feedback, while retaining ERS Assist, emergency stop, stale-data and network-pause checks.
+
+## 0.10.7
+
+- Added a movable nearby-tyres card for the player and up to two race positions ahead/behind, showing the current compound and actual laps on that set.
+- Added separate ahead/behind cards with each opponent's last three completed laps, using the same time/flag formatting as the player's card.
+- Track histories by car slot so overtakes change the displayed neighbour without mixing lap times. Packet 11 can backfill completed laps after joining a session late.
+- Clear stale/future data on session changes and flashbacks; display unknown tyre ages as `?` and keep new-tyre age zero valid.
+- Existing overlay positions and visibility settings are retained; the three new cards support drag, scale, hide and click-through locking.
+
+
+## 0.10.6
+
+- Analyze lap quality one car at a time to reduce memory use on long recordings, preserving all 24 slots and existing flashback rules.
+- Decode only the player slot for live telemetry/status/damage consumers; enrich only retained player thermal detail during finalization.
+- Finish enrichment, compaction, analysis metadata and SQLite integrity verification on a staging database before replacing the source.
+- Count selected official classification rows, not repeated packet 8 deliveries; support classification-only recordings without mixing session UIDs.
+- Reuse the session-counter SQL command and commit its update with the corresponding raw packet.
+- Use wall-clock freshness for live ERS, release keyboard pulses independently of UDP arrivals, and disable input before stop-time queue draining.
+- Keep ERS decision transitions and a one-second heartbeat instead of writing every distance-dependent reason; preserve commands and feedback.
+- Preserve the previous RAR until the replacement passes verification, and drain WinRAR stdout/stderr concurrently.
+
+
 ## 0.10.5
 
 - Detached the Race Engineer overlay from the main application window so it stays visible when F1 receives focus.

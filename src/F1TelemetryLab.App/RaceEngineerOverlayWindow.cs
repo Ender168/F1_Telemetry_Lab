@@ -19,10 +19,13 @@ public sealed class RaceEngineerOverlayWindow : Window
         public required TextBlock Value { get; init; }
         public required Control Editor { get; init; }
         public double Scale { get; set; } = 1;
+        public double BaseFontSize { get; init; } = 17;
     }
 
     private readonly bool _russian;
     private readonly Canvas _canvas = new();
+    private readonly Grid _nearbyTable = new() { ColumnDefinitions = new ColumnDefinitions("36,*,28,64"), RowDefinitions = new RowDefinitions("Auto,Auto,Auto,Auto,Auto") };
+    private readonly List<TextBlock[]> _nearbyCells = new();
     private readonly Dictionary<string, WidgetView> _widgets = new(StringComparer.OrdinalIgnoreCase);
     private readonly Border _editorBar;
     private OverlayLayout _layout = new();
@@ -49,6 +52,25 @@ public sealed class RaceEngineerOverlayWindow : Window
         TransparencyLevelHint = new[] { WindowTransparencyLevel.Transparent };
 
         AddWidget("laps", russian ? "ПОСЛЕДНИЕ КРУГИ" : "LAST LAPS", 390);
+        AddWidget("nearby-tyres", russian ? "ШИНЫ · ВОЗРАСТ" : "TYRES · AGE", 335, 14);
+        var nearbyPanel = (StackPanel)_widgets["nearby-tyres"].Border.Child!;
+        nearbyPanel.Children.Add(_nearbyTable);
+        for (var row = 0; row < 5; row++)
+        {
+            var cells = new TextBlock[4];
+            for (var column = 0; column < 4; column++)
+            {
+                var cell = new TextBlock { FontSize = 14, FontWeight = FontWeight.SemiBold,
+                    Foreground = Brushes.White, TextTrimming = TextTrimming.CharacterEllipsis,
+                    Margin = new Thickness(0, 2, 4, 2) };
+                if (column == 3) cell.HorizontalAlignment = HorizontalAlignment.Right;
+                Grid.SetRow(cell, row); Grid.SetColumn(cell, column);
+                _nearbyTable.Children.Add(cell); cells[column] = cell;
+            }
+            _nearbyCells.Add(cells);
+        }
+        AddWidget("laps-ahead", russian ? "ВПЕРЕДИ · ПОСЛЕДНИЕ КРУГИ" : "AHEAD · LAST LAPS", 390);
+        AddWidget("laps-behind", russian ? "СЗАДИ · ПОСЛЕДНИЕ КРУГИ" : "BEHIND · LAST LAPS", 390);
         AddWidget("tyres", russian ? "ШИНЫ" : "TYRES", 390);
         AddWidget("pit", russian ? "ПИТ-СТОП" : "PIT STOP", 420);
         AddWidget("ers-energy", russian ? "ERS · ЭНЕРГИЯ" : "ERS · ENERGY", 445);
@@ -131,18 +153,56 @@ public sealed class RaceEngineerOverlayWindow : Window
     public void UpdateSnapshot(RaceEngineerSnapshot snapshot)
     {
         var display = RaceEngineerText.Format(snapshot, _russian);
-        SetWidget("laps", display.Laps, LapsColour(snapshot));
+        SetWidget("laps", display.Laps.Replace("  |  ", "\n"), LapsColour(snapshot));
+        var now = DateTimeOffset.UtcNow;
+        UpdateNearbyTable(snapshot, now);
+        UpdateNeighbour("laps-ahead", RaceEngineerText.Neighbour(snapshot, -1, now), _russian ? "ВПЕРЕДИ" : "AHEAD");
+        UpdateNeighbour("laps-behind", RaceEngineerText.Neighbour(snapshot, 1, now), _russian ? "СЗАДИ" : "BEHIND");
         SetWidget("tyres", display.Tyres, TyresColour(snapshot.Tyres));
         SetWidget("pit", display.Pit, PitColour(snapshot.Pit));
         SetWidget("ers-energy", RaceEngineerText.FormatErsEnergy(snapshot.Ers, _russian), EnergyColour(snapshot.Ers));
         SetWidget("ers-tactical", RaceEngineerText.FormatErsTactical(snapshot.Ers, _russian), TacticalColour(snapshot.Ers));
         SetWidget("ers-action", RaceEngineerText.FormatErsAction(snapshot.Ers, _russian), ActionColour(snapshot.Ers));
 
+        ToolTip.SetTip(_widgets["nearby-tyres"].Border, _russian ? "Кругов на текущем комплекте шин. ? = нет свежих данных. S/M/H = Soft/Medium/Hard, I/W = Intermediate/Wet." : "Laps on the current tyre set. ? = no fresh data. S/M/H = Soft/Medium/Hard, I/W = Intermediate/Wet.");
         ToolTip.SetTip(_widgets["tyres"].Border, snapshot.Tyres.Reason);
         ToolTip.SetTip(_widgets["pit"].Border, snapshot.Pit.Reason);
         ToolTip.SetTip(_widgets["ers-energy"].Border, snapshot.Ers.Reason);
         ToolTip.SetTip(_widgets["ers-tactical"].Border, snapshot.Ers.Reason);
         ToolTip.SetTip(_widgets["ers-action"].Border, snapshot.Ers.Reason);
+    }
+
+    private void UpdateNearbyTable(RaceEngineerSnapshot snapshot, DateTimeOffset now)
+    {
+        var player = snapshot.NearbyCars.FirstOrDefault(x => x.IsPlayer);
+        var rows = player is not null && now - player.PositionReceivedAt <= TimeSpan.FromSeconds(5)
+            ? snapshot.NearbyCars.OrderBy(x => x.Position).Take(5).ToArray() : Array.Empty<NearbyCarSnapshot>();
+        _nearbyTable.IsVisible = rows.Length > 0;
+        _widgets["nearby-tyres"].Value.IsVisible = rows.Length == 0;
+        SetWidget("nearby-tyres", _russian ? "Ожидание позиций" : "Waiting for positions", Cyan);
+        for (var i = 0; i < 5; i++)
+        {
+            var cells = _nearbyCells[i];
+            foreach (var cell in cells) { cell.IsVisible = i < rows.Length; cell.FontSize = 14 * _widgets["nearby-tyres"].Scale; }
+            if (i >= rows.Length) continue;
+            var car = rows[i];
+            var fresh = car.TyresReceivedAt is { } at && now - at <= TimeSpan.FromSeconds(5) &&
+                        now - car.PositionReceivedAt <= TimeSpan.FromSeconds(5);
+            cells[0].Text = $"P{car.Position}";
+            cells[1].Text = RaceEngineerText.DriverName(car, _russian) + (car.InPit ? " · PIT" : "");
+            cells[0].Foreground = cells[1].Foreground = car.IsPlayer ? Cyan : Brushes.White;
+            var compound = fresh ? car.VisualCompound : null;
+            cells[2].Text = compound switch { 16 => "S", 17 => "M", 18 => "H", 7 => "I", 8 => "W", _ => "?" };
+            cells[2].Foreground = compound switch { 16 => Red, 17 => Amber, 18 => Brushes.White, 7 => Green, _ => Cyan };
+            cells[3].Text = (fresh && car.TyreAgeLaps is { } age ? age.ToString() : "?") + (_russian ? " кр." : " L");
+        }
+    }
+
+    private void UpdateNeighbour(string id, NearbyCarSnapshot? car, string label)
+    {
+        SetWidget(id, RaceEngineerText.FormatOpponentLaps(car, _russian).Replace("  |  ", "\n"), Cyan);
+        _widgets[id].Title.Text = car is null ? label : $"{label} · P{car.Position} {RaceEngineerText.DriverName(car, _russian)}";
+        _widgets[id].Title.TextTrimming = TextTrimming.CharacterEllipsis;
     }
 
     private void ConfigureForPrimaryScreen()
@@ -164,7 +224,7 @@ public sealed class RaceEngineerOverlayWindow : Window
         ApplyLayout();
     }
 
-    private void AddWidget(string id, string titleText, double baseWidth)
+    private void AddWidget(string id, string titleText, double baseWidth, double fontSize = 17)
     {
         var title = new TextBlock
         {
@@ -175,7 +235,7 @@ public sealed class RaceEngineerOverlayWindow : Window
         };
         var value = new TextBlock
         {
-            FontSize = 17,
+            FontSize = fontSize,
             FontWeight = FontWeight.SemiBold,
             Foreground = Brushes.White,
             TextWrapping = TextWrapping.Wrap
@@ -208,6 +268,7 @@ public sealed class RaceEngineerOverlayWindow : Window
         {
             Id = id,
             BaseWidth = baseWidth,
+            BaseFontSize = fontSize,
             Border = border,
             Title = title,
             Value = value,
@@ -299,11 +360,18 @@ public sealed class RaceEngineerOverlayWindow : Window
         SaveLayout();
     }
 
-    private static void ApplyScale(WidgetView widget)
+    private void ApplyScale(WidgetView widget)
     {
         widget.Border.Width = widget.BaseWidth * widget.Scale;
         widget.Title.FontSize = 12 * widget.Scale;
-        widget.Value.FontSize = 17 * widget.Scale;
+        widget.Value.FontSize = widget.BaseFontSize * widget.Scale;
+        if (widget.Id == "nearby-tyres")
+        {
+            _nearbyTable.ColumnDefinitions[0].Width = new GridLength(36 * widget.Scale);
+            _nearbyTable.ColumnDefinitions[2].Width = new GridLength(28 * widget.Scale);
+            _nearbyTable.ColumnDefinitions[3].Width = new GridLength(64 * widget.Scale);
+            foreach (var cells in _nearbyCells) foreach (var cell in cells) cell.FontSize = 14 * widget.Scale;
+        }
     }
 
     private void SetVisible(string id, bool visible)

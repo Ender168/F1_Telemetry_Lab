@@ -81,6 +81,9 @@ public static class OverlayLayoutService
             {
                 Widget("laps", 35, 90),
                 Widget("tyres", 35, 205),
+                Widget("nearby-tyres", 440, 90),
+                Widget("laps-ahead", 35, 340),
+                Widget("laps-behind", 35, 455),
                 Widget("pit", right, 90),
                 Widget("ers-energy", right, 220),
                 Widget("ers-tactical", right, 365),

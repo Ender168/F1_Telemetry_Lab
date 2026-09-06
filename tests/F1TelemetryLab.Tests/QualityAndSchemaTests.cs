@@ -309,7 +309,7 @@ public sealed class QualityAndSchemaTests
             Assert.Equal(0L, ScalarLong(analyzed, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='analysis_samples'"));
             Assert.Equal(0L, ScalarLong(analyzed, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='final_classification_packet'"));
             Assert.Equal(1L, ScalarLong(analyzed, "SELECT COUNT(*) FROM final_classification WHERE car_idx=21 AND classification_source='provisional_latest_lap_data' AND classification_is_official=0"));
-            Assert.Contains("packet 8 is absent", ScalarText(analyzed, "SELECT classification_note FROM final_classification LIMIT 1"), StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("No official packet 8 classification matched the selected session", ScalarText(analyzed, "SELECT classification_note FROM final_classification LIMIT 1"), StringComparison.OrdinalIgnoreCase);
         }
         finally
         {

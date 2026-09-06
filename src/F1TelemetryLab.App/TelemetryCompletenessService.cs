@@ -28,7 +28,7 @@ public static class TelemetryCompletenessService
         int Position,
         int PlayerCarIndex);
 
-    public static void Enrich(string databasePath, Action<string>? log = null)
+    public static void Enrich(string databasePath, Action<string>? log = null, bool playerOnly = false)
     {
         if (!File.Exists(databasePath)) return;
         SQLitePCL.Batteries_V2.Init();
@@ -50,7 +50,8 @@ public static class TelemetryCompletenessService
         var relevantRawCount = CountRelevantRawPackets(write);
         var previousVersion = ReadMetaInt(write, "telemetry_completeness_version");
         var previousCount = ReadMetaLong(write, "telemetry_completeness_raw_packets");
-        var alreadyComplete = previousVersion == CompletenessVersion &&
+        var alreadyComplete = (playerOnly || ReadMetaInt(write, "telemetry_completeness_player_only") == 0) &&
+                              previousVersion == CompletenessVersion &&
                               previousCount == relevantRawCount &&
                               (!TableExists(write, "car_telemetry") || ColumnExists(write, "car_telemetry", "tyre_inner_temp_fl")) &&
                               TableExists(write, "motion_ex_player") &&
@@ -103,7 +104,7 @@ public static class TelemetryCompletenessService
                             eventCodes.Add(Encoding.ASCII.GetString(payload, HeaderSize, 4));
                         break;
                     case 6:
-                        telemetryRows += EnrichCarTelemetryPacket(telemetryUpdate, payload, header);
+                        telemetryRows += EnrichCarTelemetryPacket(telemetryUpdate, payload, header, playerOnly);
                         break;
                     case 8:
                         packet8Seen = true;
@@ -123,6 +124,7 @@ public static class TelemetryCompletenessService
 
         ImproveClassification(write, packet8Seen);
         UpdateSessionKindMetadata(write, eventCodes, packet8Seen);
+        SetMeta(write, "telemetry_completeness_player_only", playerOnly ? "1" : "0");
         SetMeta(write, "telemetry_completeness_version", CompletenessVersion.ToString(CultureInfo.InvariantCulture));
         SetMeta(write, "telemetry_completeness_raw_packets", relevantRawCount.ToString(CultureInfo.InvariantCulture));
         SetMeta(write, "extended_telemetry_rows_updated", telemetryRows.ToString(CultureInfo.InvariantCulture));
@@ -226,13 +228,14 @@ public static class TelemetryCompletenessService
             EnsureColumn(connection, "final_classification", "provisional", "INTEGER");
     }
 
-    private static long EnrichCarTelemetryPacket(SqliteCommand command, byte[] payload, PacketHeader header)
+    private static long EnrichCarTelemetryPacket(SqliteCommand command, byte[] payload, PacketHeader header, bool playerOnly)
     {
         if (payload.Length < HeaderSize + CarTelemetrySize) return 0;
         var count = Math.Min(MaxCars, (payload.Length - HeaderSize) / CarTelemetrySize);
         var updated = 0L;
         for (var car = 0; car < count; car++)
         {
+            if (playerOnly && car != header.PlayerCarIndex) continue;
             var offset = HeaderSize + car * CarTelemetrySize;
             var c = payload.AsSpan(offset, CarTelemetrySize);
             command.Parameters["$uid"].Value = header.SessionUid.ToString(CultureInfo.InvariantCulture);

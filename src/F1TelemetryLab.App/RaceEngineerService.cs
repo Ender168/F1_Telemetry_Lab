@@ -20,6 +20,7 @@ public sealed class RaceEngineerService
     private readonly Action<string>? _log;
     private readonly Dictionary<int, LapDataSample> _lapRows = new();
     private readonly List<CompletedLiveLap> _completedLaps = new();
+    private readonly NearbyCarTracker _nearbyCars = new();
     private RaceEngineerSnapshot _snapshot = RaceEngineerSnapshot.Waiting;
     private SessionControlSample? _session;
     private LapDataSample? _playerLap;
@@ -74,18 +75,32 @@ public sealed class RaceEngineerService
                 case 2:
                     foreach (var row in F12026Parser.ParseLapDataPacket(payload, receivedAt))
                     {
+                        _nearbyCars.ObserveLap(row, _session is { SafetyCarStatus: > 0 });
                         _lapRows[row.CarIndex] = row;
                         if (row.IsPlayer) HandlePlayerLap(row);
                     }
                     break;
+                case 3:
+                    if (payload.Length >= F12026Parser.HeaderSize + 4 &&
+                        payload.AsSpan(F12026Parser.HeaderSize, 4).SequenceEqual("FLBK"u8))
+                        _nearbyCars.ClearAfterFlashback(header.OverallFrameIdentifier);
+                    else return;
+                    break;
+                case 4:
+                    _nearbyCars.ObserveParticipants(F12026Parser.ParseParticipantsPacket(payload, receivedAt));
+                    break;
+                case 11:
+                    _nearbyCars.ObserveHistory(payload, header);
+                    break;
                 case 6:
-                    _telemetry = F12026Parser.ParseCarTelemetryPacket(payload, receivedAt).FirstOrDefault(x => x.IsPlayer);
+                    _telemetry = F12026Parser.ParseCarTelemetryPacket(payload, receivedAt, onlyCarIndex: header.PlayerCarIndex).FirstOrDefault(x => x.IsPlayer);
                     break;
                 case 7:
-                    _status = F12026Parser.ParseCarStatusPacket(payload, receivedAt).FirstOrDefault(x => x.IsPlayer);
+                    _nearbyCars.ObserveStatus(payload, header, receivedAt);
+                    _status = F12026Parser.ParseCarStatusPacket(payload, receivedAt, onlyCarIndex: header.PlayerCarIndex).FirstOrDefault(x => x.IsPlayer);
                     break;
                 case 10:
-                    _damage = F12026Parser.ParseCarDamagePacket(payload, receivedAt).FirstOrDefault(x => x.IsPlayer);
+                    _damage = F12026Parser.ParseCarDamagePacket(payload, receivedAt, onlyCarIndex: header.PlayerCarIndex).FirstOrDefault(x => x.IsPlayer);
                     break;
                 case 12:
                     var sets = F12026Parser.ParseTyreSetsPacket(payload, receivedAt);
@@ -215,7 +230,7 @@ public sealed class RaceEngineerService
             _completedLaps.TakeLast(3).ToArray(),
             tyres,
             pit,
-            ers));
+            ers) { NearbyCars = _nearbyCars.Snapshot(now) });
     }
 
     private TyreLifeAdvice BuildTyreAdvice()
@@ -480,6 +495,7 @@ public sealed class RaceEngineerService
         _autopilotStatus = null;
         _autopilotDecision = null;
         _currentLap = null;
+        _nearbyCars.Clear();
         _lapRows.Clear();
         _completedLaps.Clear();
         Volatile.Write(ref _snapshot, RaceEngineerSnapshot.Waiting);
