@@ -57,13 +57,13 @@ public static class AnalysisEngine
         string sessionFolder,
         Action<string>? log)
     {
-        using var con = new SqliteConnection($"Data Source={dbPath};Default Timeout=60");
+        using var con = new SqliteConnection($"Data Source={dbPath};Default Timeout=60;Pooling=False");
         con.Open();
         CreateAnalysisSchema(con);
         ClearAnalysisTables(con);
         DatabaseSchemaMigrator.Apply(con);
 
-        using var readCon = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly;Cache=Private;Default Timeout=60");
+        using var readCon = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly;Cache=Private;Default Timeout=60;Pooling=False");
         readCon.Open();
         var rawPacketCount = CountRawPackets(readCon);
         var activeCars = LoadMaximumCarCounts(readCon);
@@ -677,8 +677,8 @@ public static class AnalysisEngine
     private static void CreateWorkingCopy(string sourcePath, string destinationPath)
     {
         TryDelete(destinationPath);
-        using var source = new SqliteConnection($"Data Source={sourcePath};Mode=ReadOnly;Cache=Private;Default Timeout=60");
-        using var destination = new SqliteConnection($"Data Source={destinationPath};Mode=ReadWriteCreate;Cache=Private;Default Timeout=60");
+        using var source = new SqliteConnection($"Data Source={sourcePath};Mode=ReadOnly;Cache=Private;Default Timeout=60;Pooling=False");
+        using var destination = new SqliteConnection($"Data Source={destinationPath};Mode=ReadWriteCreate;Cache=Private;Default Timeout=60;Pooling=False");
         source.Open();
         destination.Open();
         source.BackupDatabase(destination);
@@ -780,7 +780,7 @@ public static class AnalysisEngine
 
     private static void WriteAnalysisRun(string databasePath, AnalysisResult result)
     {
-        using var connection = new SqliteConnection($"Data Source={databasePath};Mode=ReadWrite;Cache=Private;Default Timeout=30");
+        using var connection = new SqliteConnection($"Data Source={databasePath};Mode=ReadWrite;Cache=Private;Default Timeout=30;Pooling=False");
         connection.Open();
         DatabaseSchemaMigrator.Apply(connection);
         using var command = connection.CreateCommand();
