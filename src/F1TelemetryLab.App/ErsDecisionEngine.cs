@@ -57,6 +57,30 @@ public sealed class ErsDecisionEngine
         if (!state.AutomationAllowed)
             return WithContext(ErsControlDecision.BlockedDecision(state, $"{ModePrefix(tactical)} {state.BlockReason}"), tactical, energy);
 
+        if (state.PitLapBurn)
+        {
+            // The driver's in-lap request supersedes strategic reserves and once-per-lap budgets.
+            // Spend only under acceleration; retain all service-level input/telemetry checks.
+            ClearActiveRule(markFinished: false);
+            var deploy = state.BatteryPct > 0 && state.ThrottlePct >= 85 && state.BrakePct <= 5 &&
+                         state.SpeedKph >= Math.Max(60, _profile.MinimumControlSpeedKph);
+            return new ErsControlDecision(state.ReceivedAt, false, state.CurrentMode,
+                deploy ? ErsDeployMode.Boost : ErsDeployMode.None,
+                "pit-lap-burn", "Pit this lap",
+                deploy ? "Pit this lap: maximum deployment under acceleration; no strategic battery reserve."
+                       : "Pit this lap: waiting for acceleration or available battery.",
+                state.BatteryPct, state.LapNumber, state.LapDistanceM, state.GapAheadMs, state.GapBehindMs)
+            {
+                TacticalMode = tactical.Mode,
+                TacticalIntensity = tactical.Intensity,
+                EnergyState = state.BatteryPct <= 0 ? ErsEnergyState.Critical : ErsEnergyState.Balanced,
+                EnergyTargetPct = 0,
+                EnergyMinimumPct = 0,
+                NextCheckpointId = "pit-entry",
+                ProjectionSource = "manual-pit-lap"
+            };
+        }
+
         UpdateLapState(state);
         UpdateRecoveryState(state.BatteryPct);
 

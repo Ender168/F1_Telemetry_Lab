@@ -72,6 +72,7 @@ public sealed class RaceEngineerOverlayWindow : Window
         AddWidget("laps-ahead", russian ? "ВПЕРЕДИ · ПОСЛЕДНИЕ КРУГИ" : "AHEAD · LAST LAPS", 390);
         AddWidget("laps-behind", russian ? "СЗАДИ · ПОСЛЕДНИЕ КРУГИ" : "BEHIND · LAST LAPS", 390);
         AddWidget("tyres", russian ? "ШИНЫ" : "TYRES", 390);
+        AddWidget("ers-pit-lap", russian ? "ERS · ПИТ НА ЭТОМ КРУГУ" : "ERS · PIT THIS LAP", 320, 15);
         AddWidget("pit", russian ? "ПИТ-СТОП" : "PIT STOP", 420);
         AddWidget("ers-energy", russian ? "ERS · ЭНЕРГИЯ" : "ERS · ENERGY", 445);
         AddWidget("ers-tactical", russian ? "ERS · СИТУАЦИЯ" : "ERS · TACTICAL", 360);
@@ -160,6 +161,12 @@ public sealed class RaceEngineerOverlayWindow : Window
         UpdateNeighbour("laps-behind", RaceEngineerText.Neighbour(snapshot, 1, now), _russian ? "СЗАДИ" : "BEHIND");
         SetWidget("tyres", display.Tyres, TyresColour(snapshot.Tyres));
         SetWidget("pit", display.Pit, PitColour(snapshot.Pit));
+        var pitErs = snapshot.PitLapErs;
+        SetWidget("ers-pit-lap", pitErs.Format(_russian, now),
+            !pitErs.Active ? Cyan : !pitErs.HasFreshTelemetry(now) || pitErs.AutomationState is "Blocked" or "Emergency stop" or "Waiting for game"
+                ? Amber : Green);
+        ToolTip.SetTip(_widgets["ers-pit-lap"].Border, pitErs.Detail);
+
         SetWidget("ers-energy", RaceEngineerText.FormatErsEnergy(snapshot.Ers, _russian), EnergyColour(snapshot.Ers));
         SetWidget("ers-tactical", RaceEngineerText.FormatErsTactical(snapshot.Ers, _russian), TacticalColour(snapshot.Ers));
         SetWidget("ers-action", RaceEngineerText.FormatErsAction(snapshot.Ers, _russian), ActionColour(snapshot.Ers));

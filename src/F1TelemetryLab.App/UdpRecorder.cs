@@ -68,7 +68,10 @@ public sealed class UdpRecorder : IAsyncDisposable
     public IReadOnlyList<LiveCarRow> LiveCars => _liveCars.Values.OrderBy(x => x.CarIndex).ToList();
     public ErsAutopilotStatus ErsStatus => _ersAutopilot?.Status ?? _lastErsStatus;
     public ErsControlDecision? ErsDecision => _ersAutopilot?.LastDecision ?? _lastErsDecision;
-    public RaceEngineerSnapshot RaceEngineer => _raceEngineer?.Snapshot ?? _lastRaceEngineerSnapshot;
+    public RaceEngineerSnapshot RaceEngineer => (_raceEngineer?.Snapshot ?? _lastRaceEngineerSnapshot) with
+    {
+        PitLapErs = _ersAutopilot?.PitLapStatus ?? PitLapErsStatus.Off
+    };
     public RecordingQualitySnapshot Quality => new(
         PacketsSeen,
         CarSamplesSeen,

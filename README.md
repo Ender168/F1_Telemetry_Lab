@@ -127,3 +127,14 @@ Three additional cards appear alongside the existing widgets:
 Drag the cards beside your existing lap panel, adjust their scale with ± or the mouse wheel, then **Lock / Закрепить**. The saved layout persists across launches. **Show all / Показать все** restores hidden cards without resetting their positions. At the front/back of the field there may be fewer than five nearby rows. Neighbours are selected by race position, not physical proximity to a lapped car.
 
 The cards work while recording UDP. Missing opponent telemetry is shown explicitly; no tyre age is inferred from wear. Recent lap history can fill in from the game's Session History packets after Lap Data identifies the current lap.
+
+
+### ERS: пит на этом кругу (0.10.10)
+
+Во время записи нажмите **треугольник + кружок (△ + ○)** одновременно и отпустите обе кнопки. Одно нажатие включает режим, следующее выключает. Удержание не вызывает повторных переключений. Кнопки считываются из события `BUTN` телеметрии игры (Triangle/Y `0x2`, Circle/B `0x4`); отдельный драйвер геймпада приложению не нужен. Если игра не передаёт эти события, на плашке остаётся `?`. Обычные действия этих кнопок в игре сохраняются.
+
+В режиме Live автопилот запрашивает Boost при газе от 85%, тормозе до 5% и скорости от 60 км/ч (либо более высоком минимуме профиля), без стратегического запаса ERS. При торможении/сбросе газа запрашивает None. Точный расход до 0% к пит-стопу зависит от игры и оставшегося участка. В Dry-run переключаются только рекомендации.
+
+Режим относится к текущему кругу и выключается при въезде в пит-лейн, смене круга/сессии, завершении гонки/записи или Flashback. Это не команда вызова механиков. Все проверки паузы, SC/VSC, свежести данных, ERS Assist и активного окна игры сохраняются.
+
+Плашка **«ERS · ПИТ НА ЭТОМ КРУГУ»** показывает ВКЛ/ВЫКЛ, номер круга, состояние сочетания и режим управления. Её можно перемещать, масштабировать и скрывать через «Настроить оверлей». Если телеметрия пропала, плашка явно показывает это и не выдаёт последнее состояние кнопок за текущее.

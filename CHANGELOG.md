@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.10
+
+- Toggle ERS pit-lap burn with Triangle + Circle (F1 UDP BUTN flags), once per chord press, with both buttons released before rearming.
+- Use maximum deployment while accelerating on the selected in-lap, overriding strategic reserves and profile rule budgets; pause deployment while braking/coasting. Existing Live input checks still apply.
+- Automatically cancel on pit entry, lap change, session end/change, recording stop or confirmed flashback. Ignore stale/duplicate/out-of-order button events and record pit-lap-on/off audit events.
+- Add a movable, scalable pit-lap status overlay showing ON/OFF, selected lap, button state and Live/Dry-run/blocked status.
+
 ## 0.10.9
 
 - Reset the ERS decision engine on confirmed FLBK events, clearing once-per-lap rules, active deployment timers, gap history and learned energy segments from the abandoned timeline.

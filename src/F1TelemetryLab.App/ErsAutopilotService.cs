@@ -3,6 +3,7 @@ namespace F1TelemetryLab;
 public sealed class ErsAutopilotService : IDisposable
 {
     private readonly object _sync = new();
+    private readonly PitLapErsController _pitLap = new();
     private readonly TimeProvider _timeProvider;
     private bool _stopped;
     private bool _disposed;
@@ -66,6 +67,17 @@ public sealed class ErsAutopilotService : IDisposable
 
     public ErsControlDecision? LastDecision => Volatile.Read(ref _lastDecision);
 
+    public PitLapErsStatus PitLapStatus
+    {
+        get
+        {
+            lock (_sync) return new PitLapErsStatus(_pitLap.Active, _pitLap.Lap, _pitLap.ButtonsPressed,
+                _options.OperatingMode, _publicStatus.State, _telemetry?.ReceivedAt ?? DateTimeOffset.MinValue,
+                _publicStatus.Detail);
+        }
+    }
+
+
     public void ProcessPacket(byte[] payload, DateTimeOffset receivedAt)
     {
         lock (_sync)
@@ -101,7 +113,14 @@ public sealed class ErsAutopilotService : IDisposable
             if (_flashbackOverallFrame is uint cutoff && header.OverallFrameIdentifier <= cutoff) return;
             if (header.PacketId == 3)
             {
+                if (F12026Parser.TryParseButtonStatus(payload, out var buttons))
+                {
+                    HandlePitButtons(buttons, header, receivedAt, now);
+                    return;
+                }
                 var eventOffset = F12026Parser.HeaderSize;
+                if (payload.Length >= eventOffset + 4 && payload.AsSpan(eventOffset, 4).SequenceEqual("SEND"u8))
+                    CancelPitLap(now, "Session ended.");
                 if (payload.Length >= eventOffset + 12 &&
                     payload.AsSpan(eventOffset, 4).SequenceEqual("FLBK"u8))
                 {
@@ -133,6 +152,9 @@ public sealed class ErsAutopilotService : IDisposable
                     return;
             }
 
+            if (_pitLap.Active && _playerLap is { } lap &&
+                (lap.PitStatus != 0 || lap.LapNum != _pitLap.Lap || lap.ResultStatus != 2))
+                CancelPitLap(now, "Pit entry, lap change or inactive race lap.");
             Evaluate(now);
         }
         catch (Exception ex)
@@ -157,6 +179,7 @@ public sealed class ErsAutopilotService : IDisposable
         lock (_sync)
         {
             if (_stopped) return;
+            CancelPitLap(_timeProvider.GetUtcNow(), "Recording stopped.");
             _stopped = true;
             _inputSink.Dispose();
             SetStatus("Stopped", "", null, null, null, "Recording stopped; ERS input is disabled.");
@@ -172,6 +195,41 @@ public sealed class ErsAutopilotService : IDisposable
             finally { _disposed = true; _audit.Dispose(); }
         }
     }
+
+    private void HandlePitButtons(uint buttons, PacketHeader header, DateTimeOffset receivedAt, DateTimeOffset now)
+    {
+        // BUTN carries the local player's controller flags, independent of DS4/XInput drivers.
+        if (_session is null || _playerLap is null || header.PlayerCarIndex != _playerLap.CarIndex ||
+            now - receivedAt > TimeSpan.FromMilliseconds(_options.TelemetryFreshnessMs)) return;
+        var pressed = _pitLap.ObserveButtons(buttons, header.OverallFrameIdentifier);
+        if (!pressed) return;
+        // Cancellation is always possible; arming requires fresh, active on-track telemetry.
+        if (_pitLap.Active) CancelPitLap(now, "Cancelled with Triangle + Circle.");
+        else if (!_inputFault && !_session.GamePaused && !_session.IsSpectating &&
+                 _carStatus?.NetworkPaused != true && _playerLap.PitStatus == 0 &&
+                 _playerLap.LapNum > 0 && _playerLap.ResultStatus == 2 &&
+                 now - _playerLap.ReceivedAt <= TimeSpan.FromMilliseconds(_options.TelemetryFreshnessMs) &&
+                 now - _session.ReceivedAt <= TimeSpan.FromMilliseconds(_options.SessionFreshnessMs))
+        {
+            _pitLap.Toggle(_playerLap.LapNum);
+            ClearPendingCommand();
+            WritePitLapAudit(now, "pit-lap-on", "Pit this lap enabled with Triangle + Circle.");
+        }
+        Evaluate(now);
+    }
+
+    private void CancelPitLap(DateTimeOffset now, string reason)
+    {
+        if (!_pitLap.Active) return;
+        _pitLap.Cancel();
+        if (_options.OperatingMode == ErsAutopilotOperatingMode.Live)
+            PollInputRelease(now, releaseImmediately: true);
+        ClearPendingCommand();
+        WritePitLapAudit(now, "pit-lap-off", reason);
+    }
+
+    private void WritePitLapAudit(DateTimeOffset now, string action, string reason) =>
+        _audit.Write(InputLifecycleDecision(now) with { RuleId = "pit-lap", Reason = reason }, action);
 
     private void UpdateLapRows(byte[] payload, DateTimeOffset receivedAt)
     {
@@ -272,7 +330,9 @@ public sealed class ErsAutopilotService : IDisposable
             block)
         {
             TotalLaps = _session.TotalLaps,
-            DrsActive = _telemetry?.Drs == 1
+            DrsActive = _telemetry?.Drs == 1,
+            PitLapBurn = _pitLap.Active,
+            BrakePct = (_telemetry?.Brake ?? 0) * 100d
         };
     }
 
@@ -464,6 +524,8 @@ public sealed class ErsAutopilotService : IDisposable
 
     private void ResetAfterFlashback(uint overallFrame, DateTimeOffset now)
     {
+        CancelPitLap(now, "Confirmed Flashback.");
+        _pitLap.Reset();
         var resetDecision = InputLifecycleDecision(now) with
         {
             Blocked = true,
@@ -494,6 +556,8 @@ public sealed class ErsAutopilotService : IDisposable
 
     private void ResetForSession(ulong sessionUid)
     {
+        CancelPitLap(_timeProvider.GetUtcNow(), "Session changed.");
+        _pitLap.Reset();
         _sessionUid = sessionUid;
         _flashbackOverallFrame = null;
         _session = null;

@@ -234,6 +234,10 @@ public sealed record ErsControlState(
     bool AutomationAllowed,
     string BlockReason)
 {
+    public bool PitLapBurn { get; init; }
+
+    public double BrakePct { get; init; }
+
     public bool InAttackRange(int thresholdMs) => GapAheadMs is > 0 && GapAheadMs <= thresholdMs;
 
     public bool InDefendRange(int thresholdMs) => GapBehindMs is > 0 && GapBehindMs <= thresholdMs;

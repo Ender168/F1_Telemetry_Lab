@@ -116,6 +116,8 @@ public sealed record RaceEngineerSnapshot(
     PitPositionAdvice Pit,
     ErsRaceAdvice Ers)
 {
+    public PitLapErsStatus PitLapErs { get; init; } = PitLapErsStatus.Off;
+
     public IReadOnlyList<NearbyCarSnapshot> NearbyCars { get; init; } = Array.Empty<NearbyCarSnapshot>();
 
     public static RaceEngineerSnapshot Waiting { get; } = new(

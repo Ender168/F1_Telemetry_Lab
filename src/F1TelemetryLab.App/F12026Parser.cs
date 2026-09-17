@@ -306,6 +306,15 @@ public static class F12026Parser
             sets);
     }
 
+    public static bool TryParseButtonStatus(ReadOnlySpan<byte> data, out uint buttons)
+    {
+        buttons = 0;
+        if (!TryParseHeader(data, out var header) || header.PacketFormat != 2026 || header.PacketId != 3 ||
+            data.Length < HeaderSize + 8 || !data.Slice(HeaderSize, 4).SequenceEqual("BUTN"u8)) return false;
+        buttons = U32(data, HeaderSize + 4);
+        return true;
+    }
+
     public static EventSample? ParseEventPacket(ReadOnlySpan<byte> data, DateTimeOffset receivedAt)
     {
         if (!TryParseHeader(data, out var h)) return null;
@@ -358,6 +367,10 @@ public static class F12026Parser
                 details["vehicle1_idx"] = vehicle;
                 details["vehicle2_idx"] = other;
                 if (offset + 3 <= data.Length) details["severity"] = data[offset + 2];
+            }
+            else if (code == "BUTN" && offset + 4 <= data.Length)
+            {
+                details["button_status"] = U32(data, offset);
             }
             else if (code == "FLBK" && offset + 8 <= data.Length)
             {
