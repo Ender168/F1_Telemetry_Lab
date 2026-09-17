@@ -57,30 +57,6 @@ public sealed class ErsDecisionEngine
         if (!state.AutomationAllowed)
             return WithContext(ErsControlDecision.BlockedDecision(state, $"{ModePrefix(tactical)} {state.BlockReason}"), tactical, energy);
 
-        if (state.PitLapBurn)
-        {
-            // The driver's in-lap request supersedes strategic reserves and once-per-lap budgets.
-            // Spend only under acceleration; retain all service-level input/telemetry checks.
-            ClearActiveRule(markFinished: false);
-            var deploy = state.BatteryPct > 0 && state.ThrottlePct >= 85 && state.BrakePct <= 5 &&
-                         state.SpeedKph >= Math.Max(60, _profile.MinimumControlSpeedKph);
-            return new ErsControlDecision(state.ReceivedAt, false, state.CurrentMode,
-                deploy ? ErsDeployMode.Boost : ErsDeployMode.None,
-                "pit-lap-burn", "Pit this lap",
-                deploy ? "Pit this lap: maximum deployment under acceleration; no strategic battery reserve."
-                       : "Pit this lap: waiting for acceleration or available battery.",
-                state.BatteryPct, state.LapNumber, state.LapDistanceM, state.GapAheadMs, state.GapBehindMs)
-            {
-                TacticalMode = tactical.Mode,
-                TacticalIntensity = tactical.Intensity,
-                EnergyState = state.BatteryPct <= 0 ? ErsEnergyState.Critical : ErsEnergyState.Balanced,
-                EnergyTargetPct = 0,
-                EnergyMinimumPct = 0,
-                NextCheckpointId = "pit-entry",
-                ProjectionSource = "manual-pit-lap"
-            };
-        }
-
         UpdateLapState(state);
         UpdateRecoveryState(state.BatteryPct);
 
@@ -172,7 +148,8 @@ public sealed class ErsDecisionEngine
         if (rule.DrsRequirement == ErsDrsRequirement.Active && !state.DrsActive) return false;
         if (rule.DrsRequirement == ErsDrsRequirement.Inactive && state.DrsActive) return false;
 
-        var finalLapRelease = _profile.EnergyPlan is { FinalLapRelease: true } && state.LapsRemaining is <= 1;
+        var pitLapRule = rule.Condition == ErsRuleCondition.PitLapBurn;
+        var finalLapRelease = !pitLapRule && _profile.EnergyPlan is { FinalLapRelease: true } && state.LapsRemaining is <= 1;
         var configuredFloor = finalLapRelease && rule.FinalLapMinimumBatteryPct is not null
             ? rule.FinalLapMinimumBatteryPct
             : rule.MinimumBatteryPct;
@@ -180,24 +157,30 @@ public sealed class ErsDecisionEngine
 
         if (_profile.EnergyPlan is { } plan && rule.TargetMode > ErsDeployMode.Medium)
         {
-            var dynamicFloor = energy.MinimumPct + (1 - rule.DeploymentValue) * plan.LowValueReservePct;
-            if (finalLapRelease && rule.FinalLapMinimumBatteryPct is not null)
-                dynamicFloor = Math.Max(plan.FinalLapFloorPct, rule.FinalLapMinimumBatteryPct.Value);
-            if (state.BatteryPct < dynamicFloor) return false;
             if (rule.MinimumEnergySurplusPct is not null &&
                 energy.DeltaToTargetPct < rule.MinimumEnergySurplusPct.Value) return false;
 
-            var tacticalEmergency = rule.Condition is ErsRuleCondition.AttackCritical or ErsRuleCondition.DefendCritical;
-            var raceRelease = rule.Condition is ErsRuleCondition.FinalLap or ErsRuleCondition.ClosingLaps;
-            if (energy.State is ErsEnergyState.Critical && !raceRelease) return false;
-            if (energy.State == ErsEnergyState.Conserve && !tacticalEmergency && !raceRelease) return false;
-            if (energy.ProjectedNextPct < energy.NextMinimumPct && !tacticalEmergency && !raceRelease) return false;
+            // Explicit pit rules use their own battery floor, not the normal-lap reserve.
+            if (!pitLapRule)
+            {
+                var dynamicFloor = energy.MinimumPct + (1 - rule.DeploymentValue) * plan.LowValueReservePct;
+                if (finalLapRelease && rule.FinalLapMinimumBatteryPct is not null)
+                    dynamicFloor = Math.Max(plan.FinalLapFloorPct, rule.FinalLapMinimumBatteryPct.Value);
+                if (state.BatteryPct < dynamicFloor) return false;
+
+                var tacticalEmergency = rule.Condition is ErsRuleCondition.AttackCritical or ErsRuleCondition.DefendCritical;
+                var raceRelease = rule.Condition is ErsRuleCondition.FinalLap or ErsRuleCondition.ClosingLaps;
+                if (energy.State is ErsEnergyState.Critical && !raceRelease) return false;
+                if (energy.State == ErsEnergyState.Conserve && !tacticalEmergency && !raceRelease) return false;
+                if (energy.ProjectedNextPct < energy.NextMinimumPct && !tacticalEmergency && !raceRelease) return false;
+            }
         }
 
         var legacyBattle = state.InBattle(_profile.BattleGapMs);
         return rule.Condition switch
         {
             ErsRuleCondition.Always => true,
+            ErsRuleCondition.PitLapBurn => state.PitLapBurn,
             ErsRuleCondition.CriticalBattery => state.BatteryPct <= _profile.CriticalBatteryPct,
             ErsRuleCondition.LowBattery => _recoveryActive,
             ErsRuleCondition.Neutral => tactical.Mode == ErsTacticalMode.Neutral,
@@ -551,6 +534,7 @@ public sealed class ErsDecisionEngine
         {
             ErsRuleCondition.CriticalBattery => $"critical battery {state.BatteryPct:0}%",
             ErsRuleCondition.LowBattery => $"legacy recovery below {_profile.RecoveryExitPct:0}%",
+            ErsRuleCondition.PitLapBurn => "driver requested pit this lap; JSON deployment limits apply",
             ErsRuleCondition.Neutral => "neutral race state",
             ErsRuleCondition.Attack => "car ahead within the attack window",
             ErsRuleCondition.Defend => "car behind within the defence window",

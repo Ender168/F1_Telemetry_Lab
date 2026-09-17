@@ -66,7 +66,8 @@ public enum ErsRuleCondition
     FinalLap,
     AttackOrHighBattery,
     DefendOrHighBattery,
-    BattleOrHighBattery
+    BattleOrHighBattery,
+    PitLapBurn
 }
 
 public enum ErsInputDirection

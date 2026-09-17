@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.11
+
+- Replace the global pit-lap Boost/None override with JSON rule condition `pitLapBurn`, controlled by the existing Triangle + Circle latch.
+- Let pit rules specify zones, target modes, priorities, battery/throttle/speed thresholds, timers, deployment budgets and once-per-lap behavior.
+- Use the pit rule's own battery floor instead of the normal energy reserve; preserve explicit surplus requirements and all service-level automation checks.
+- Load the supplied Japan race profile with all 35 rules; add regression coverage for low-charge deployment, wrapped zones, flag cancellation, limits and profiles without pit rules.
+- Keep the pit-lap status overlay and automatic latch resets introduced in 0.10.10.
+
 ## 0.10.10
 
 - Toggle ERS pit-lap burn with Triangle + Circle (F1 UDP BUTN flags), once per chord press, with both buttons released before rearming.

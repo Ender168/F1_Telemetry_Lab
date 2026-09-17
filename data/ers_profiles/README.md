@@ -69,3 +69,10 @@
 - Live-ввод требует выключенного игрового `ERS Assist` и активного окна F1 25.
 - F12 немедленно блокирует дальнейший ввод до следующей записи.
 - F7 и F8 должны быть назначены в F1 25 на уменьшение и увеличение стандартного режима ERS.
+
+## Manual pit-lap rules (0.10.11)
+
+Triangle + Circle toggles runtime state `pitLapBurn`. Use `"condition": "pitLapBurn"` in `rules` to select pit-lap deployment. No JSON file is modified by the button.
+All rule zones, priorities, target modes, thresholds, timers, deployment budgets and once-per-lap limits remain effective. These rules use their own `minimum_battery_pct` instead of the normal energy-plan reserve. An explicit `minimum_energy_surplus_pct` is still enforced when an energy plan applies.
+Outside matching pit rules, normal rules run. Profiles without this condition behave as before. `pit_lap_strategy` is not an executable configuration block.
+The flag clears on pit entry, lap/session changes, session end, recording stop or confirmed flashback. Disabling the flag does not reset once-per-lap limits.

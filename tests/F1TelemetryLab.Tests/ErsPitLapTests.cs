@@ -12,13 +12,13 @@ public sealed partial class ErsAutopilotTests
     public void PitChordTogglesOnceAndRequiresBothButtonsReleased(uint first, uint chord)
     {
         var clock = new FlashbackClock();
-        using var service = FlashbackService(ErsAutopilotOperatingMode.DryRun, clock, new(), new());
+        using var service = FlashbackService(ErsAutopilotOperatingMode.DryRun, clock, new(), new(), PitRuleProfile());
         FeedFlashbackState(service, clock, 1, 4_500);
         SendFrame(service, clock, ButtonsPacket(first), 2);
         Assert.False(service.PitLapStatus.Active);
         SendFrame(service, clock, ButtonsPacket(chord), 3);
         Assert.True(service.PitLapStatus.Active);
-        Assert.Equal("pit-lap-burn", service.LastDecision!.RuleId);
+        Assert.Equal("json-pit-zone", service.LastDecision!.RuleId);
         SendFrame(service, clock, ButtonsPacket(chord), 4);
         SendFrame(service, clock, ButtonsPacket(2), 5);
         SendFrame(service, clock, ButtonsPacket(6), 6);
@@ -28,7 +28,7 @@ public sealed partial class ErsAutopilotTests
         Assert.True(service.PitLapStatus.Active);
         SendFrame(service, clock, ButtonsPacket(6), 8);
         Assert.False(service.PitLapStatus.Active);
-        Assert.NotEqual("pit-lap-burn", service.LastDecision!.RuleId);
+        Assert.NotEqual("json-pit-zone", service.LastDecision!.RuleId);
     }
 
     [Fact]
@@ -37,7 +37,7 @@ public sealed partial class ErsAutopilotTests
         var clock = new FlashbackClock();
         var sink = new FlashbackSink();
         var audit = new List<ErsAuditRecord>();
-        using var service = FlashbackService(ErsAutopilotOperatingMode.Live, clock, sink, audit);
+        using var service = FlashbackService(ErsAutopilotOperatingMode.Live, clock, sink, audit, PitRuleProfile());
         FeedFlashbackState(service, clock, 1, 4_500);
         Assert.Equal(0, sink.TapCount);
         SendFrame(service, clock, ButtonsPacket(6), 2);
@@ -52,21 +52,110 @@ public sealed partial class ErsAutopilotTests
     }
 
     [Theory]
-    [InlineData(5, 100, 0, 220, ErsDeployMode.Boost)]
-    [InlineData(70, 100, 0, 220, ErsDeployMode.Boost)]
-    [InlineData(0, 100, 0, 220, ErsDeployMode.None)]
-    [InlineData(70, 50, 0, 220, ErsDeployMode.None)]
-    [InlineData(70, 100, 20, 220, ErsDeployMode.None)]
-    [InlineData(70, 100, 0, 40, ErsDeployMode.None)]
-    public void PitLapSpendsBelowNormalReserveOnlyUnderAcceleration(double battery, double throttle,
-        double brake, int speed, ErsDeployMode expected)
+    [InlineData(5, 85, 60, true)]
+    [InlineData(70, 100, 220, true)]
+    [InlineData(4, 100, 220, false)]
+    [InlineData(70, 84, 220, false)]
+    [InlineData(70, 100, 59, false)]
+    public void PitLapUsesJsonThresholds(double battery, double throttle, int speed, bool matches)
     {
-        var state = State(DateTimeOffset.UnixEpoch, distance: 4_500, battery: battery, throttle: throttle) with
-        { PitLapBurn = true, BrakePct = brake, SpeedKph = speed };
-        var decision = new ErsDecisionEngine(ChinaProfile()).Evaluate(state);
-        Assert.Equal(expected, decision.TargetMode);
-        Assert.Equal(0, decision.EnergyMinimumPct);
-        Assert.Equal("pit-lap-burn", decision.RuleId);
+        var state = State(DateTimeOffset.UnixEpoch, 4_500, battery, throttle) with
+        { PitLapBurn = true, SpeedKph = speed };
+        var decision = new ErsDecisionEngine(PitRuleProfile()).Evaluate(state);
+        Assert.Equal(matches, decision.RuleId == "json-pit-zone");
+    }
+
+    [Fact]
+    public void FlagWithoutPitRulesDoesNotChangeStrategy()
+    {
+        var state = State(DateTimeOffset.UnixEpoch, 4_500, 70, 100);
+        Assert.Equal(new ErsDecisionEngine(ChinaProfile()).Evaluate(state),
+            new ErsDecisionEngine(ChinaProfile()).Evaluate(state with { PitLapBurn = true }));
+    }
+
+    private static ErsControlProfile JapanPitProfile()
+    {
+        var loaded = ErsProfileStore.LoadFromDirectory(Path.Combine(AppContext.BaseDirectory, "Fixtures", "pit-ers"));
+        Assert.Empty(loaded.Warnings);
+        var profile = Assert.Single(loaded.Profiles);
+        Assert.Same(profile, loaded.Find(13, 15));
+        Assert.Equal(35, profile.Rules.Count);
+        Assert.Equal(3, profile.Rules.Count(r => r.Condition == ErsRuleCondition.PitLapBurn));
+        return profile;
+    }
+
+    [Theory]
+    [InlineData(4_500, 8, "pit-lap-t14-t15-burn")]
+    [InlineData(5_600, 5, "pit-lap-t18-t1-burn")]
+    [InlineData(300, 5, "pit-lap-t18-t1-burn")]
+    [InlineData(3_000, 10, "pit-lap-t11-burn")]
+    public void SuppliedJapanRulesDeployBelowNormalReserve(double distance, double battery, string id)
+    {
+        var state = State(DateTimeOffset.UnixEpoch, distance, battery, 100) with { PitLapBurn = true };
+        var profile = JapanPitProfile();
+        var decision = new ErsDecisionEngine(profile).Evaluate(state);
+        Assert.Equal(id, decision.RuleId);
+        Assert.Equal(ErsDeployMode.Boost, decision.TargetMode);
+        Assert.NotEqual(id, new ErsDecisionEngine(profile).Evaluate(state with { PitLapBurn = false }).RuleId);
+        Assert.NotEqual(id, new ErsDecisionEngine(profile).Evaluate(state with { BatteryPct = battery - 1 }).RuleId);
+    }
+
+    [Fact]
+    public void JapanPitRulesRespectZonesAndReleaseActiveRuleWhenFlagClears()
+    {
+        var engine = new ErsDecisionEngine(JapanPitProfile());
+        var state = State(DateTimeOffset.UnixEpoch, 4_500, 50, 100) with { PitLapBurn = true };
+        Assert.Equal("pit-lap-t14-t15-burn", engine.Evaluate(state).RuleId);
+        Assert.NotEqual("pit-lap-t14-t15-burn", engine.Evaluate(state with
+        { PitLapBurn = false, ReceivedAt = state.ReceivedAt.AddMilliseconds(100) }).RuleId);
+        var outside = state with { LapDistanceM = 2_000 };
+        Assert.Equal(new ErsDecisionEngine(JapanPitProfile()).Evaluate(outside with { PitLapBurn = false }),
+            new ErsDecisionEngine(JapanPitProfile()).Evaluate(outside));
+    }
+
+    [Fact]
+    public void PitRuleUsesJsonModePriorityBudgetAndOncePerLap()
+    {
+        var profile = PitRuleProfile();
+        var rule = profile.Rules.Last();
+        rule.TargetMode = ErsDeployMode.Hotlap;
+        rule.OncePerLap = true;
+        rule.MaximumDeployPct = 10;
+        var engine = new ErsDecisionEngine(profile);
+        var state = State(DateTimeOffset.UnixEpoch, 4_500, 70, 100) with { PitLapBurn = true };
+        Assert.Equal(ErsDeployMode.Hotlap, engine.Evaluate(state).TargetMode);
+        var spent = state with { BatteryPct = 59, ReceivedAt = state.ReceivedAt.AddSeconds(1) };
+        Assert.NotEqual(rule.Id, engine.Evaluate(spent).RuleId);
+        Assert.NotEqual(rule.Id, engine.Evaluate(state with { ReceivedAt = state.ReceivedAt.AddSeconds(2) }).RuleId);
+        Assert.Equal(rule.Id, engine.Evaluate(state with
+        { LapNumber = 6, ReceivedAt = state.ReceivedAt.AddSeconds(3) }).RuleId);
+        rule.Priority = 1;
+        Assert.Equal("critical", new ErsDecisionEngine(profile).Evaluate(state with { BatteryPct = 8 }).RuleId);
+    }
+
+    [Fact]
+    public void PitRuleHonoursJsonTimerAndExplicitSurplusGate()
+    {
+        var profile = JapanPitProfile();
+        var engine = new ErsDecisionEngine(profile);
+        var state = State(DateTimeOffset.UnixEpoch, 4_500, 50, 100) with { PitLapBurn = true };
+        Assert.Equal("pit-lap-t14-t15-burn", engine.Evaluate(state).RuleId);
+        Assert.NotEqual("pit-lap-t14-t15-burn", engine.Evaluate(state with
+        { ReceivedAt = state.ReceivedAt.AddSeconds(16) }).RuleId);
+        profile.Rules[0].MinimumEnergySurplusPct = 100;
+        Assert.NotEqual("pit-lap-t14-t15-burn", new ErsDecisionEngine(profile).Evaluate(state).RuleId);
+    }
+
+    private static ErsControlProfile PitRuleProfile()
+    {
+        var profile = ChinaProfile();
+        profile.Rules.Add(new ErsControlRule
+        {
+            Id = "json-pit-zone", Segment = "JSON pit zone", Condition = ErsRuleCondition.PitLapBurn,
+            StartM = 4_400, EndM = 4_600, Priority = 3_000, TargetMode = ErsDeployMode.Boost,
+            MinimumBatteryPct = 5, MinimumThrottlePct = 85, MinimumSpeedKph = 60
+        });
+        return profile;
     }
 
     [Fact]
@@ -86,7 +175,7 @@ public sealed partial class ErsAutopilotTests
     public void PitLapCancelsWhenInLapEnds(byte lap, byte pit, byte result)
     {
         var clock = new FlashbackClock();
-        using var service = FlashbackService(ErsAutopilotOperatingMode.DryRun, clock, new(), new());
+        using var service = FlashbackService(ErsAutopilotOperatingMode.DryRun, clock, new(), new(), PitRuleProfile());
         FeedFlashbackState(service, clock, 1, 4_500);
         SendFrame(service, clock, ButtonsPacket(6), 2);
         var packet = LapPacket(4_500);
@@ -95,7 +184,7 @@ public sealed partial class ErsAutopilotTests
         packet[F12026Parser.HeaderSize + 45] = result;
         SendFrame(service, clock, packet, 3);
         Assert.False(service.PitLapStatus.Active);
-        Assert.NotEqual("pit-lap-burn", service.LastDecision!.RuleId);
+        Assert.NotEqual("json-pit-zone", service.LastDecision!.RuleId);
     }
 
     [Theory]
@@ -106,7 +195,7 @@ public sealed partial class ErsAutopilotTests
     public void PitLapCancelsOnResetAndStop(string reset)
     {
         var clock = new FlashbackClock();
-        using var service = FlashbackService(ErsAutopilotOperatingMode.DryRun, clock, new(), new());
+        using var service = FlashbackService(ErsAutopilotOperatingMode.DryRun, clock, new(), new(), PitRuleProfile());
         FeedFlashbackState(service, clock, 1, 4_500);
         SendFrame(service, clock, ButtonsPacket(6), 2);
         Assert.True(service.PitLapStatus.Active);
@@ -131,7 +220,7 @@ public sealed partial class ErsAutopilotTests
     public void StaleForeignTruncatedAndOutOfOrderButtonEventsCannotTogglePitLap()
     {
         var clock = new FlashbackClock();
-        using var service = FlashbackService(ErsAutopilotOperatingMode.DryRun, clock, new(), new());
+        using var service = FlashbackService(ErsAutopilotOperatingMode.DryRun, clock, new(), new(), PitRuleProfile());
         FeedFlashbackState(service, clock, 1, 4_500);
         SendFrame(service, clock, ButtonsPacket(0), 10);
         SendFrame(service, clock, ButtonsPacket(6), 9);
