@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.12
+
+- Read player-only 2026 MotionEx steering angle, yaw rate, rear slip angles and rear slip ratios into ERS runtime state.
+- Add JSON-configured per-mode and per-rule traction gates, continuous stability timing and telemetry freshness checks.
+- Hold increases (including pit-lap rules and retries) without consuming an unstarted rule's once-per-lap/timer budget. Keep reductions and legacy profiles unchanged.
+- Report traction waiting reasons in ERS status/audit. Reset stability on pauses, lap/session changes and flashbacks.
+- Package an opt-in Japan traction-validation profile with stricter Boost thresholds; values remain experimental.
+- Add parser, engine, JSON validation and live-service regression coverage.
+
 ## 0.10.11
 
 - Replace the global pit-lap Boost/None override with JSON rule condition `pitLapBurn`, controlled by the existing Triangle + Circle latch.

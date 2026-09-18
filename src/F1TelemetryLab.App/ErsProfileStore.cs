@@ -175,9 +175,12 @@ public static class ErsProfileStore
             ValidateEnergyPlan(profile);
         }
 
+        ValidateTractionGate(profile.TractionGates?.Hotlap);
+        ValidateTractionGate(profile.TractionGates?.Boost);
         var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var rule in profile.Rules)
         {
+            ValidateTractionGate(rule.TractionGate);
             if (string.IsNullOrWhiteSpace(rule.Id)) throw new InvalidDataException("Every rule needs an id.");
             if (!ids.Add(rule.Id)) throw new InvalidDataException($"Duplicate rule id: {rule.Id}.");
             if (rule.StartM < 0 || rule.StartM > profile.TrackLengthM || rule.EndM < 0 || rule.EndM > profile.TrackLengthM)
@@ -204,6 +207,18 @@ public static class ErsProfileStore
                 rule.MinimumLapsRemaining > rule.MaximumLapsRemaining)
                 throw new InvalidDataException($"Rule {rule.Id} minimum_laps_remaining must not exceed maximum_laps_remaining.");
         }
+    }
+
+    private static void ValidateTractionGate(ErsTractionGate? gate)
+    {
+        if (gate is null) return;
+        var limits = new[] { gate.MaximumFrontWheelsAngleRad, gate.MaximumYawRateRadS,
+            gate.MaximumRearSlipAngleRad, gate.MaximumRearSlipRatio };
+        if (limits.All(v => v is null) || limits.Any(v => v is double n && (!double.IsFinite(n) || n <= 0)))
+            throw new InvalidDataException("traction_gate requires at least one finite, positive metric threshold.");
+        if (gate.StableForMs is < 0 or > 5000 || gate.MaximumSampleGapMs is < 1 or > 1000 ||
+            gate.MaximumDataAgeMs is < 1 or > 1000)
+            throw new InvalidDataException("Invalid traction_gate timing: stable_for_ms 0-5000, maximum_sample_gap_ms/maximum_data_age_ms 1-1000.");
     }
 
     private static void ValidateTacticalPlan(ErsControlProfile profile)
@@ -242,6 +257,8 @@ public static class ErsProfileStore
         if (plan.FinalLapFloorPct is < 0 or > 100)
             throw new InvalidDataException("energy_plan.final_lap_floor_pct must be between 0 and 100.");
 
+        ValidateTractionGate(profile.TractionGates?.Hotlap);
+        ValidateTractionGate(profile.TractionGates?.Boost);
         var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var distances = new HashSet<double>();
         foreach (var point in plan.Checkpoints)

@@ -113,6 +113,7 @@ public sealed class ErsAutopilotOptions
 
 public sealed class ErsControlProfile
 {
+    public ErsTractionPlan? TractionGates { get; set; }
     public int SchemaVersion { get; set; } = 1;
     public int ProfileRevision { get; set; } = 1;
     public string ProfileId { get; set; } = "";
@@ -186,6 +187,7 @@ public sealed class ErsEnergyCheckpoint
 
 public sealed class ErsControlRule
 {
+    public ErsTractionGate? TractionGate { get; set; }
     public string Id { get; set; } = "";
     public string Segment { get; set; } = "";
     public string Note { get; set; } = "";
@@ -235,6 +237,8 @@ public sealed record ErsControlState(
     bool AutomationAllowed,
     string BlockReason)
 {
+    public ErsPlayerMotion? PlayerMotion { get; init; }
+
     public bool PitLapBurn { get; init; }
 
     public double BrakePct { get; init; }

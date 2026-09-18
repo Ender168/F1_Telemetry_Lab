@@ -76,3 +76,39 @@ Triangle + Circle toggles runtime state `pitLapBurn`. Use `"condition": "pitLapB
 All rule zones, priorities, target modes, thresholds, timers, deployment budgets and once-per-lap limits remain effective. These rules use their own `minimum_battery_pct` instead of the normal energy-plan reserve. An explicit `minimum_energy_surplus_pct` is still enforced when an energy plan applies.
 Outside matching pit rules, normal rules run. Profiles without this condition behave as before. `pit_lap_strategy` is not an executable configuration block.
 The flag clears on pit entry, lap/session changes, session end, recording stop or confirmed flashback. Disabling the flag does not reset once-per-lap limits.
+
+## Player traction conditions (0.10.12)
+
+The controller reads MotionEx (packet 13, 2026 version 1) for the local player only. Runtime values include front-wheel angle (radians), yaw rate (angular velocity Y, rad/s), both rear slip angles and both rear slip ratios. Rear limits use the maximum absolute value across RL/RR. The JSON profile is not rewritten.
+
+Add a top-level configuration like this (initial validation values, not proven safe limits):
+
+```json
+"traction_gates": {
+  "hotlap": {
+    "maximum_front_wheels_angle_rad": 0.10,
+    "maximum_yaw_rate_rad_s": 0.65,
+    "maximum_rear_slip_angle_rad": 0.15,
+    "maximum_rear_slip_ratio": 0.15,
+    "stable_for_ms": 200,
+    "maximum_sample_gap_ms": 100,
+    "maximum_data_age_ms": 150
+  },
+  "boost": {
+    "maximum_front_wheels_angle_rad": 0.08,
+    "maximum_yaw_rate_rad_s": 0.50,
+    "maximum_rear_slip_angle_rad": 0.12,
+    "maximum_rear_slip_ratio": 0.12,
+    "stable_for_ms": 300,
+    "maximum_sample_gap_ms": 100,
+    "maximum_data_age_ms": 150
+  }
+}
+```
+
+A rule can supply its own `traction_gate` object, replacing the target mode's entire gate. Omitted metric limits are not checked; at least one is required. Thresholds are strict absolute upper bounds. Timings are configurable (defaults: stable 250 ms, maximum gap 100 ms, data age 150 ms).
+Checks apply to increases to Hotlap/Boost, including Hotlap to Boost, pit rules and high default modes. Missing/stale/non-finite required values prevent an increase; reductions are unaffected. Profiles without gates retain previous behavior. This is an onset gate, not automatic traction control or an automatic reduction after a slide.
+Stable time requires fresh sequential MotionEx samples and elapsed session/arrival time; duplicates cannot advance it. Gaps and unsafe readings restart the interval; pauses, lap/session changes and flashbacks clear it.
+A waiting rule is not selected and does not consume once_per_lap or start its deployment timer. After a rule has started, its normal limits still apply while a subsequent increase/retry waits. Already-sent input cannot be recalled.
+The ERS status detail and audit reason report the target and blocking metric or stable-duration progress.
+The packaged `data/ers_profile_examples/Japan_Race_traction.json` is an opt-in candidate based on the supplied Japan profile. Copy it to the recording root's `ers_profiles` folder and restart recording to activate it. It has a higher selection priority than the supplied Japan profile. It is not installed automatically; validate in Dry-run first. No session evidence proves that these initial thresholds prevent every loss of grip.

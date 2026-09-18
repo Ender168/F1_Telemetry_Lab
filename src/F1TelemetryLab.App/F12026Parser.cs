@@ -20,6 +20,18 @@ public static class F12026Parser
     private const int TyreSetSize2026 = 10;
     private const int MaxTyreSets2026 = 20;
 
+    public static ErsPlayerMotion? ParsePlayerMotionEx(ReadOnlySpan<byte> data, DateTimeOffset receivedAt)
+    {
+        if (!TryParseHeader(data, out var h) || h.PacketFormat != AppInfo.SupportedPacketFormat ||
+            h.PacketId != 13 || data[5] != 1 || data.Length < 273 || h.PlayerCarIndex >= MaxCars2026)
+            return null;
+        var p = data[HeaderSize..];
+        var sessionTime = F32(data, 15);
+        if (!float.IsFinite(sessionTime) || sessionTime < 0) return null;
+        return new ErsPlayerMotion(receivedAt, h.SessionUid, h.PlayerCarIndex, h.OverallFrameIdentifier,
+            sessionTime, F32(p, 168), F32(p, 148), F32(p, 80), F32(p, 84), F32(p, 64), F32(p, 68));
+    }
+
     public static bool TryParseHeader(ReadOnlySpan<byte> data, out PacketHeader header)
     {
         header = default!;

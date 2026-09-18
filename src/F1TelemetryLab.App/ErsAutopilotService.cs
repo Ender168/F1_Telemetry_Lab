@@ -18,6 +18,8 @@ public sealed class ErsAutopilotService : IDisposable
     private SessionControlSample? _session;
     private CarTelemetrySample? _telemetry;
     private CarStatusSample? _carStatus;
+    private ErsPlayerMotion? _playerMotion;
+    private int? _sessionPlayerCarIndex;
     private LapDataSample? _playerLap;
     private ErsControlProfile? _profile;
     private ErsDecisionEngine? _engine;
@@ -95,6 +97,8 @@ public sealed class ErsAutopilotService : IDisposable
         {
             if (!F12026Parser.TryParseHeader(payload, out var header) || header.PacketFormat != AppInfo.SupportedPacketFormat) return;
             if (_options.OperatingMode == ErsAutopilotOperatingMode.Live && !PollInputRelease(now)) return;
+            // MotionEx must belong to the session/player established by Session data.
+            if (header.PacketId == 13 && (_sessionUid == 0 || header.SessionUid != _sessionUid)) return;
             if (_sessionUid != 0 && header.SessionUid != _sessionUid) ResetForSession(header.SessionUid);
             _sessionUid = header.SessionUid;
             if (_options.OperatingMode == ErsAutopilotOperatingMode.Live && _inputSink.EmergencyStopRequested(_options))
@@ -131,9 +135,21 @@ public sealed class ErsAutopilotService : IDisposable
                 return;
             }
 
+            if (header.PacketId == 13 &&
+                (_sessionPlayerCarIndex is null || header.PlayerCarIndex != _sessionPlayerCarIndex)) return;
+
             switch (header.PacketId)
             {
+                case 13:
+                    var motion = F12026Parser.ParsePlayerMotionEx(payload, receivedAt);
+                    if (motion is not null && _playerMotion is not null &&
+                        (motion.Frame <= _playerMotion.Frame || motion.SessionTime <= _playerMotion.SessionTime ||
+                         motion.ReceivedAt <= _playerMotion.ReceivedAt)) return;
+                    _playerMotion = motion;
+                    break;
                 case 1:
+                    if (_sessionPlayerCarIndex != header.PlayerCarIndex) _playerMotion = null;
+                    _sessionPlayerCarIndex = header.PlayerCarIndex;
                     _session = F12026Parser.TryParseSessionControl(payload, receivedAt);
                     SelectProfileIfPossible();
                     break;
@@ -329,6 +345,7 @@ public sealed class ErsAutopilotService : IDisposable
             string.IsNullOrEmpty(block),
             block)
         {
+            PlayerMotion = _playerMotion,
             TotalLaps = _session.TotalLaps,
             DrsActive = _telemetry?.Drs == 1,
             PitLapBurn = _pitLap.Active,
@@ -540,6 +557,8 @@ public sealed class ErsAutopilotService : IDisposable
         _session = null;
         _telemetry = null;
         _carStatus = null;
+        _playerMotion = null;
+        _sessionPlayerCarIndex = null;
         _playerLap = null;
         _lapRows.Clear();
         ClearPendingCommand();
@@ -563,6 +582,8 @@ public sealed class ErsAutopilotService : IDisposable
         _session = null;
         _telemetry = null;
         _carStatus = null;
+        _playerMotion = null;
+        _sessionPlayerCarIndex = null;
         _playerLap = null;
         _profile = null;
         _engine = null;
