@@ -97,7 +97,7 @@ public sealed partial class ErsAutopilotTests
         SendFrame(service, clock, pit, 3);
         SendFrame(service, clock, CompoundStatus(8, 8), 4);
         SendFrame(service, clock, LapPacket(4500), 5);
-        Assert.Equal("No profile", service.Status.State);
+        Assert.Equal("Blocked", service.Status.State);
         SendFrame(service, clock, CompoundStatus(8, 8), 6);
         Assert.Equal("wet", service.Status.ProfileId);
         SendFrame(service, clock, FlashbackPacket(), 100);
@@ -125,6 +125,27 @@ public sealed partial class ErsAutopilotTests
         Assert.True(service.PitLapStatus.Active);
         Assert.Equal("wet", service.Status.ProfileId);
         Assert.Equal(ErsDeployMode.Boost, service.LastDecision!.TargetMode);
+    }
+
+    [Fact]
+    public void StaleTelemetryDoesNotResetUsedRuleBudgets()
+    {
+        var clock = new FlashbackClock();
+        using var service = CompoundService(clock, new());
+        FeedFlashbackState(service, clock, 1, 4500);
+        SendFrame(service, clock, CompoundStatus(7, 7), 2);
+        SendFrame(service, clock, ButtonsPacket(6), 3);
+        SendFrame(service, clock, LapPacket(4700), 4);
+        SendFrame(service, clock, LapPacket(4500), 5);
+        Assert.Equal(ErsDeployMode.Medium, service.LastDecision!.TargetMode);
+        clock.Now = clock.Now.AddSeconds(2);
+        SendFrame(service, clock, TelemetryPacket(), 6);
+        Assert.True(service.LastDecision!.Blocked);
+        SendFrame(service, clock, SessionPacket(true, 0), 7);
+        SendFrame(service, clock, LapPacket(4500), 7);
+        SendFrame(service, clock, CompoundStatus(7, 7), 8);
+        Assert.False(service.LastDecision!.Blocked);
+        Assert.Equal(ErsDeployMode.Medium, service.LastDecision.TargetMode);
     }
 
     [Fact]

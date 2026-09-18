@@ -287,6 +287,9 @@ public sealed class ErsAutopilotService : IDisposable
         var fresh = _carStatus is not null && _awaitPostPitStatusFrame is null &&
             now >= _carStatus.ReceivedAt &&
             now - _carStatus.ReceivedAt <= TimeSpan.FromMilliseconds(_options.TelemetryFreshnessMs);
+        // A telemetry gap is not a tyre change. Keep budgets until fresh status confirms a change.
+        // BlockReason still prevents input while stale or waiting after pit exit.
+        if (!fresh && (_selectedActual is not null || _selectedVisual is not null)) return;
         int? actual = fresh && _carStatus!.ActualTyreCompound > 0 ? _carStatus.ActualTyreCompound : null;
         int? visual = fresh && _carStatus!.VisualTyreCompound > 0 ? _carStatus.VisualTyreCompound : null;
         var selected = _profiles.Find(_session.TrackId, _session.SessionType, actual, visual, _session.Weather);
