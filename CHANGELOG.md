@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.13
+
+- Add optional actual_tyre_compounds and visual_tyre_compounds ERS profile filters, covering Soft/Medium/Hard, Intermediate/Full Wet and physical slick compounds.
+- Filter tyre/weather compatibility before priority; prefer specific profiles over generic fallback and expose actual/visual compound in runtime state.
+- Reselect on fresh player status, reject old status frames and wait for post-pit status. Reset rule/energy/traction state when compound changes; audit old/new compounds and profiles.
+- Preserve flashback and pit-lap reset semantics. Keep strategy/traction calibration in JSON; do not invent wet deployment values.
+- Add compound-selection, transitions, pit/flashback and JSON validation regression coverage.
+
 ## 0.10.12
 
 - Read player-only 2026 MotionEx steering angle, yaw rate, rear slip angles and rear slip ratios into ERS runtime state.

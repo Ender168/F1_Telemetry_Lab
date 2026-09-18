@@ -20,6 +20,10 @@ public sealed class ErsAutopilotService : IDisposable
     private CarStatusSample? _carStatus;
     private ErsPlayerMotion? _playerMotion;
     private int? _sessionPlayerCarIndex;
+    private uint? _statusFrame;
+    private uint? _awaitPostPitStatusFrame;
+    private int? _selectedActual;
+    private int? _selectedVisual;
     private LapDataSample? _playerLap;
     private ErsControlProfile? _profile;
     private ErsDecisionEngine? _engine;
@@ -98,7 +102,7 @@ public sealed class ErsAutopilotService : IDisposable
             if (!F12026Parser.TryParseHeader(payload, out var header) || header.PacketFormat != AppInfo.SupportedPacketFormat) return;
             if (_options.OperatingMode == ErsAutopilotOperatingMode.Live && !PollInputRelease(now)) return;
             // MotionEx must belong to the session/player established by Session data.
-            if (header.PacketId == 13 && (_sessionUid == 0 || header.SessionUid != _sessionUid)) return;
+            if (header.PacketId is 7 or 13 && _sessionUid != 0 && header.SessionUid != _sessionUid) return;
             if (_sessionUid != 0 && header.SessionUid != _sessionUid) ResetForSession(header.SessionUid);
             _sessionUid = header.SessionUid;
             if (_options.OperatingMode == ErsAutopilotOperatingMode.Live && _inputSink.EmergencyStopRequested(_options))
@@ -135,7 +139,7 @@ public sealed class ErsAutopilotService : IDisposable
                 return;
             }
 
-            if (header.PacketId == 13 &&
+            if (header.PacketId is 7 or 13 &&
                 (_sessionPlayerCarIndex is null || header.PlayerCarIndex != _sessionPlayerCarIndex)) return;
 
             switch (header.PacketId)
@@ -148,21 +152,42 @@ public sealed class ErsAutopilotService : IDisposable
                     _playerMotion = motion;
                     break;
                 case 1:
-                    if (_sessionPlayerCarIndex != header.PlayerCarIndex) _playerMotion = null;
+                    if (_sessionPlayerCarIndex != header.PlayerCarIndex)
+                    {
+                        _playerMotion = null;
+                        _carStatus = null;
+                        _statusFrame = null;
+                    }
                     _sessionPlayerCarIndex = header.PlayerCarIndex;
                     _session = F12026Parser.TryParseSessionControl(payload, receivedAt);
-                    SelectProfileIfPossible();
+                    SelectProfileIfPossible(now);
                     break;
                 case 2:
+                    var previousPit = _playerLap?.PitStatus;
                     UpdateLapRows(payload, receivedAt);
+                    if (previousPit is > 0 && _playerLap?.PitStatus == 0)
+                    {
+                        _awaitPostPitStatusFrame = header.OverallFrameIdentifier;
+                        _engine = _profile is null ? null : new ErsDecisionEngine(_profile);
+                        ClearPendingCommand();
+                    }
                     break;
                 case 6:
                     _telemetry = F12026Parser.ParseCarTelemetryPacket(payload, receivedAt, onlyCarIndex: header.PlayerCarIndex)
                         .FirstOrDefault(sample => sample.IsPlayer);
                     break;
                 case 7:
-                    _carStatus = F12026Parser.ParseCarStatusPacket(payload, receivedAt, onlyCarIndex: header.PlayerCarIndex)
+                    if (_statusFrame is uint last && (last != 0 || header.OverallFrameIdentifier != 0) &&
+                        header.OverallFrameIdentifier <= last) return;
+                    var status = F12026Parser.ParseCarStatusPacket(payload, receivedAt, onlyCarIndex: header.PlayerCarIndex)
                         .FirstOrDefault(sample => sample.IsPlayer);
+                    if (status is null || receivedAt > now ||
+                        now - receivedAt > TimeSpan.FromMilliseconds(_options.TelemetryFreshnessMs)) return;
+                    _carStatus = status;
+                    _statusFrame = header.OverallFrameIdentifier;
+                    if (_awaitPostPitStatusFrame is uint exitFrame && header.OverallFrameIdentifier >= exitFrame)
+                        _awaitPostPitStatusFrame = null;
+                    SelectProfileIfPossible(now);
                     break;
                 default:
                     return;
@@ -256,18 +281,40 @@ public sealed class ErsAutopilotService : IDisposable
         }
     }
 
-    private void SelectProfileIfPossible()
+    private void SelectProfileIfPossible(DateTimeOffset now)
     {
         if (_session is null) return;
-        var selected = _profiles.Find(_session.TrackId, _session.SessionType);
-        if (ReferenceEquals(selected, _profile)) return;
-
+        var fresh = _carStatus is not null && _awaitPostPitStatusFrame is null &&
+            now >= _carStatus.ReceivedAt &&
+            now - _carStatus.ReceivedAt <= TimeSpan.FromMilliseconds(_options.TelemetryFreshnessMs);
+        int? actual = fresh && _carStatus!.ActualTyreCompound > 0 ? _carStatus.ActualTyreCompound : null;
+        int? visual = fresh && _carStatus!.VisualTyreCompound > 0 ? _carStatus.VisualTyreCompound : null;
+        var selected = _profiles.Find(_session.TrackId, _session.SessionType, actual, visual, _session.Weather);
+        var changed = !ReferenceEquals(selected, _profile) || actual != _selectedActual || visual != _selectedVisual;
+        if (!changed)
+        {
+            if (selected is null) SetStatus("No profile", "", null, null, null,
+                "Waiting for compatible ERS profile and fresh player tyre data.");
+            return;
+        }
+        var previous = _profile?.ProfileId ?? "none";
+        var oldActual = _selectedActual;
+        var oldVisual = _selectedVisual;
+        if (_pendingExpectedMode is not null && _options.OperatingMode == ErsAutopilotOperatingMode.Live)
+            PollInputRelease(now, releaseImmediately: true);
+        _selectedActual = actual;
+        _selectedVisual = visual;
         _profile = selected;
         _engine = selected is null ? null : new ErsDecisionEngine(selected);
         _pendingFromMode = null;
         _pendingExpectedMode = null;
         _retryCount = 0;
 
+        Volatile.Write(ref _lastDecision, null);
+        _lastDecisionSignature = "";
+        var transition = $"ERS profile {previous} -> {selected?.ProfileId ?? "none"}; actual {oldActual?.ToString() ?? "unknown"} -> {actual?.ToString() ?? "unknown"}; visual {oldVisual?.ToString() ?? "unknown"} -> {visual?.ToString() ?? "unknown"}.";
+        _audit.Write(InputLifecycleDecision(now) with { Reason = transition, RuleId = "profile-transition" }, "profile-transition");
+        _log?.Invoke(transition);
         if (selected is null)
         {
             SetStatus("No profile", "", null, null, null,
@@ -281,6 +328,7 @@ public sealed class ErsAutopilotService : IDisposable
 
     private void Evaluate(DateTimeOffset now)
     {
+        SelectProfileIfPossible(now);
         if (_profile is null || _engine is null || _session is null) return;
         var state = BuildState(now);
         var decision = _engine.Evaluate(state);
@@ -345,6 +393,8 @@ public sealed class ErsAutopilotService : IDisposable
             string.IsNullOrEmpty(block),
             block)
         {
+            ActualTyreCompound = _selectedActual,
+            VisualTyreCompound = _selectedVisual,
             PlayerMotion = _playerMotion,
             TotalLaps = _session.TotalLaps,
             DrsActive = _telemetry?.Drs == 1,
@@ -355,6 +405,7 @@ public sealed class ErsAutopilotService : IDisposable
 
     private string BlockReason(DateTimeOffset now)
     {
+        if (_awaitPostPitStatusFrame is not null) return "Waiting for fresh post-pit tyre compound data.";
         if (_inputFault) return string.IsNullOrWhiteSpace(_inputFaultReason)
             ? "Live ERS input is blocked until the next recording."
             : _inputFaultReason;
@@ -559,6 +610,10 @@ public sealed class ErsAutopilotService : IDisposable
         _carStatus = null;
         _playerMotion = null;
         _sessionPlayerCarIndex = null;
+        _statusFrame = null;
+        _awaitPostPitStatusFrame = null;
+        _selectedActual = null;
+        _selectedVisual = null;
         _playerLap = null;
         _lapRows.Clear();
         ClearPendingCommand();
@@ -584,6 +639,10 @@ public sealed class ErsAutopilotService : IDisposable
         _carStatus = null;
         _playerMotion = null;
         _sessionPlayerCarIndex = null;
+        _statusFrame = null;
+        _awaitPostPitStatusFrame = null;
+        _selectedActual = null;
+        _selectedVisual = null;
         _playerLap = null;
         _profile = null;
         _engine = null;

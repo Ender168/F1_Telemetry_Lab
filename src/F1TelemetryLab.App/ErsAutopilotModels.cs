@@ -123,6 +123,8 @@ public sealed class ErsControlProfile
     public string TrackName { get; set; } = "";
     public int TrackLengthM { get; set; }
     public List<int> SessionTypes { get; set; } = new();
+    public List<int>? ActualTyreCompounds { get; set; }
+    public List<int>? VisualTyreCompounds { get; set; }
     public bool DryOnly { get; set; } = true;
     public ErsDeployMode DefaultMode { get; set; } = ErsDeployMode.Medium;
     public double BatteryCapacityJ { get; set; } = 4_000_000;
@@ -237,6 +239,8 @@ public sealed record ErsControlState(
     bool AutomationAllowed,
     string BlockReason)
 {
+    public int? ActualTyreCompound { get; init; }
+    public int? VisualTyreCompound { get; init; }
     public ErsPlayerMotion? PlayerMotion { get; init; }
 
     public bool PitLapBurn { get; init; }
