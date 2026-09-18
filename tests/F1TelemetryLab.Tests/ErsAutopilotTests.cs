@@ -242,21 +242,26 @@ public sealed partial class ErsAutopilotTests
             var audit = new List<ErsAuditRecord>();
             var profiles = new ErsProfileLoadResult(folder, new[] { ChinaProfile() }, Array.Empty<string>());
             var start = DateTimeOffset.UtcNow;
+            var clock = new FlashbackClock { Now = start };
             using (var service = new ErsAutopilotService(
                        new ErsAutopilotOptions { OperatingMode = ErsAutopilotOperatingMode.Live },
                        profiles,
                        input,
-                       audit.Add))
+                       audit.Add, timeProvider: clock))
             {
                 service.ProcessPacket(SessionPacket(isNetworkGame: false, ersAssist: 0), start);
-                service.ProcessPacket(LapPacket(distance: 3_500), start.AddMilliseconds(10));
-                service.ProcessPacket(TelemetryPacket(), start.AddMilliseconds(20));
-                service.ProcessPacket(StatusPacket(ErsDeployMode.Medium), start.AddMilliseconds(30));
+                clock.Now = start.AddMilliseconds(10);
+                service.ProcessPacket(LapPacket(distance: 3_500), clock.Now);
+                clock.Now = start.AddMilliseconds(20);
+                service.ProcessPacket(TelemetryPacket(), clock.Now);
+                clock.Now = start.AddMilliseconds(30);
+                service.ProcessPacket(StatusPacket(ErsDeployMode.Medium), clock.Now);
 
                 Assert.Equal(1, input.TapCount);
                 Assert.Equal("Key sent", service.Status.State);
 
-                service.ProcessPacket(LapPacket(distance: 4_500), start.AddMilliseconds(100));
+                clock.Now = start.AddMilliseconds(100);
+                service.ProcessPacket(LapPacket(distance: 4_500), clock.Now);
 
                 Assert.Equal("Holding", service.Status.State);
                 Assert.Equal(ErsDeployMode.Medium, service.Status.CurrentMode);
