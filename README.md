@@ -70,7 +70,7 @@ ZIP fallback намеренно отсутствует. Если WinRAR не н�
 
 Профили автопилота находятся в `<root>/ers_profiles/`. Управляющий журнал и точный снимок выбранного профиля теперь сохраняются в таблицах `ers_control_events` и `ers_profile_snapshots`, а не в CSV/JSON.
 
-Live-ввод разрешён только для офлайн-сессии, сухого профиля, активного гоночного круга, свежей телеметрии и активного окна F1 25. Он блокируется при включённом ERS Assist, паузе, spectator mode, Safety Car, VSC, formation lap и нахождении в питах. F12 аварийно отключает ввод до следующей записи.
+Live-ввод поддерживает сетевые и офлайн-сессии. Для управления нужны сухой профиль, активный гоночный круг, свежая телеметрия и активное окно F1 25. Он блокируется при включённом ERS Assist, паузе, spectator mode, Safety Car, VSC, formation lap и нахождении в питах. F12 аварийно отключает ввод до следующей записи.
 
 Прототип управляет стандартным `ersDeployMode`: None, Medium, Hotlap и Boost. Overtake Mode 2026 остаётся ручным.
 
@@ -114,3 +114,61 @@ GitHub Actions выполняет Release build, self-tests, xUnit-регрес�
 ## Лицензия и товарные знаки
 
 Проект не аффилирован с Electronic Arts или Formula 1. Названия игр и серий принадлежат соответствующим правообладателям. Перед распространением приложения добавьте выбранную лицензию в `LICENSE`.
+
+
+### Nearby-driver overlay (0.10.7)
+
+Open **Race Engineer → Open overlay → Edit overlay** (Russian: **Открыть оверлей → Настроить оверлей**).
+Three additional cards appear alongside the existing widgets:
+
+- **TYRES · AGE / ШИНЫ · ВОЗРАСТ**: the player and race positions ±2, including names, compound and laps on the current set. Place it next to the game's upper-left leaderboard. `0` is a fresh set; `?` means unavailable or stale data, not an estimated age. S/M/H are Soft/Medium/Hard; I/W are Intermediate/Wet.
+- **AHEAD / ВПЕРЕДИ** and **BEHIND / СЗАДИ**: the last three completed laps of the driver one race position ahead or behind. Cards follow overtakes and use the same lap-time format as the player's card. PIT, INVALID and observed SC/VSC laps retain their labels. Current unfinished laps are excluded.
+
+Drag the cards beside your existing lap panel, adjust their scale with ± or the mouse wheel, then **Lock / Закрепить**. The saved layout persists across launches. **Show all / Показать все** restores hidden cards without resetting their positions. At the front/back of the field there may be fewer than five nearby rows. Neighbours are selected by race position, not physical proximity to a lapped car.
+
+The cards work while recording UDP. Missing opponent telemetry is shown explicitly; no tyre age is inferred from wear. Recent lap history can fill in from the game's Session History packets after Lap Data identifies the current lap.
+
+
+### ERS: пит на этом кругу (0.10.11)
+
+Во время записи нажмите **треугольник + кружок (△ + ○)** одновременно и отпустите обе кнопки. Одно нажатие включает режим, следующее выключает. Удержание не вызывает повторных переключений. Кнопки считываются из события `BUTN` телеметрии игры (Triangle/Y `0x2`, Circle/B `0x4`); отдельный драйвер геймпада приложению не нужен. Если игра не передаёт эти события, на плашке остаётся `?`. Обычные действия этих кнопок в игре сохраняются.
+
+Кнопка переключает переменную состояния `pitLapBurn`. В JSON профиля добавьте правила с `"condition": "pitLapBurn"`: они доступны только при включённом флаге. Участки `start_m/end_m`, режим `target_mode`, приоритет, минимальная батарея/газ/скорость, таймер, лимит расхода и `once_per_lap` работают как в обычных правилах. Например, элемент массива `rules`:
+
+```json
+{
+  "id": "pit-straight",
+  "segment": "Pit-lap straight",
+  "condition": "pitLapBurn",
+  "start_m": 4050,
+  "end_m": 5200,
+  "target_mode": "boost",
+  "priority": 2500,
+  "minimum_battery_pct": 8,
+  "minimum_throttle_pct": 88,
+  "minimum_speed_kph": 160,
+  "maximum_active_ms": 15000,
+  "maximum_deploy_pct": 100,
+  "once_per_lap": true
+}
+```
+
+Для этих правил обычный энергетический коридор не ограничивает расход: действует `minimum_battery_pct` самого правила. Явно заданный `minimum_energy_surplus_pct` сохраняется. Приоритет по-прежнему определяет победителя среди подходящих правил. За пределами участков, после исчерпания лимитов или при отсутствии правил `pitLapBurn` работает обычная стратегия. Выключение флага прекращает активное пит-правило, но не обнуляет `once_per_lap`. Верхнеуровневый блок `pit_lap_strategy` не исполняется: поведение задаётся массивом `rules`. JSON не перезаписывается при нажатии кнопки. В Dry-run меняются только рекомендации, в Live отправляются команды в игру.
+
+Режим относится к текущему кругу и выключается при въезде в пит-лейн, смене круга/сессии, завершении гонки/записи или Flashback. Это не команда вызова механиков. Все проверки паузы, SC/VSC, свежести данных, ERS Assist и активного окна игры сохраняются.
+
+Плашка **«ERS · ПИТ НА ЭТОМ КРУГУ»** показывает ВКЛ/ВЫКЛ, номер круга, состояние сочетания и режим управления. Её можно перемещать, масштабировать и скрывать через «Настроить оверлей». Если телеметрия пропала, плашка явно показывает это и не выдаёт последнее состояние кнопок за текущее.
+
+### ERS: проверка устойчивости (0.10.12)
+
+Автопилот получает MotionEx только своей машины: угол передних колёс, yaw rate, углы увода и slip ratio обоих задних колёс. Новые блоки JSON `traction_gates.hotlap` и `traction_gates.boost` задают ограничения и время непрерывной устойчивости. Правило может переопределить их через `traction_gate`. Профили без этих блоков работают как раньше.
+
+При ожидании устойчивости усиление не отправляется, `once_per_lap` не расходуется и таймер нового правила не запускается. Проверяются также повторные команды и режим пит-круга. Причина ожидания выводится в подробном статусе ERS и журнале. Это проверка перед усилением, автоматического снижения мощности после срыва здесь нет.
+
+Готовый **экспериментальный** профиль Японии: `data/ers_profile_examples/Japan_Race_traction.json`. Для включения скопируйте его в `ers_profiles` внутри папки записи и перезапустите запись. Начальные пороги требуют проверки в Dry-run и на трассе. Полная схема: [ERS profile guide](data/ers_profiles/README.md).
+
+### ERS: профили по шинам (0.10.13)
+
+Поддержаны отдельные профили Soft, Medium, Hard, Intermediate и Full Wet. В JSON задаются `visual_tyre_compounds` (Soft 16, Medium 17, Hard 18) и/или `actual_tyre_compounds` (Inter 7, Wet 8; для сликов используются фактические UDP ID составов). Для дождевых профилей также нужен `dry_only: false`. Если заданы оба списка, должны совпасть оба.
+
+Совместимость проверяется до приоритета. Профиль по шинам имеет преимущество перед общим; внутри одной степени специфичности действует `selection_priority`. Переключение происходит автоматически по свежим данным твоей машины, со сбросом состояния старых правил. После пит-стопа приложение ждёт новый пакет Car Status. Активный профиль виден в статусе ERS, переходы записываются в журнал. Профили без фильтров остаются общими. Порогов расхода для мокрых шин обновление не добавляет: они задаются отдельно в JSON по результатам анализа.

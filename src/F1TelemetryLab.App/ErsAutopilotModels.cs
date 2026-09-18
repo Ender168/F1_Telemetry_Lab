@@ -66,7 +66,8 @@ public enum ErsRuleCondition
     FinalLap,
     AttackOrHighBattery,
     DefendOrHighBattery,
-    BattleOrHighBattery
+    BattleOrHighBattery,
+    PitLapBurn
 }
 
 public enum ErsInputDirection
@@ -112,6 +113,7 @@ public sealed class ErsAutopilotOptions
 
 public sealed class ErsControlProfile
 {
+    public ErsTractionPlan? TractionGates { get; set; }
     public int SchemaVersion { get; set; } = 1;
     public int ProfileRevision { get; set; } = 1;
     public string ProfileId { get; set; } = "";
@@ -121,6 +123,8 @@ public sealed class ErsControlProfile
     public string TrackName { get; set; } = "";
     public int TrackLengthM { get; set; }
     public List<int> SessionTypes { get; set; } = new();
+    public List<int>? ActualTyreCompounds { get; set; }
+    public List<int>? VisualTyreCompounds { get; set; }
     public bool DryOnly { get; set; } = true;
     public ErsDeployMode DefaultMode { get; set; } = ErsDeployMode.Medium;
     public double BatteryCapacityJ { get; set; } = 4_000_000;
@@ -185,6 +189,7 @@ public sealed class ErsEnergyCheckpoint
 
 public sealed class ErsControlRule
 {
+    public ErsTractionGate? TractionGate { get; set; }
     public string Id { get; set; } = "";
     public string Segment { get; set; } = "";
     public string Note { get; set; } = "";
@@ -234,6 +239,14 @@ public sealed record ErsControlState(
     bool AutomationAllowed,
     string BlockReason)
 {
+    public int? ActualTyreCompound { get; init; }
+    public int? VisualTyreCompound { get; init; }
+    public ErsPlayerMotion? PlayerMotion { get; init; }
+
+    public bool PitLapBurn { get; init; }
+
+    public double BrakePct { get; init; }
+
     public bool InAttackRange(int thresholdMs) => GapAheadMs is > 0 && GapAheadMs <= thresholdMs;
 
     public bool InDefendRange(int thresholdMs) => GapBehindMs is > 0 && GapBehindMs <= thresholdMs;

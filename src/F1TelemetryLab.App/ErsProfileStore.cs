@@ -8,11 +8,21 @@ public sealed record ErsProfileLoadResult(
     IReadOnlyList<ErsControlProfile> Profiles,
     IReadOnlyList<string> Warnings)
 {
-    public ErsControlProfile? Find(int trackId, int sessionType) => Profiles
+    public ErsControlProfile? Find(int trackId, int sessionType, int? actualTyreCompound = null,
+        int? visualTyreCompound = null, int? weather = null) => Profiles
         .Where(profile => profile.TrackId == trackId && profile.SessionTypes.Contains(sessionType))
-        .OrderByDescending(profile => profile.SelectionPriority)
+        .Where(profile => !profile.DryOnly ||
+            (weather is null or < 3 && actualTyreCompound is not (7 or 8) && visualTyreCompound is not (7 or 8)))
+        .Where(profile => (profile.ActualTyreCompounds is null ||
+                actualTyreCompound is int actual && profile.ActualTyreCompounds.Contains(actual)) &&
+            (profile.VisualTyreCompounds is null ||
+                visualTyreCompound is int visual && profile.VisualTyreCompounds.Contains(visual)))
+        .OrderByDescending(profile => (profile.ActualTyreCompounds is null ? 0 : 1) +
+            (profile.VisualTyreCompounds is null ? 0 : 1))
+        .ThenByDescending(profile => profile.SelectionPriority)
         .ThenBy(profile => profile.ProfileId, StringComparer.Ordinal)
         .FirstOrDefault();
+
 }
 
 public static class ErsProfileStore
@@ -175,9 +185,14 @@ public static class ErsProfileStore
             ValidateEnergyPlan(profile);
         }
 
+        ValidateCompoundList(profile.ActualTyreCompounds, "actual_tyre_compounds");
+        ValidateCompoundList(profile.VisualTyreCompounds, "visual_tyre_compounds");
+        ValidateTractionGate(profile.TractionGates?.Hotlap);
+        ValidateTractionGate(profile.TractionGates?.Boost);
         var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var rule in profile.Rules)
         {
+            ValidateTractionGate(rule.TractionGate);
             if (string.IsNullOrWhiteSpace(rule.Id)) throw new InvalidDataException("Every rule needs an id.");
             if (!ids.Add(rule.Id)) throw new InvalidDataException($"Duplicate rule id: {rule.Id}.");
             if (rule.StartM < 0 || rule.StartM > profile.TrackLengthM || rule.EndM < 0 || rule.EndM > profile.TrackLengthM)
@@ -204,6 +219,25 @@ public static class ErsProfileStore
                 rule.MinimumLapsRemaining > rule.MaximumLapsRemaining)
                 throw new InvalidDataException($"Rule {rule.Id} minimum_laps_remaining must not exceed maximum_laps_remaining.");
         }
+    }
+
+    private static void ValidateCompoundList(List<int>? compounds, string field)
+    {
+        if (compounds is not null && (compounds.Count == 0 ||
+            compounds.Any(value => value is < 1 or > 255) || compounds.Distinct().Count() != compounds.Count))
+            throw new InvalidDataException($"{field} must be a non-empty list of unique UDP compound IDs (1-255).");
+    }
+
+    private static void ValidateTractionGate(ErsTractionGate? gate)
+    {
+        if (gate is null) return;
+        var limits = new[] { gate.MaximumFrontWheelsAngleRad, gate.MaximumYawRateRadS,
+            gate.MaximumRearSlipAngleRad, gate.MaximumRearSlipRatio };
+        if (limits.All(v => v is null) || limits.Any(v => v is double n && (!double.IsFinite(n) || n <= 0)))
+            throw new InvalidDataException("traction_gate requires at least one finite, positive metric threshold.");
+        if (gate.StableForMs is < 0 or > 5000 || gate.MaximumSampleGapMs is < 1 or > 1000 ||
+            gate.MaximumDataAgeMs is < 1 or > 1000)
+            throw new InvalidDataException("Invalid traction_gate timing: stable_for_ms 0-5000, maximum_sample_gap_ms/maximum_data_age_ms 1-1000.");
     }
 
     private static void ValidateTacticalPlan(ErsControlProfile profile)
@@ -242,6 +276,10 @@ public static class ErsProfileStore
         if (plan.FinalLapFloorPct is < 0 or > 100)
             throw new InvalidDataException("energy_plan.final_lap_floor_pct must be between 0 and 100.");
 
+        ValidateCompoundList(profile.ActualTyreCompounds, "actual_tyre_compounds");
+        ValidateCompoundList(profile.VisualTyreCompounds, "visual_tyre_compounds");
+        ValidateTractionGate(profile.TractionGates?.Hotlap);
+        ValidateTractionGate(profile.TractionGates?.Boost);
         var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var distances = new HashSet<double>();
         foreach (var point in plan.Checkpoints)

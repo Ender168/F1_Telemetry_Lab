@@ -68,7 +68,10 @@ public sealed class UdpRecorder : IAsyncDisposable
     public IReadOnlyList<LiveCarRow> LiveCars => _liveCars.Values.OrderBy(x => x.CarIndex).ToList();
     public ErsAutopilotStatus ErsStatus => _ersAutopilot?.Status ?? _lastErsStatus;
     public ErsControlDecision? ErsDecision => _ersAutopilot?.LastDecision ?? _lastErsDecision;
-    public RaceEngineerSnapshot RaceEngineer => _raceEngineer?.Snapshot ?? _lastRaceEngineerSnapshot;
+    public RaceEngineerSnapshot RaceEngineer => (_raceEngineer?.Snapshot ?? _lastRaceEngineerSnapshot) with
+    {
+        PitLapErs = _ersAutopilot?.PitLapStatus ?? PitLapErsStatus.Off
+    };
     public RecordingQualitySnapshot Quality => new(
         PacketsSeen,
         CarSamplesSeen,
@@ -206,6 +209,9 @@ public sealed class UdpRecorder : IAsyncDisposable
         var cts = _cts;
         if (cts is null) return _metadata;
 
+        // Stop input before waiting for final packets or draining the write queue.
+        try { _ersAutopilot?.StopInput(); }
+        catch (Exception ex) { Log?.Invoke("ERS input stop warning: " + ex.Message); }
         await WaitForFinalClassificationIfNeededAsync();
 
         _cts = null;

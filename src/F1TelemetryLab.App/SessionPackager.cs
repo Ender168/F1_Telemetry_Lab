@@ -25,10 +25,10 @@ public sealed class WinRarProcessRunner : IRarProcessRunner
         };
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
         using var process = Process.Start(start) ?? throw new InvalidOperationException("WinRAR could not be started.");
-        var output = process.StandardOutput.ReadToEnd();
-        var error = process.StandardError.ReadToEnd();
+        var output = process.StandardOutput.ReadToEndAsync();
+        var error = process.StandardError.ReadToEndAsync();
         process.WaitForExit();
-        return new RarProcessResult(process.ExitCode, output, error);
+        return new RarProcessResult(process.ExitCode, output.GetAwaiter().GetResult(), error.GetAwaiter().GetResult());
     }
 }
 
@@ -50,7 +50,7 @@ public static class SessionPackager
         var baseName = SafeFileName(string.IsNullOrWhiteSpace(preferredSessionName) ? physical : preferredSessionName!);
         if (string.IsNullOrWhiteSpace(baseName)) baseName = physical;
         var archivePath = Path.Combine(sessionFolder, baseName + ".rar");
-        TryDelete(archivePath);
+        var pendingArchive = Path.Combine(sessionFolder, $"{baseName}.{Guid.NewGuid():N}.pending.rar");
 
         var runner = processRunner ?? new WinRarProcessRunner();
         var executable = ResolveWinRar(configuredWinRarPath, processRunner is not null);
@@ -62,25 +62,27 @@ public static class SessionPackager
             CreateDatabaseSnapshot(databasePath, snapshotPath);
             CompactAndVerifySnapshot(snapshotPath);
 
-            var add = BuildAddArguments(archivePath);
+            var add = BuildAddArguments(pendingArchive);
             var created = runner.Run(executable, stagingRoot, add);
             if (created.ExitCode != 0)
                 throw new InvalidOperationException($"WinRAR archive creation failed with exit code {created.ExitCode}: {CleanError(created)}");
-            if (!File.Exists(archivePath) || new FileInfo(archivePath).Length == 0)
+            if (!File.Exists(pendingArchive) || new FileInfo(pendingArchive).Length == 0)
                 throw new InvalidDataException("WinRAR reported success but did not create a non-empty archive.");
 
-            var tested = runner.Run(executable, stagingRoot, BuildTestArguments(archivePath));
+            var tested = runner.Run(executable, stagingRoot, BuildTestArguments(pendingArchive));
             if (tested.ExitCode != 0)
             {
-                TryDelete(archivePath);
+                TryDelete(pendingArchive);
                 throw new InvalidDataException($"WinRAR archive test failed with exit code {tested.ExitCode}: {CleanError(tested)}");
             }
 
+            File.Move(pendingArchive, archivePath, overwrite: true);
             SessionManifestService.Refresh(sessionFolder, archivePath: archivePath);
             return archivePath;
         }
         finally
         {
+            TryDelete(pendingArchive);
             try { if (Directory.Exists(stagingRoot)) Directory.Delete(stagingRoot, recursive: true); } catch { }
         }
     }

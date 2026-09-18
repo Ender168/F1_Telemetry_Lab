@@ -1,5 +1,70 @@
 # Changelog
 
+## 0.10.13
+
+- Add optional actual_tyre_compounds and visual_tyre_compounds ERS profile filters, covering Soft/Medium/Hard, Intermediate/Full Wet and physical slick compounds.
+- Filter tyre/weather compatibility before priority; prefer specific profiles over generic fallback and expose actual/visual compound in runtime state.
+- Reselect on fresh player status, reject old status frames and wait for post-pit status. Reset rule/energy/traction state when compound changes; audit old/new compounds and profiles.
+- Preserve flashback and pit-lap reset semantics. Keep strategy/traction calibration in JSON; do not invent wet deployment values.
+- Add compound-selection, transitions, pit/flashback and JSON validation regression coverage.
+
+## 0.10.12
+
+- Read player-only 2026 MotionEx steering angle, yaw rate, rear slip angles and rear slip ratios into ERS runtime state.
+- Add JSON-configured per-mode and per-rule traction gates, continuous stability timing and telemetry freshness checks.
+- Hold increases (including pit-lap rules and retries) without consuming an unstarted rule's once-per-lap/timer budget. Keep reductions and legacy profiles unchanged.
+- Report traction waiting reasons in ERS status/audit. Reset stability on pauses, lap/session changes and flashbacks.
+- Package an opt-in Japan traction-validation profile with stricter Boost thresholds; values remain experimental.
+- Add parser, engine, JSON validation and live-service regression coverage.
+
+## 0.10.11
+
+- Replace the global pit-lap Boost/None override with JSON rule condition `pitLapBurn`, controlled by the existing Triangle + Circle latch.
+- Let pit rules specify zones, target modes, priorities, battery/throttle/speed thresholds, timers, deployment budgets and once-per-lap behavior.
+- Use the pit rule's own battery floor instead of the normal energy reserve; preserve explicit surplus requirements and all service-level automation checks.
+- Load the supplied Japan race profile with all 35 rules; add regression coverage for low-charge deployment, wrapped zones, flag cancellation, limits and profiles without pit rules.
+- Keep the pit-lap status overlay and automatic latch resets introduced in 0.10.10.
+
+## 0.10.10
+
+- Toggle ERS pit-lap burn with Triangle + Circle (F1 UDP BUTN flags), once per chord press, with both buttons released before rearming.
+- Use maximum deployment while accelerating on the selected in-lap, overriding strategic reserves and profile rule budgets; pause deployment while braking/coasting. Existing Live input checks still apply.
+- Automatically cancel on pit entry, lap change, session end/change, recording stop or confirmed flashback. Ignore stale/duplicate/out-of-order button events and record pit-lap-on/off audit events.
+- Add a movable, scalable pit-lap status overlay showing ON/OFF, selected lap, button state and Live/Dry-run/blocked status.
+
+## 0.10.9
+
+- Reset the ERS decision engine on confirmed FLBK events, clearing once-per-lap rules, active deployment timers, gap history and learned energy segments from the abandoned timeline.
+- Release pending key pulses, cancel feedback/retries and wait for fresh Session/Lap/Telemetry/Status packets before resuming; ignore delayed pre-flashback packets and duplicate events.
+- Keep latched emergency stops and input failures across flashbacks. Add flashback-reset audit events.
+
+## 0.10.8
+
+- Enable ERS Live control in online races by removing the unconditional network-session block.
+- Update startup and settings guidance to describe online/offline support.
+- Verify online command delivery and telemetry feedback, while retaining ERS Assist, emergency stop, stale-data and network-pause checks.
+
+## 0.10.7
+
+- Added a movable nearby-tyres card for the player and up to two race positions ahead/behind, showing the current compound and actual laps on that set.
+- Added separate ahead/behind cards with each opponent's last three completed laps, using the same time/flag formatting as the player's card.
+- Track histories by car slot so overtakes change the displayed neighbour without mixing lap times. Packet 11 can backfill completed laps after joining a session late.
+- Clear stale/future data on session changes and flashbacks; display unknown tyre ages as `?` and keep new-tyre age zero valid.
+- Existing overlay positions and visibility settings are retained; the three new cards support drag, scale, hide and click-through locking.
+
+
+## 0.10.6
+
+- Analyze lap quality one car at a time to reduce memory use on long recordings, preserving all 24 slots and existing flashback rules.
+- Decode only the player slot for live telemetry/status/damage consumers; enrich only retained player thermal detail during finalization.
+- Finish enrichment, compaction, analysis metadata and SQLite integrity verification on a staging database before replacing the source.
+- Count selected official classification rows, not repeated packet 8 deliveries; support classification-only recordings without mixing session UIDs.
+- Reuse the session-counter SQL command and commit its update with the corresponding raw packet.
+- Use wall-clock freshness for live ERS, release keyboard pulses independently of UDP arrivals, and disable input before stop-time queue draining.
+- Keep ERS decision transitions and a one-second heartbeat instead of writing every distance-dependent reason; preserve commands and feedback.
+- Preserve the previous RAR until the replacement passes verification, and drain WinRAR stdout/stderr concurrently.
+
+
 ## 0.10.5
 
 - Detached the Race Engineer overlay from the main application window so it stays visible when F1 receives focus.
