@@ -120,6 +120,19 @@ public sealed partial class ErsAutopilotTests
     }
 
     [Fact]
+    public void PauseAndLapChangeRequireANewStableInterval()
+    {
+        var engine = new ErsDecisionEngine(TractionProfile());
+        for (int ms = 0; ms <= 200; ms += 50) engine.Evaluate(TractionState(ms));
+        engine.Evaluate(TractionState(250) with { AutomationAllowed = false });
+        Assert.Equal(ErsDeployMode.Medium, engine.Evaluate(TractionState(250)).TargetMode);
+        for (int ms = 300; ms <= 500; ms += 50)
+            Assert.Equal(ErsDeployMode.Medium, engine.Evaluate(TractionState(ms)).TargetMode);
+        Assert.Equal(ErsDeployMode.Boost, engine.Evaluate(TractionState(550)).TargetMode);
+        Assert.Equal(ErsDeployMode.Medium, engine.Evaluate(TractionState(600) with { LapNumber = 6 }).TargetMode);
+    }
+
+    [Fact]
     public void RuleOverrideAndDefaultModeAreBothGated()
     {
         var profile = TractionProfile();
@@ -143,6 +156,9 @@ public sealed partial class ErsAutopilotTests
             var packet = MotionPacket((uint)ms + 3, ms / 1000f);
             var foreign = (byte[])packet.Clone(); foreign[27] = 1;
             service.ProcessPacket(foreign, clock.Now);
+            var otherSession = (byte[])packet.Clone();
+            BinaryPrimitives.WriteUInt64LittleEndian(otherSession.AsSpan(7), 999);
+            service.ProcessPacket(otherSession, clock.Now);
             if (ms == 250) Assert.Equal(0, sink.TapCount);
             service.ProcessPacket(packet, clock.Now);
         }

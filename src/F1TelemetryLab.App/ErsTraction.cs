@@ -31,6 +31,7 @@ internal sealed class ErsTractionHistory
     private readonly List<ErsPlayerMotion> _samples = new();
     private ulong _session;
     private int _lap;
+    private ErsPlayerMotion? _blockedSample;
 
     public void Observe(ErsControlState state)
     {
@@ -39,6 +40,12 @@ internal sealed class ErsTractionHistory
         _session = state.SessionUid;
         _lap = state.LapNumber;
         var sample = state.PlayerMotion;
+        if (!state.AutomationAllowed) _blockedSample = sample;
+        if (sample is not null && sample == _blockedSample)
+        {
+            _samples.Clear();
+            return;
+        }
         if (!state.AutomationAllowed || sample is null || sample.SessionUid != state.SessionUid ||
             sample.ReceivedAt > state.ReceivedAt)
         {
