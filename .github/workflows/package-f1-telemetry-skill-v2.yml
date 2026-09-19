@@ -1,0 +1,60 @@
+name: Package F1 Telemetry Analysis Skill v2
+
+on:
+  push:
+    branches:
+      - codex/package-f1-telemetry-skill-v2
+    paths:
+      - 'skill-package/f1-telemetry-analysis/**'
+      - '.github/workflows/package-f1-telemetry-skill-v2.yml'
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate skill package
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="skill-package/f1-telemetry-analysis"
+          required=(
+            SKILL.md
+            workspace.md
+            data_quality_and_segmentation.md
+            session_analysis.md
+            racecraft.md
+            corner_analysis.md
+            tyres_and_conditions.md
+            setup_testing.md
+            ers_autopilot.md
+            reporting_and_updates.md
+            setup_and_ers.md
+            CHANGELOG.md
+          )
+          for f in "${required[@]}"; do
+            test -s "$root/$f" || { echo "Missing or empty: $f"; exit 1; }
+          done
+          grep -q '^name: f1-telemetry-analysis$' "$root/SKILL.md"
+          grep -q '^version: 2.0.0$' "$root/SKILL.md"
+
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          root = Path("skill-package/f1-telemetry-analysis")
+          skill = (root / "SKILL.md").read_text(encoding="utf-8")
+          refs = sorted(set(re.findall(r'`([A-Za-z0-9_./-]+\.md)`', skill)))
+          missing = [r for r in refs if not (root / r).exists()]
+          if missing:
+              raise SystemExit("Missing referenced files: " + ", ".join(missing))
+          print("Validated", len(list(root.glob("*.md"))), "markdown files")
+          PY
+
+      - name: Upload installable skill archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: f1-telemetry-analysis-v2.0.0
+          path: skill-package/f1-telemetry-analysis/*
+          if-no-files-found: error
+          retention-days: 7
