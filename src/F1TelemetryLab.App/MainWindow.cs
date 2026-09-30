@@ -129,6 +129,15 @@ public sealed class MainWindow : Window
         _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
         _timer.Tick += (_, _) => UpdateLiveUi();
         _timer.Start();
+        // Timing cues need a faster display cadence than the general 500 ms dashboard.
+        var liftCoastTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
+        liftCoastTimer.Tick += (_, _) =>
+        {
+            if (_raceOverlayWindow?.IsVisible == true)
+                _raceOverlayWindow.UpdateLiftCoast(_recorder.LiftCoast);
+        };
+        liftCoastTimer.Start();
+        Closed += (_, _) => liftCoastTimer.Stop();
         Closing += OnWindowClosing;
         Closed += (_, _) => _raceOverlayWindow?.Close();
     }

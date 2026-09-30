@@ -1,3 +1,11 @@
+## 0.10.14 - Lift-and-coast timing overlay
+
+- Add an optional `lift_coast` block to ERS profiles, with calibrated corner-relative lift and braking boundaries, preview distance and speed threshold.
+- Add a compact movable/scalable/hideable LIFT & COAST overlay card with 50 ms UI updates, distance countdown, lift cue and throttle-release feedback.
+- Keep advice independent of ERS input mode; use only player telemetry with session/profile/compound selection, freshness checks and pit/pause/SC suppression.
+- Reset player samples after confirmed Flashback, reject old frames and support zones crossing the start/finish line.
+- Preserve existing profiles; do not install unvalidated track-specific timing points. Include a packaged configuration guide.
+
 # Changelog
 
 ## 0.10.13

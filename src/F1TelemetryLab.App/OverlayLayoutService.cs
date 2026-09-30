@@ -88,7 +88,8 @@ public static class OverlayLayoutService
                 Widget("ers-energy", right, 220),
                 Widget("ers-tactical", right, 365),
                 Widget("ers-action", right, 495),
-                Widget("ers-pit-lap", right, 650)
+                Widget("ers-pit-lap", right, 650),
+                Widget("lift-coast", Math.Max(0, width / 2 - 155), Math.Max(0, height - 180))
             }
         };
     }
