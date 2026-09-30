@@ -10,6 +10,7 @@ public sealed class TelemetryDatabase : IDisposable
     private readonly SqliteConnection _connection;
     private readonly SqliteCommand _insertRaw;
     private readonly SqliteCommand _insertCar;
+    private readonly SqliteCommand _upsertSegment;
     private SqliteTransaction? _batchTransaction;
     private DateTimeOffset _batchStartedAt;
     private int _batchOperations;
@@ -25,6 +26,23 @@ public sealed class TelemetryDatabase : IDisposable
         _connection = new SqliteConnection($"Data Source={path}");
         _connection.Open();
         CreateSchema();
+
+        _upsertSegment = _connection.CreateCommand();
+        _upsertSegment.CommandText = """
+            INSERT INTO session_segments(session_uid, first_received_at, last_received_at, first_overall_frame, last_overall_frame, packet_count)
+            VALUES ($uid,$received,$received,$overall,$overall,1)
+            ON CONFLICT(session_uid) DO UPDATE SET
+                last_received_at=excluded.last_received_at,
+                last_overall_frame=CASE
+                    WHEN excluded.last_overall_frame > 0
+                    THEN MAX(session_segments.last_overall_frame, excluded.last_overall_frame)
+                    ELSE session_segments.last_overall_frame
+                END,
+                packet_count=session_segments.packet_count + 1;
+            """;
+        _upsertSegment.Parameters.Add("$uid", SqliteType.Text);
+        _upsertSegment.Parameters.Add("$received", SqliteType.Text);
+        _upsertSegment.Parameters.Add("$overall", SqliteType.Integer);
 
         _insertRaw = _connection.CreateCommand();
         _insertRaw.CommandText = """
@@ -346,9 +364,8 @@ public sealed class TelemetryDatabase : IDisposable
         _insertRaw.Parameters["$packet_size"].Value = payload.Length;
         _insertRaw.Parameters["$payload"].Value = payload;
         _insertRaw.ExecuteNonQuery();
-        CountOperation();
-
         if (header is not null) UpsertSessionSegment(receivedAt, header);
+        CountOperation();
     }
 
     public void InsertCarTelemetry(CarTelemetrySample s)
@@ -379,6 +396,7 @@ public sealed class TelemetryDatabase : IDisposable
         _batchTransaction.Commit();
         _batchTransaction.Dispose();
         _batchTransaction = null;
+        _upsertSegment.Transaction = null;
         _insertRaw.Transaction = null;
         _insertCar.Transaction = null;
         _batchOperations = 0;
@@ -389,6 +407,7 @@ public sealed class TelemetryDatabase : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_batchTransaction is not null) return;
         _batchTransaction = _connection.BeginTransaction();
+        _upsertSegment.Transaction = _batchTransaction;
         _insertRaw.Transaction = _batchTransaction;
         _insertCar.Transaction = _batchTransaction;
         _batchStartedAt = DateTimeOffset.UtcNow;
@@ -404,25 +423,10 @@ public sealed class TelemetryDatabase : IDisposable
 
     private void UpsertSessionSegment(DateTimeOffset receivedAt, PacketHeader header)
     {
-        using var cmd = _connection.CreateCommand();
-        cmd.Transaction = _batchTransaction;
-        cmd.CommandText = """
-            INSERT INTO session_segments(session_uid, first_received_at, last_received_at, first_overall_frame, last_overall_frame, packet_count)
-            VALUES ($uid,$received,$received,$overall,$overall,1)
-            ON CONFLICT(session_uid) DO UPDATE SET
-                last_received_at=excluded.last_received_at,
-                last_overall_frame=CASE
-                    WHEN excluded.last_overall_frame > 0
-                    THEN MAX(session_segments.last_overall_frame, excluded.last_overall_frame)
-                    ELSE session_segments.last_overall_frame
-                END,
-                packet_count=session_segments.packet_count + 1;
-            """;
-        cmd.Parameters.AddWithValue("$uid", header.SessionUid.ToString());
-        cmd.Parameters.AddWithValue("$received", receivedAt.ToString("O"));
-        cmd.Parameters.AddWithValue("$overall", header.OverallFrameIdentifier);
-        cmd.ExecuteNonQuery();
-        CountOperation();
+        _upsertSegment.Parameters["$uid"].Value = header.SessionUid.ToString();
+        _upsertSegment.Parameters["$received"].Value = receivedAt.ToString("O");
+        _upsertSegment.Parameters["$overall"].Value = header.OverallFrameIdentifier;
+        _upsertSegment.ExecuteNonQuery();
     }
 
     private void SetMeta(string key, string value)
@@ -456,6 +460,7 @@ public sealed class TelemetryDatabase : IDisposable
             cmd.ExecuteNonQuery();
         }
         catch { }
+        _upsertSegment.Dispose();
         _insertRaw.Dispose();
         _insertCar.Dispose();
         _connection.Dispose();

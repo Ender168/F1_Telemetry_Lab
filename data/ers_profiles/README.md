@@ -69,3 +69,66 @@
 - Live-ввод требует выключенного игрового `ERS Assist` и активного окна F1 25.
 - F12 немедленно блокирует дальнейший ввод до следующей записи.
 - F7 и F8 должны быть назначены в F1 25 на уменьшение и увеличение стандартного режима ERS.
+
+## Manual pit-lap rules (0.10.11)
+
+Triangle + Circle toggles runtime state `pitLapBurn`. Use `"condition": "pitLapBurn"` in `rules` to select pit-lap deployment. No JSON file is modified by the button.
+All rule zones, priorities, target modes, thresholds, timers, deployment budgets and once-per-lap limits remain effective. These rules use their own `minimum_battery_pct` instead of the normal energy-plan reserve. An explicit `minimum_energy_surplus_pct` is still enforced when an energy plan applies.
+Outside matching pit rules, normal rules run. Profiles without this condition behave as before. `pit_lap_strategy` is not an executable configuration block.
+The flag clears on pit entry, lap/session changes, session end, recording stop or confirmed flashback. Disabling the flag does not reset once-per-lap limits.
+
+## Player traction conditions (0.10.12)
+
+The controller reads MotionEx (packet 13, 2026 version 1) for the local player only. Runtime values include front-wheel angle (radians), yaw rate (angular velocity Y, rad/s), both rear slip angles and both rear slip ratios. Rear limits use the maximum absolute value across RL/RR. The JSON profile is not rewritten.
+
+Add a top-level configuration like this (initial validation values, not proven safe limits):
+
+```json
+"traction_gates": {
+  "hotlap": {
+    "maximum_front_wheels_angle_rad": 0.10,
+    "maximum_yaw_rate_rad_s": 0.65,
+    "maximum_rear_slip_angle_rad": 0.15,
+    "maximum_rear_slip_ratio": 0.15,
+    "stable_for_ms": 200,
+    "maximum_sample_gap_ms": 100,
+    "maximum_data_age_ms": 150
+  },
+  "boost": {
+    "maximum_front_wheels_angle_rad": 0.08,
+    "maximum_yaw_rate_rad_s": 0.50,
+    "maximum_rear_slip_angle_rad": 0.12,
+    "maximum_rear_slip_ratio": 0.12,
+    "stable_for_ms": 300,
+    "maximum_sample_gap_ms": 100,
+    "maximum_data_age_ms": 150
+  }
+}
+```
+
+A rule can supply its own `traction_gate` object, replacing the target mode's entire gate. Omitted metric limits are not checked; at least one is required. Thresholds are strict absolute upper bounds. Timings are configurable (defaults: stable 250 ms, maximum gap 100 ms, data age 150 ms).
+Checks apply to increases to Hotlap/Boost, including Hotlap to Boost, pit rules and high default modes. Missing/stale/non-finite required values prevent an increase; reductions are unaffected. Profiles without gates retain previous behavior. This is an onset gate, not automatic traction control or an automatic reduction after a slide.
+Stable time requires fresh sequential MotionEx samples and elapsed session/arrival time; duplicates cannot advance it. Gaps and unsafe readings restart the interval; pauses, lap/session changes and flashbacks clear it.
+A waiting rule is not selected and does not consume once_per_lap or start its deployment timer. After a rule has started, its normal limits still apply while a subsequent increase/retry waits. Already-sent input cannot be recalled.
+The ERS status detail and audit reason report the target and blocking metric or stable-duration progress.
+The packaged `data/ers_profile_examples/Japan_Race_traction.json` is an opt-in candidate based on the supplied Japan profile. Copy it to the recording root's `ers_profiles` folder and restart recording to activate it. It has a higher selection priority than the supplied Japan profile. It is not installed automatically; validate in Dry-run first. No session evidence proves that these initial thresholds prevent every loss of grip.
+
+## Tyre-specific profiles (0.10.13)
+
+Optional top-level filters:
+
+| Intended tyres | JSON filter |
+| --- | --- |
+| Soft | `"visual_tyre_compounds": [16]` |
+| Medium | `"visual_tyre_compounds": [17]` |
+| Hard | `"visual_tyre_compounds": [18]` |
+| Intermediate | `"actual_tyre_compounds": [7], "dry_only": false` |
+| Full Wet | `"actual_tyre_compounds": [8], "dry_only": false` |
+| Any standard slick visual type | `"visual_tyre_compounds": [16, 17, 18]` |
+
+Actual compound IDs and visual types are different namespaces: an actual slick compound can have different Soft/Medium/Hard labels on different tracks. Use `actual_tyre_compounds` to target physical compounds C1-C6 (or other game compounds) by their UDP IDs; use `visual_tyre_compounds` for the race's tyre designation. These filters accept unique integer IDs 1-255, including future compounds; unknown runtime values do not match a declared filter. An omitted list means unrestricted; an empty list is invalid. When both lists are present, both must match.
+
+Selection first filters track/session, weather compatibility (`dry_only`) and tyre compatibility. Dry-only profiles are excluded in wet weather or on actual/visual Inter or Wet tyres. Then profiles with more declared tyre filters take precedence, followed by `selection_priority` and profile ID. Both-list profiles rank ahead of single-list profiles; either single-list profile ranks ahead of a generic profile. Missing compound data never matches a tyre-specific profile. Generic profiles remain the fallback; `dry_only: false` alone is not a wet-only filter.
+
+Each tyre profile can have independent rules, energy plans, SOC targets and traction gates. The application does not invent wet strategy values or copy Inter calibration to Full Wet.
+The controller reselects using fresh local-player Car Status data, rejects delayed status frames, waits for a fresh status packet after pit exit, resets rule/energy/traction state on compound changes even when the generic profile stays the same, and audits previous/new profile and actual/visual compounds. The ERS status profile ID shows the active strategy. Flashbacks require fresh session and compound data again. The pit-lap flag still cancels at pit entry/flashback; if a compound changes while it remains active, the new profile's pit rules apply.

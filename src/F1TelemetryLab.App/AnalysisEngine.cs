@@ -29,9 +29,19 @@ public static class AnalysisEngine
             CreateWorkingCopy(dbPath, stagingDb);
             var result = AnalyzeWorkingCopy(stagingDb, sessionFolder, log);
 
+            SessionManifestService.FinalizeDatabase(stagingDb, log);
+            WriteAnalysisRun(stagingDb, result);
+            using (var verify = new SqliteConnection($"Data Source={stagingDb};Pooling=False"))
+            {
+                verify.Open();
+                using var check = verify.CreateCommand();
+                check.CommandText = "PRAGMA integrity_check";
+                if (!string.Equals(Convert.ToString(check.ExecuteScalar()), "ok", StringComparison.Ordinal))
+                    throw new InvalidDataException("Analysis snapshot failed SQLite integrity_check.");
+                check.CommandText = "PRAGMA wal_checkpoint(TRUNCATE)";
+                check.ExecuteNonQuery();
+            }
             ReplaceDatabaseAtomically(stagingDb, dbPath);
-            WriteAnalysisRun(dbPath, result);
-            SessionManifestService.Refresh(sessionFolder, analyzedAt: DateTimeOffset.Now);
             return result;
         }
         finally
@@ -47,28 +57,27 @@ public static class AnalysisEngine
         string sessionFolder,
         Action<string>? log)
     {
-        using var con = new SqliteConnection($"Data Source={dbPath};Default Timeout=60");
+        using var con = new SqliteConnection($"Data Source={dbPath};Default Timeout=60;Pooling=False");
         con.Open();
         CreateAnalysisSchema(con);
         ClearAnalysisTables(con);
         DatabaseSchemaMigrator.Apply(con);
 
-        using var readCon = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly;Cache=Private;Default Timeout=60");
+        using var readCon = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly;Cache=Private;Default Timeout=60;Pooling=False");
         readCon.Open();
         var rawPacketCount = CountRawPackets(readCon);
         var activeCars = LoadMaximumCarCounts(readCon);
         log?.Invoke($"Streaming {rawPacketCount:N0} raw packets...");
 
-        var laps = new List<LapDataSample>(capacity: Math.Min(500_000, Math.Max(4_096, rawPacketCount * 3)));
         var flashbacks = new List<FlashbackSignal>();
         var eventCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var stats = ProcessRawPackets(readCon, con, laps, flashbacks, eventCodes, activeCars, log);
+        var stats = ProcessRawPackets(readCon, con, flashbacks, eventCodes, activeCars, log);
         CreateAnalysisIndexes(con);
 
         log?.Invoke("Building lap quality...");
         var trackLength = ReadMetadataInt(con, "track_length_m");
-        var qualities = LapQualityAnalyzer.Analyze(
-            laps,
+        var qualities = DatabaseLapQualityAnalyzer.Analyze(
+            con,
             trackLength,
             flashbacks,
             out var confirmedRewinds,
@@ -241,6 +250,8 @@ public static class AnalysisEngine
         command.CommandText = """
             CREATE INDEX IF NOT EXISTS idx_lap_data_session_car_lap_frame
                 ON lap_data(session_uid, car_idx, lap_num, overall_frame_identifier);
+            CREATE INDEX IF NOT EXISTS idx_lap_data_session_car_frame
+                ON lap_data(session_uid, car_idx, overall_frame_identifier, received_at);
             CREATE INDEX IF NOT EXISTS idx_motion_data_session_car_frame
                 ON motion_data(session_uid, car_idx, overall_frame_identifier);
             CREATE INDEX IF NOT EXISTS idx_car_status_session_car_frame
@@ -303,7 +314,6 @@ public static class AnalysisEngine
     private static ParseStats ProcessRawPackets(
         SqliteConnection readCon,
         SqliteConnection writeCon,
-        List<LapDataSample> laps,
         List<FlashbackSignal> flashbacks,
         HashSet<string> eventCodes,
         IReadOnlyDictionary<ulong, int> activeCarsBySession,
@@ -364,7 +374,6 @@ public static class AnalysisEngine
                     foreach (var s in F12026Parser.ParseLapDataPacket(payload, receivedAt, activeCars))
                     {
                         InsertLap(lapCmd, s);
-                        laps.Add(s);
                         lapRows++;
                     }
                     break;
@@ -668,8 +677,8 @@ public static class AnalysisEngine
     private static void CreateWorkingCopy(string sourcePath, string destinationPath)
     {
         TryDelete(destinationPath);
-        using var source = new SqliteConnection($"Data Source={sourcePath};Mode=ReadOnly;Cache=Private;Default Timeout=60");
-        using var destination = new SqliteConnection($"Data Source={destinationPath};Mode=ReadWriteCreate;Cache=Private;Default Timeout=60");
+        using var source = new SqliteConnection($"Data Source={sourcePath};Mode=ReadOnly;Cache=Private;Default Timeout=60;Pooling=False");
+        using var destination = new SqliteConnection($"Data Source={destinationPath};Mode=ReadWriteCreate;Cache=Private;Default Timeout=60;Pooling=False");
         source.Open();
         destination.Open();
         source.BackupDatabase(destination);
@@ -692,6 +701,11 @@ public static class AnalysisEngine
         int finalClassificationRows,
         IReadOnlySet<string> eventCodes)
     {
+        using (var selected = connection.CreateCommand())
+        {
+            selected.CommandText = "SELECT COUNT(*) FROM final_classification WHERE classification_source='official_udp'";
+            finalClassificationRows = Convert.ToInt32(selected.ExecuteScalar(), CultureInfo.InvariantCulture);
+        }
         var captureRating = "Not recorded";
         using (var capture = connection.CreateCommand())
         {
@@ -711,7 +725,7 @@ public static class AnalysisEngine
         var completenessSummary = finalClassificationRows > 0
             ? $"Official UDP classification contains {finalClassificationRows:N0} rows."
             : terminalEvent
-                ? "A terminal event was recorded, but packet 8 is absent; classification is derived from the latest lap data."
+                ? "A terminal event was recorded, but no official packet 8 classification matched the selected session; classification is derived from the latest lap data."
                 : "No official classification or terminal event was recorded.";
 
         var confidenceRating = completePlayerLaps == 0
@@ -766,7 +780,7 @@ public static class AnalysisEngine
 
     private static void WriteAnalysisRun(string databasePath, AnalysisResult result)
     {
-        using var connection = new SqliteConnection($"Data Source={databasePath};Mode=ReadWrite;Cache=Private;Default Timeout=30");
+        using var connection = new SqliteConnection($"Data Source={databasePath};Mode=ReadWrite;Cache=Private;Default Timeout=30;Pooling=False");
         connection.Open();
         DatabaseSchemaMigrator.Apply(connection);
         using var command = connection.CreateCommand();

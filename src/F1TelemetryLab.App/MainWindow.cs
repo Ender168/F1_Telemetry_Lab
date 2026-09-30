@@ -129,6 +129,15 @@ public sealed class MainWindow : Window
         _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
         _timer.Tick += (_, _) => UpdateLiveUi();
         _timer.Start();
+        // Timing cues need a faster display cadence than the general 500 ms dashboard.
+        var liftCoastTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
+        liftCoastTimer.Tick += (_, _) =>
+        {
+            if (_raceOverlayWindow?.IsVisible == true)
+                _raceOverlayWindow.UpdateLiftCoast(_recorder.LiftCoast);
+        };
+        liftCoastTimer.Start();
+        Closed += (_, _) => liftCoastTimer.Stop();
         Closing += OnWindowClosing;
         Closed += (_, _) => _raceOverlayWindow?.Close();
     }
@@ -1845,7 +1854,7 @@ public sealed class MainWindow : Window
         {
             Text = string.Equals(_settings.Language, "ru", StringComparison.OrdinalIgnoreCase)
                 ? "Прототип ERS: выключите ERS Assist в игре, назначьте уменьшение стандартного режима ERS на F7, увеличение на F8. Начните с теста без ввода. Управление заблокировано в онлайне, отправляет клавиши только при активном окне F1 25, аварийная остановка - F12."
-                : "ERS prototype: turn the in-game ERS Assist off, bind standard ERS mode decrease to F7 and increase to F8. Start with Dry-run. Live control is blocked online, sends keys only while F1 25 is foreground, and F12 is the emergency stop.",
+                : "ERS prototype: turn the in-game ERS Assist off, bind standard ERS mode decrease to F7 and increase to F8. Start with Dry-run. Live control supports online and offline sessions, sends keys only while F1 25 is foreground, and F12 is the emergency stop.",
             Foreground = Hex(0xF4BF75),
             TextWrapping = TextWrapping.Wrap
         });

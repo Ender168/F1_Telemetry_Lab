@@ -45,6 +45,9 @@ public sealed class UdpRecorder : IAsyncDisposable
     private int _finalClassificationObserved;
     private ErsAutopilotService? _ersAutopilot;
     private RaceEngineerService? _raceEngineer;
+    private LiftCoastService? _liftCoast;
+    public LiftCoastAdvice LiftCoast => _liftCoast?.GetAdvice(DateTimeOffset.UtcNow,
+        _ersAutopilot?.PitLapStatus.Active == true) ?? LiftCoastAdvice.Waiting;
     private ErsAutopilotOptions _ersOptions = new() { OperatingMode = ErsAutopilotOperatingMode.Off };
     private ErsAutopilotStatus _lastErsStatus = ErsAutopilotStatus.Initial(ErsAutopilotOperatingMode.Off);
     private ErsControlDecision? _lastErsDecision;
@@ -68,7 +71,10 @@ public sealed class UdpRecorder : IAsyncDisposable
     public IReadOnlyList<LiveCarRow> LiveCars => _liveCars.Values.OrderBy(x => x.CarIndex).ToList();
     public ErsAutopilotStatus ErsStatus => _ersAutopilot?.Status ?? _lastErsStatus;
     public ErsControlDecision? ErsDecision => _ersAutopilot?.LastDecision ?? _lastErsDecision;
-    public RaceEngineerSnapshot RaceEngineer => _raceEngineer?.Snapshot ?? _lastRaceEngineerSnapshot;
+    public RaceEngineerSnapshot RaceEngineer => (_raceEngineer?.Snapshot ?? _lastRaceEngineerSnapshot) with
+    {
+        PitLapErs = _ersAutopilot?.PitLapStatus ?? PitLapErsStatus.Off
+    };
     public RecordingQualitySnapshot Quality => new(
         PacketsSeen,
         CarSamplesSeen,
@@ -120,6 +126,7 @@ public sealed class UdpRecorder : IAsyncDisposable
             _lastErsDecision = null;
             var ersProfiles = ErsProfileStore.Load(rootFolder);
             var raceProfiles = RaceEngineerProfileStore.Load(rootFolder);
+            _liftCoast = new LiftCoastService(ersProfiles);
             _raceEngineer = new RaceEngineerService(
                 raceProfiles,
                 ersProfiles,
@@ -178,6 +185,7 @@ public sealed class UdpRecorder : IAsyncDisposable
             try { _ersAutopilot?.Dispose(); } catch { }
             _ersAutopilot = null;
             _raceEngineer = null;
+            _liftCoast = null;
             database?.Dispose();
             udp?.Dispose();
             _cts?.Dispose();
@@ -206,6 +214,11 @@ public sealed class UdpRecorder : IAsyncDisposable
         var cts = _cts;
         if (cts is null) return _metadata;
 
+        _liftCoast = null;
+
+        // Stop input before waiting for final packets or draining the write queue.
+        try { _ersAutopilot?.StopInput(); }
+        catch (Exception ex) { Log?.Invoke("ERS input stop warning: " + ex.Message); }
         await WaitForFinalClassificationIfNeededAsync();
 
         _cts = null;
@@ -238,6 +251,7 @@ public sealed class UdpRecorder : IAsyncDisposable
         catch (Exception ex) { Log?.Invoke("ERS audit close warning: " + ex.Message); }
         _ersAutopilot = null;
         _raceEngineer = null;
+        _liftCoast = null;
         cts.Dispose();
 
         if (_metadata is not null)
@@ -385,6 +399,7 @@ public sealed class UdpRecorder : IAsyncDisposable
             {
                 Interlocked.Decrement(ref _queueDepth);
                 _ersAutopilot?.ProcessPacket(packet.Payload, packet.ReceivedAt);
+                _liftCoast?.ProcessPacket(packet.Payload, packet.ReceivedAt);
                 _raceEngineer?.SetAutopilotDecision(_ersAutopilot?.Status, _ersAutopilot?.LastDecision);
                 _raceEngineer?.ProcessPacket(packet.Payload, packet.ReceivedAt);
 

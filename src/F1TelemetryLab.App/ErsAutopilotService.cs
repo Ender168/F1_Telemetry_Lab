@@ -2,6 +2,11 @@ namespace F1TelemetryLab;
 
 public sealed class ErsAutopilotService : IDisposable
 {
+    private readonly object _sync = new();
+    private readonly PitLapErsController _pitLap = new();
+    private readonly TimeProvider _timeProvider;
+    private bool _stopped;
+    private bool _disposed;
     private readonly ErsAutopilotOptions _options;
     private readonly ErsProfileLoadResult _profiles;
     private readonly IErsInputSink _inputSink;
@@ -13,6 +18,12 @@ public sealed class ErsAutopilotService : IDisposable
     private SessionControlSample? _session;
     private CarTelemetrySample? _telemetry;
     private CarStatusSample? _carStatus;
+    private ErsPlayerMotion? _playerMotion;
+    private int? _sessionPlayerCarIndex;
+    private uint? _statusFrame;
+    private uint? _awaitPostPitStatusFrame;
+    private int? _selectedActual;
+    private int? _selectedVisual;
     private LapDataSample? _playerLap;
     private ErsControlProfile? _profile;
     private ErsDecisionEngine? _engine;
@@ -24,8 +35,10 @@ public sealed class ErsAutopilotService : IDisposable
     private bool _inputFault;
     private string _inputFaultReason = "";
     private string _lastDecisionSignature = "";
+    private DateTimeOffset _lastDecisionAuditAt;
     private string _lastInternalError = "";
     private ulong _sessionUid;
+    private uint? _flashbackOverallFrame;
     private ErsControlDecision? _lastDecision;
 
     public ErsAutopilotService(
@@ -34,8 +47,10 @@ public sealed class ErsAutopilotService : IDisposable
         IErsInputSink inputSink,
         Action<ErsAuditRecord>? auditSink = null,
         Action<ErsControlProfile, ErsAutopilotOptions>? profileSink = null,
-        Action<string>? log = null)
+        Action<string>? log = null,
+        TimeProvider? timeProvider = null)
     {
+        _timeProvider = timeProvider ?? TimeProvider.System;
         _options = options;
         _profiles = profiles;
         _inputSink = inputSink;
@@ -48,7 +63,7 @@ public sealed class ErsAutopilotService : IDisposable
         _log?.Invoke(options.OperatingMode switch
         {
             ErsAutopilotOperatingMode.Live =>
-                $"ERS autopilot LIVE: profile feedback controls {ErsProfileStore.VirtualKeyName(options.DecreaseVirtualKey)}/{ErsProfileStore.VirtualKeyName(options.IncreaseVirtualKey)}. Online sessions are always blocked; F12 stops input for the rest of the recording.",
+                $"ERS autopilot LIVE: profile feedback controls {ErsProfileStore.VirtualKeyName(options.DecreaseVirtualKey)}/{ErsProfileStore.VirtualKeyName(options.IncreaseVirtualKey)}. Online and offline sessions are supported; F12 stops input for the rest of the recording.",
             ErsAutopilotOperatingMode.DryRun => "ERS autopilot DRY-RUN: decisions are logged, no keys are sent.",
             _ => "ERS autopilot is off."
         });
@@ -58,13 +73,36 @@ public sealed class ErsAutopilotService : IDisposable
 
     public ErsControlDecision? LastDecision => Volatile.Read(ref _lastDecision);
 
+    public PitLapErsStatus PitLapStatus
+    {
+        get
+        {
+            lock (_sync) return new PitLapErsStatus(_pitLap.Active, _pitLap.Lap, _pitLap.ButtonsPressed,
+                _options.OperatingMode, _publicStatus.State, _telemetry?.ReceivedAt ?? DateTimeOffset.MinValue,
+                _publicStatus.Detail);
+        }
+    }
+
+
     public void ProcessPacket(byte[] payload, DateTimeOffset receivedAt)
     {
+        lock (_sync)
+        {
+            if (_stopped || _disposed) return;
+            ProcessPacketCore(payload, receivedAt);
+        }
+    }
+
+    private void ProcessPacketCore(byte[] payload, DateTimeOffset receivedAt)
+    {
         if (_options.OperatingMode == ErsAutopilotOperatingMode.Off) return;
+        var now = _options.OperatingMode == ErsAutopilotOperatingMode.Live ? _timeProvider.GetUtcNow() : receivedAt;
         try
         {
             if (!F12026Parser.TryParseHeader(payload, out var header) || header.PacketFormat != AppInfo.SupportedPacketFormat) return;
-            if (_options.OperatingMode == ErsAutopilotOperatingMode.Live && !PollInputRelease(receivedAt)) return;
+            if (_options.OperatingMode == ErsAutopilotOperatingMode.Live && !PollInputRelease(now)) return;
+            // MotionEx must belong to the session/player established by Session data.
+            if (header.PacketId is 7 or 13 && _sessionUid != 0 && header.SessionUid != _sessionUid) return;
             if (_sessionUid != 0 && header.SessionUid != _sessionUid) ResetForSession(header.SessionUid);
             _sessionUid = header.SessionUid;
             if (_options.OperatingMode == ErsAutopilotOperatingMode.Live && _inputSink.EmergencyStopRequested(_options))
@@ -78,28 +116,87 @@ public sealed class ErsAutopilotService : IDisposable
                 return;
             }
 
+            // Overall frames continue across a rewind; ordinary frame/session-time counters do not.
+            // Ignore delayed packets and repeated FLBK deliveries from the abandoned timeline.
+            if (_flashbackOverallFrame is uint cutoff && header.OverallFrameIdentifier <= cutoff) return;
+            if (header.PacketId == 3)
+            {
+                if (F12026Parser.TryParseButtonStatus(payload, out var buttons))
+                {
+                    HandlePitButtons(buttons, header, receivedAt, now);
+                    return;
+                }
+                var eventOffset = F12026Parser.HeaderSize;
+                if (payload.Length >= eventOffset + 4 && payload.AsSpan(eventOffset, 4).SequenceEqual("SEND"u8))
+                    CancelPitLap(now, "Session ended.");
+                if (payload.Length >= eventOffset + 12 &&
+                    payload.AsSpan(eventOffset, 4).SequenceEqual("FLBK"u8))
+                {
+                    var targetTime = System.Buffers.Binary.BinaryPrimitives.ReadSingleLittleEndian(payload.AsSpan(eventOffset + 8));
+                    if (float.IsFinite(targetTime) && targetTime >= 0)
+                        ResetAfterFlashback(header.OverallFrameIdentifier, now);
+                }
+                return;
+            }
+
+            if (header.PacketId is 7 or 13 &&
+                (_sessionPlayerCarIndex is null || header.PlayerCarIndex != _sessionPlayerCarIndex)) return;
+
             switch (header.PacketId)
             {
+                case 13:
+                    var motion = F12026Parser.ParsePlayerMotionEx(payload, receivedAt);
+                    if (motion is not null && _playerMotion is not null &&
+                        (motion.Frame <= _playerMotion.Frame || motion.SessionTime <= _playerMotion.SessionTime ||
+                         motion.ReceivedAt <= _playerMotion.ReceivedAt)) return;
+                    _playerMotion = motion;
+                    break;
                 case 1:
+                    if (_sessionPlayerCarIndex != header.PlayerCarIndex)
+                    {
+                        _playerMotion = null;
+                        _carStatus = null;
+                        _statusFrame = null;
+                    }
+                    _sessionPlayerCarIndex = header.PlayerCarIndex;
                     _session = F12026Parser.TryParseSessionControl(payload, receivedAt);
-                    SelectProfileIfPossible();
+                    SelectProfileIfPossible(now);
                     break;
                 case 2:
+                    var previousPit = _playerLap?.PitStatus;
                     UpdateLapRows(payload, receivedAt);
+                    if (previousPit is > 0 && _playerLap?.PitStatus == 0)
+                    {
+                        _awaitPostPitStatusFrame = header.OverallFrameIdentifier;
+                        _engine = _profile is null ? null : new ErsDecisionEngine(_profile);
+                        ClearPendingCommand();
+                    }
                     break;
                 case 6:
-                    _telemetry = F12026Parser.ParseCarTelemetryPacket(payload, receivedAt)
+                    _telemetry = F12026Parser.ParseCarTelemetryPacket(payload, receivedAt, onlyCarIndex: header.PlayerCarIndex)
                         .FirstOrDefault(sample => sample.IsPlayer);
                     break;
                 case 7:
-                    _carStatus = F12026Parser.ParseCarStatusPacket(payload, receivedAt)
+                    if (_statusFrame is uint last && (last != 0 || header.OverallFrameIdentifier != 0) &&
+                        header.OverallFrameIdentifier <= last) return;
+                    var status = F12026Parser.ParseCarStatusPacket(payload, receivedAt, onlyCarIndex: header.PlayerCarIndex)
                         .FirstOrDefault(sample => sample.IsPlayer);
+                    if (status is null || receivedAt > now ||
+                        now - receivedAt > TimeSpan.FromMilliseconds(_options.TelemetryFreshnessMs)) return;
+                    _carStatus = status;
+                    _statusFrame = header.OverallFrameIdentifier;
+                    if (_awaitPostPitStatusFrame is uint exitFrame && header.OverallFrameIdentifier >= exitFrame)
+                        _awaitPostPitStatusFrame = null;
+                    SelectProfileIfPossible(now);
                     break;
                 default:
                     return;
             }
 
-            Evaluate(receivedAt);
+            if (_pitLap.Active && _playerLap is { } lap &&
+                (lap.PitStatus != 0 || lap.LapNum != _pitLap.Lap || lap.ResultStatus != 2))
+                CancelPitLap(now, "Pit entry, lap change or inactive race lap.");
+            Evaluate(now);
         }
         catch (Exception ex)
         {
@@ -118,11 +215,62 @@ public sealed class ErsAutopilotService : IDisposable
         }
     }
 
+    public void StopInput()
+    {
+        lock (_sync)
+        {
+            if (_stopped) return;
+            CancelPitLap(_timeProvider.GetUtcNow(), "Recording stopped.");
+            _stopped = true;
+            _inputSink.Dispose();
+            SetStatus("Stopped", "", null, null, null, "Recording stopped; ERS input is disabled.");
+        }
+    }
+
     public void Dispose()
     {
-        _inputSink.Dispose();
-        _audit.Dispose();
+        lock (_sync)
+        {
+            if (_disposed) return;
+            try { StopInput(); }
+            finally { _disposed = true; _audit.Dispose(); }
+        }
     }
+
+    private void HandlePitButtons(uint buttons, PacketHeader header, DateTimeOffset receivedAt, DateTimeOffset now)
+    {
+        // BUTN carries the local player's controller flags, independent of DS4/XInput drivers.
+        if (_session is null || _playerLap is null || header.PlayerCarIndex != _playerLap.CarIndex ||
+            now - receivedAt > TimeSpan.FromMilliseconds(_options.TelemetryFreshnessMs)) return;
+        var pressed = _pitLap.ObserveButtons(buttons, header.OverallFrameIdentifier);
+        if (!pressed) return;
+        // Cancellation is always possible; arming requires fresh, active on-track telemetry.
+        if (_pitLap.Active) CancelPitLap(now, "Cancelled with Triangle + Circle.");
+        else if (!_inputFault && !_session.GamePaused && !_session.IsSpectating &&
+                 _carStatus?.NetworkPaused != true && _playerLap.PitStatus == 0 &&
+                 _playerLap.LapNum > 0 && _playerLap.ResultStatus == 2 &&
+                 now - _playerLap.ReceivedAt <= TimeSpan.FromMilliseconds(_options.TelemetryFreshnessMs) &&
+                 now - _session.ReceivedAt <= TimeSpan.FromMilliseconds(_options.SessionFreshnessMs))
+        {
+            _pitLap.Toggle(_playerLap.LapNum);
+            ClearPendingCommand();
+            WritePitLapAudit(now, "pit-lap-on", "Pit this lap enabled with Triangle + Circle.");
+        }
+        Evaluate(now);
+    }
+
+    private void CancelPitLap(DateTimeOffset now, string reason)
+    {
+        if (!_pitLap.Active) return;
+        _pitLap.Cancel();
+        if (_options.OperatingMode == ErsAutopilotOperatingMode.Live)
+            PollInputRelease(now, releaseImmediately: true);
+        ClearPendingCommand();
+        WritePitLapAudit(now, "pit-lap-off", reason);
+    }
+
+    private void WritePitLapAudit(DateTimeOffset now, string action, string reason) =>
+        _audit.Write(InputLifecycleDecision(now) with { RuleId = "pit-lap", Reason = reason }, action);
 
     private void UpdateLapRows(byte[] payload, DateTimeOffset receivedAt)
     {
@@ -133,18 +281,43 @@ public sealed class ErsAutopilotService : IDisposable
         }
     }
 
-    private void SelectProfileIfPossible()
+    private void SelectProfileIfPossible(DateTimeOffset now)
     {
         if (_session is null) return;
-        var selected = _profiles.Find(_session.TrackId, _session.SessionType);
-        if (ReferenceEquals(selected, _profile)) return;
-
+        var fresh = _carStatus is not null && _awaitPostPitStatusFrame is null &&
+            now >= _carStatus.ReceivedAt &&
+            now - _carStatus.ReceivedAt <= TimeSpan.FromMilliseconds(_options.TelemetryFreshnessMs);
+        // A telemetry gap is not a tyre change. Keep budgets until fresh status confirms a change.
+        // BlockReason still prevents input while stale or waiting after pit exit.
+        if (!fresh && (_selectedActual is not null || _selectedVisual is not null)) return;
+        int? actual = fresh && _carStatus!.ActualTyreCompound > 0 ? _carStatus.ActualTyreCompound : null;
+        int? visual = fresh && _carStatus!.VisualTyreCompound > 0 ? _carStatus.VisualTyreCompound : null;
+        var selected = _profiles.Find(_session.TrackId, _session.SessionType, actual, visual, _session.Weather);
+        var changed = !ReferenceEquals(selected, _profile) || actual != _selectedActual || visual != _selectedVisual;
+        if (!changed)
+        {
+            if (selected is null) SetStatus("No profile", "", null, null, null,
+                "Waiting for compatible ERS profile and fresh player tyre data.");
+            return;
+        }
+        var previous = _profile?.ProfileId ?? "none";
+        var oldActual = _selectedActual;
+        var oldVisual = _selectedVisual;
+        if (_pendingExpectedMode is not null && _options.OperatingMode == ErsAutopilotOperatingMode.Live)
+            PollInputRelease(now, releaseImmediately: true);
+        _selectedActual = actual;
+        _selectedVisual = visual;
         _profile = selected;
         _engine = selected is null ? null : new ErsDecisionEngine(selected);
         _pendingFromMode = null;
         _pendingExpectedMode = null;
         _retryCount = 0;
 
+        Volatile.Write(ref _lastDecision, null);
+        _lastDecisionSignature = "";
+        var transition = $"ERS profile {previous} -> {selected?.ProfileId ?? "none"}; actual {oldActual?.ToString() ?? "unknown"} -> {actual?.ToString() ?? "unknown"}; visual {oldVisual?.ToString() ?? "unknown"} -> {visual?.ToString() ?? "unknown"}.";
+        _audit.Write(InputLifecycleDecision(now) with { Reason = transition, RuleId = "profile-transition" }, "profile-transition");
+        _log?.Invoke(transition);
         if (selected is null)
         {
             SetStatus("No profile", "", null, null, null,
@@ -158,6 +331,7 @@ public sealed class ErsAutopilotService : IDisposable
 
     private void Evaluate(DateTimeOffset now)
     {
+        SelectProfileIfPossible(now);
         if (_profile is null || _engine is null || _session is null) return;
         var state = BuildState(now);
         var decision = _engine.Evaluate(state);
@@ -222,18 +396,23 @@ public sealed class ErsAutopilotService : IDisposable
             string.IsNullOrEmpty(block),
             block)
         {
+            ActualTyreCompound = _selectedActual,
+            VisualTyreCompound = _selectedVisual,
+            PlayerMotion = _playerMotion,
             TotalLaps = _session.TotalLaps,
-            DrsActive = _telemetry?.Drs == 1
+            DrsActive = _telemetry?.Drs == 1,
+            PitLapBurn = _pitLap.Active,
+            BrakePct = (_telemetry?.Brake ?? 0) * 100d
         };
     }
 
     private string BlockReason(DateTimeOffset now)
     {
+        if (_awaitPostPitStatusFrame is not null) return "Waiting for fresh post-pit tyre compound data.";
         if (_inputFault) return string.IsNullOrWhiteSpace(_inputFaultReason)
             ? "Live ERS input is blocked until the next recording."
             : _inputFaultReason;
         if (_session is null) return "Waiting for Session packet 1.";
-        if (_session.IsNetworkGame) return "Online session detected. Automatic input is hard-blocked.";
         if (_options.OperatingMode == ErsAutopilotOperatingMode.Live && _session.ErsAssist < 0)
             return "Waiting for the 2026 ERS Assist flag before enabling live input.";
         if (_options.OperatingMode == ErsAutopilotOperatingMode.Live && _session.ErsAssist != 0)
@@ -332,9 +511,9 @@ public sealed class ErsAutopilotService : IDisposable
             $"{result.Message} Waiting for {_pendingExpectedMode}. {decision.Reason}");
     }
 
-    private bool PollInputRelease(DateTimeOffset now)
+    private bool PollInputRelease(DateTimeOffset now, bool releaseImmediately = false)
     {
-        var result = _inputSink.Poll(now);
+        var result = _inputSink.Poll(releaseImmediately ? DateTimeOffset.MaxValue : now);
         if (result is null) return true;
         _audit.Write(InputLifecycleDecision(now), result.Success ? result.Message : "input-error: " + result.Message);
         if (result.Success)
@@ -390,8 +569,10 @@ public sealed class ErsAutopilotService : IDisposable
 
     private void AuditDecisionTransition(ErsControlDecision decision)
     {
-        var signature = $"{decision.Blocked}|{decision.RuleId}|{decision.TargetMode}|{decision.Reason}";
-        if (string.Equals(signature, _lastDecisionSignature, StringComparison.Ordinal)) return;
+        var signature = $"{decision.Blocked}|{decision.RuleId}|{decision.Segment}|{decision.CurrentMode}|{decision.TargetMode}|{decision.TacticalMode}|{decision.TacticalIntensity}|{decision.EnergyState}|{(decision.Blocked ? decision.Reason : "")}";
+        if (string.Equals(signature, _lastDecisionSignature, StringComparison.Ordinal) &&
+            decision.ReceivedAt - _lastDecisionAuditAt < TimeSpan.FromSeconds(1)) return;
+        _lastDecisionAuditAt = decision.ReceivedAt;
         _lastDecisionSignature = signature;
         _audit.Write(decision, decision.Blocked ? "blocked" : "decision");
     }
@@ -412,12 +593,59 @@ public sealed class ErsAutopilotService : IDisposable
         });
     }
 
-    private void ResetForSession(ulong sessionUid)
+    private void ResetAfterFlashback(uint overallFrame, DateTimeOffset now)
     {
-        _sessionUid = sessionUid;
+        CancelPitLap(now, "Confirmed Flashback.");
+        _pitLap.Reset();
+        var resetDecision = InputLifecycleDecision(now) with
+        {
+            Blocked = true,
+            RuleId = "flashback-reset",
+            Reason = "Confirmed FLBK: cleared ERS timeline state; waiting for fresh Session, Lap, Telemetry and Car Status packets."
+        };
+        // Release any held pulse without disposing the sink, so Live can resume afterwards.
+        if (_options.OperatingMode == ErsAutopilotOperatingMode.Live)
+            PollInputRelease(now, releaseImmediately: true);
+        _flashbackOverallFrame = overallFrame;
+        _engine = _profile is null ? null : new ErsDecisionEngine(_profile);
         _session = null;
         _telemetry = null;
         _carStatus = null;
+        _playerMotion = null;
+        _sessionPlayerCarIndex = null;
+        _statusFrame = null;
+        _awaitPostPitStatusFrame = null;
+        _selectedActual = null;
+        _selectedVisual = null;
+        _playerLap = null;
+        _lapRows.Clear();
+        ClearPendingCommand();
+        _pendingSince = default;
+        _lastCommandAt = DateTimeOffset.MinValue;
+        _lastDecisionSignature = "";
+        _lastDecisionAuditAt = default;
+        Volatile.Write(ref _lastDecision, null);
+        _audit.Write(resetDecision, "flashback-reset");
+        _log?.Invoke(resetDecision.Reason);
+        // A rewind never clears a latched F12, input error or feedback failure.
+        SetStatus("Blocked", "", null, null, null, _inputFault ? _inputFaultReason : resetDecision.Reason);
+    }
+
+    private void ResetForSession(ulong sessionUid)
+    {
+        CancelPitLap(_timeProvider.GetUtcNow(), "Session changed.");
+        _pitLap.Reset();
+        _sessionUid = sessionUid;
+        _flashbackOverallFrame = null;
+        _session = null;
+        _telemetry = null;
+        _carStatus = null;
+        _playerMotion = null;
+        _sessionPlayerCarIndex = null;
+        _statusFrame = null;
+        _awaitPostPitStatusFrame = null;
+        _selectedActual = null;
+        _selectedVisual = null;
         _playerLap = null;
         _profile = null;
         _engine = null;

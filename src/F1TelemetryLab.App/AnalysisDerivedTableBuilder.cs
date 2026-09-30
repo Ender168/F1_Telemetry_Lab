@@ -31,10 +31,10 @@ internal static class AnalysisDerivedTableBuilder
                received_at AS selected_at
         FROM raw_packets
         WHERE packet_format = 2026
-          AND packet_id = 2
+          AND packet_id IN (2, 8)
           AND session_uid IS NOT NULL
           AND CAST(session_uid AS TEXT) NOT IN ('', '0')
-        ORDER BY id DESC
+        ORDER BY CASE WHEN packet_id = 2 THEN 0 ELSE 1 END, id DESC
         LIMIT 1;
         """);
     }
@@ -565,7 +565,7 @@ internal static class AnalysisDerivedTableBuilder
                 NULL AS num_tyre_stints,
                 NULL AS result_reason,
                 0 AS classification_is_official,
-                'UDP packet 8 is absent. Positions are reconstructed from the latest Lap Data and may be incomplete; official points, result reasons, total race time and tyre stints are unavailable.' AS classification_note
+                'No official packet 8 classification matched the selected session. Positions are reconstructed from the latest Lap Data and may be incomplete; official points, result reasons, total race time and tyre stints are unavailable.' AS classification_note
             FROM latest_lap l
             LEFT JOIN latest_names n ON n.session_uid = l.session_uid AND n.car_idx = l.car_idx
             LEFT JOIN driver_aliases a ON a.car_idx = l.car_idx

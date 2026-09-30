@@ -25,6 +25,35 @@ public sealed class WindowsKeyboardErsInputSink : IErsInputSink
     private const uint ScanCode = 0x0008;
     private const uint MapVkToVsc = 0;
     private readonly object _sync = new();
+    private readonly Timer _releaseTimer;
+    private ErsInputResult? _pendingRelease;
+    private long _pressedAtTimestamp;
+    private int _holdMilliseconds;
+
+    public WindowsKeyboardErsInputSink()
+    {
+        _releaseTimer = new Timer(_ => ReleaseOnTimer(), null, Timeout.Infinite, Timeout.Infinite);
+    }
+
+    private void ReleaseOnTimer()
+    {
+        lock (_sync)
+        {
+            if (_disposed || _pressedScanCode == 0) return;
+            // A previously queued callback may run after a new tap. Respect the new deadline.
+            var remaining = _holdMilliseconds - Stopwatch.GetElapsedTime(_pressedAtTimestamp).TotalMilliseconds;
+            if (remaining > 0)
+            {
+                _releaseTimer.Change((int)Math.Ceiling(remaining), Timeout.Infinite);
+                return;
+            }
+            // Key-up must not depend on another UDP packet arriving.
+            var result = ReleaseIfDue(DateTimeOffset.MaxValue);
+            _pendingRelease ??= result;
+            if (_pressedScanCode != 0) _releaseTimer.Change(30, Timeout.Infinite);
+        }
+    }
+
     private ushort _pressedScanCode;
     private int _pressedVirtualKey;
     private DateTimeOffset _releaseAt;
@@ -70,7 +99,11 @@ public sealed class WindowsKeyboardErsInputSink : IErsInputSink
 
             _pressedScanCode = scanCode;
             _pressedVirtualKey = virtualKey;
-            _releaseAt = now.AddMilliseconds(Math.Clamp(options.KeyHoldMilliseconds, 30, 250));
+            var holdMs = Math.Clamp(options.KeyHoldMilliseconds, 30, 250);
+            _holdMilliseconds = holdMs;
+            _pressedAtTimestamp = Stopwatch.GetTimestamp();
+            _releaseAt = now.AddMilliseconds(holdMs);
+            _releaseTimer.Change(holdMs, Timeout.Infinite);
             return ErsInputResult.Ok(
                 $"Pressed {ErsProfileStore.VirtualKeyName(virtualKey)} scan-code 0x{scanCode:X2} for {Math.Clamp(options.KeyHoldMilliseconds, 30, 250)} ms ({direction}).");
         }
@@ -82,7 +115,9 @@ public sealed class WindowsKeyboardErsInputSink : IErsInputSink
         lock (_sync)
         {
             if (_disposed) return null;
-            return ReleaseIfDue(now);
+            var result = _pendingRelease ?? ReleaseIfDue(now);
+            _pendingRelease = null;
+            return result;
         }
     }
 
@@ -92,10 +127,10 @@ public sealed class WindowsKeyboardErsInputSink : IErsInputSink
 
     public void Dispose()
     {
-        if (!OperatingSystem.IsWindows()) return;
         lock (_sync)
         {
             if (_disposed) return;
+            _releaseTimer.Dispose();
             if (_pressedScanCode != 0)
             {
                 _ = SendInput(1, new[] { KeyboardInput(_pressedScanCode, ScanCode | KeyUp) }, Marshal.SizeOf<Input>());
