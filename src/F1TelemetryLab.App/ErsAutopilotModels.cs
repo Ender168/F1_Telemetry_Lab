@@ -113,6 +113,7 @@ public sealed class ErsAutopilotOptions
 
 public sealed class ErsControlProfile
 {
+    public LiftCoastPlan? LiftCoast { get; set; }
     public ErsTractionPlan? TractionGates { get; set; }
     public int SchemaVersion { get; set; } = 1;
     public int ProfileRevision { get; set; } = 1;

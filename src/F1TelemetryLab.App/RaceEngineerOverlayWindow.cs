@@ -78,6 +78,9 @@ public sealed class RaceEngineerOverlayWindow : Window
         AddWidget("ers-tactical", russian ? "ERS · СИТУАЦИЯ" : "ERS · TACTICAL", 360);
         AddWidget("ers-action", russian ? "ERS · КОМАНДА" : "ERS · ACTION", 445);
 
+        AddWidget("lift-coast", "LIFT & COAST", 310, 18);
+        UpdateLiftCoast(LiftCoastAdvice.Waiting);
+
         _editorBar = BuildEditorBar();
         _canvas.Children.Add(_editorBar);
         Canvas.SetLeft(_editorBar, 20);
@@ -177,6 +180,17 @@ public sealed class RaceEngineerOverlayWindow : Window
         ToolTip.SetTip(_widgets["ers-energy"].Border, snapshot.Ers.Reason);
         ToolTip.SetTip(_widgets["ers-tactical"].Border, snapshot.Ers.Reason);
         ToolTip.SetTip(_widgets["ers-action"].Border, snapshot.Ers.Reason);
+    }
+
+    public void UpdateLiftCoast(LiftCoastAdvice advice)
+    {
+        SetWidget("lift-coast", advice.Format(_russian), advice.Phase switch
+        {
+            LiftCoastPhase.Lift => Orange,
+            LiftCoastPhase.Coasting => Green,
+            LiftCoastPhase.Approach => Amber,
+            _ => Cyan
+        });
     }
 
     private void UpdateNearbyTable(RaceEngineerSnapshot snapshot, DateTimeOffset now)
