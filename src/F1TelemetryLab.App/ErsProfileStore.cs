@@ -155,6 +155,7 @@ public static class ErsProfileStore
     private static void Validate(ErsControlProfile profile)
     {
         LiftCoastAdvisor.Validate(profile.LiftCoast, profile.TrackLengthM);
+        TrackGuidanceAdvisor.Validate(profile.TrackGuidance, profile.TrackLengthM);
         if (profile.SchemaVersion is < 1 or > 2) throw new InvalidDataException($"Unsupported schema_version {profile.SchemaVersion}.");
         if (profile.ProfileRevision <= 0) throw new InvalidDataException("profile_revision must be positive.");
         if (string.IsNullOrWhiteSpace(profile.ProfileId)) throw new InvalidDataException("profile_id is required.");

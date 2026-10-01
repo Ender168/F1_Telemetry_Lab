@@ -1,3 +1,10 @@
+## 0.10.15 - ERS recovery and personal track guidance
+
+- Automatically recover from ERS feedback timeouts without restarting telemetry recording, with 3-30 second backoff and fresh-state checks. Keep F12 and hard input failures latched.
+- Retain strategy budgets and pit-lap state during recovery; audit failed transitions and recovery attempts.
+- Add optional `track_guidance` JSON cues for information, brake onset and checkpoint speed with coloured feedback in a movable overlay card.
+- Use player telemetry, profile/tyre/weather selection, gap and Flashback guards; package a Russian configuration guide with explicitly synthetic examples.
+
 ## 0.10.14 - Lift-and-coast timing overlay
 
 - Add an optional `lift_coast` block to ERS profiles, with calibrated corner-relative lift and braking boundaries, preview distance and speed threshold.

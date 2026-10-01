@@ -46,6 +46,8 @@ public sealed class UdpRecorder : IAsyncDisposable
     private ErsAutopilotService? _ersAutopilot;
     private RaceEngineerService? _raceEngineer;
     private LiftCoastService? _liftCoast;
+    public TrackGuidanceAdvice TrackGuidance => _liftCoast?.GetGuidance(DateTimeOffset.UtcNow,
+        _ersAutopilot?.PitLapStatus.Active == true) ?? TrackGuidanceAdvice.Waiting;
     public LiftCoastAdvice LiftCoast => _liftCoast?.GetAdvice(DateTimeOffset.UtcNow,
         _ersAutopilot?.PitLapStatus.Active == true) ?? LiftCoastAdvice.Waiting;
     private ErsAutopilotOptions _ersOptions = new() { OperatingMode = ErsAutopilotOperatingMode.Off };

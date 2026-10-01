@@ -114,6 +114,7 @@ public sealed class ErsAutopilotOptions
 public sealed class ErsControlProfile
 {
     public LiftCoastPlan? LiftCoast { get; set; }
+    public TrackGuidancePlan? TrackGuidance { get; set; }
     public ErsTractionPlan? TractionGates { get; set; }
     public int SchemaVersion { get; set; } = 1;
     public int ProfileRevision { get; set; } = 1;
@@ -323,6 +324,8 @@ public sealed record ErsAutopilotStatus(
     string Detail)
 {
     public ErsControlDecision? Decision { get; init; }
+    public int? RecoverySeconds { get; init; }
+    public string FailedTransition { get; init; } = "";
 
     public static ErsAutopilotStatus Initial(ErsAutopilotOperatingMode mode) => new(
         mode,
