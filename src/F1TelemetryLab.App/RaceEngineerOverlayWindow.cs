@@ -80,6 +80,8 @@ public sealed class RaceEngineerOverlayWindow : Window
 
         AddWidget("lift-coast", "LIFT & COAST", 310, 18);
         UpdateLiftCoast(LiftCoastAdvice.Waiting);
+        AddWidget("track-guidance", _russian ? "ПОДСКАЗКИ ТРАССЫ" : "TRACK GUIDANCE", 340, 18);
+        UpdateTrackGuidance(TrackGuidanceAdvice.Waiting);
 
         _editorBar = BuildEditorBar();
         _canvas.Children.Add(_editorBar);
@@ -180,6 +182,18 @@ public sealed class RaceEngineerOverlayWindow : Window
         ToolTip.SetTip(_widgets["ers-energy"].Border, snapshot.Ers.Reason);
         ToolTip.SetTip(_widgets["ers-tactical"].Border, snapshot.Ers.Reason);
         ToolTip.SetTip(_widgets["ers-action"].Border, snapshot.Ers.Reason);
+    }
+
+    public void UpdateTrackGuidance(TrackGuidanceAdvice advice)
+    {
+        SetWidget("track-guidance", advice.Format(_russian), advice.Phase switch
+        {
+            TrackCuePhase.Success => Green,
+            TrackCuePhase.Missed => new SolidColorBrush(Color.Parse("#FF6161")),
+            TrackCuePhase.Act => Amber,
+            TrackCuePhase.Unavailable => new SolidColorBrush(Color.Parse("#AAAAAA")),
+            _ => Cyan
+        });
     }
 
     public void UpdateLiftCoast(LiftCoastAdvice advice)
@@ -509,7 +523,7 @@ public sealed class RaceEngineerOverlayWindow : Window
         _ => Cyan
     };
 
-    private static IBrush ActionColour(ErsRaceAdvice value) => value.TargetMode switch
+    private static IBrush ActionColour(ErsRaceAdvice value) => value.AutomationState == "Recovering" ? Amber : value.TargetMode switch
     {
         ErsDeployMode.Boost => Magenta,
         ErsDeployMode.Hotlap => Orange,

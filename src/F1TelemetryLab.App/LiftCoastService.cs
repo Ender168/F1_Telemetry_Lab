@@ -16,6 +16,52 @@ public sealed class LiftCoastService
     private byte _player;
     private uint? _flashbackFrame;
     private bool _ended;
+    private readonly TrackGuidanceAdvisor _guidance = new();
+    private TrackGuidanceAdvice _guidanceAdvice = TrackGuidanceAdvice.Waiting;
+    private DateTimeOffset? _guidanceSampleAt;
+    private TrackGuidancePlan? _guidancePlan;
+
+    public TrackGuidanceAdvice GetGuidance(DateTimeOffset now, bool pitLapBurn = false)
+    {
+        lock (_sync)
+        {
+            var plan = GuidancePlan(now);
+            if (plan is null || (pitLapBurn && plan.SuppressOnPitLap))
+            { ResetGuidance(); return TrackGuidanceAdvice.Waiting; }
+            return _guidanceAdvice;
+        }
+    }
+
+    private TrackGuidancePlan? GuidancePlan(DateTimeOffset now)
+    {
+        if (_ended || _session is null || _lap is null || _telemetry is null || _status is null ||
+            !Fresh(_session.ReceivedAt, now, 3000) || !Fresh(_lap.ReceivedAt, now, 250) ||
+            !Fresh(_telemetry.ReceivedAt, now, 250) || !Fresh(_status.ReceivedAt, now, 1500) ||
+            _session.GamePaused || _session.IsSpectating || _status.NetworkPaused || _session.SafetyCarStatus != 0 ||
+            _lap.PitStatus != 0 || _lap.DriverStatus is not (1 or 4) || _lap.ResultStatus != 2 || _lap.LapNum <= 0)
+            return null;
+        var profile = _profiles.Find(_session.TrackId, _session.SessionType, _status.ActualTyreCompound,
+            _status.VisualTyreCompound, _session.Weather);
+        return profile?.TrackGuidance is { Enabled: true } plan && _session.TrackLengthM > 0 &&
+            Math.Abs(_session.TrackLengthM - profile.TrackLengthM) <= 10 ? plan : null;
+    }
+
+    private void UpdateGuidance(DateTimeOffset now)
+    {
+        var plan = GuidancePlan(now);
+        if (plan is null) { ResetGuidance(); return; }
+        if (_guidanceSampleAt == _telemetry!.ReceivedAt && ReferenceEquals(plan, _guidancePlan)) return;
+        _guidanceSampleAt = _telemetry.ReceivedAt;
+        _guidancePlan = plan;
+        _guidanceAdvice = _guidance.Observe(plan, _session!.TrackLengthM, _lap!.LapDistance,
+            _telemetry.Speed, _telemetry.Brake, _telemetry.ReceivedAt);
+    }
+
+    private void ResetGuidance()
+    {
+        _guidance.Reset(); _guidanceSampleAt = null; _guidancePlan = null;
+        _guidanceAdvice = TrackGuidanceAdvice.Waiting;
+    }
 
     public LiftCoastService(ErsProfileLoadResult profiles) => _profiles = profiles;
 
@@ -41,6 +87,7 @@ public sealed class LiftCoastService
                     ClearPlayer();
                 _player = h.PlayerCarIndex;
                 _session = session;
+                UpdateGuidance(receivedAt);
                 return;
             }
             if (_session is null || _session.SessionUid != h.SessionUid || _player != h.PlayerCarIndex ||
@@ -69,6 +116,7 @@ public sealed class LiftCoastService
                     }
                     break;
             }
+            UpdateGuidance(receivedAt);
         }
     }
 
@@ -100,7 +148,7 @@ public sealed class LiftCoastService
         return true;
     }
 
-    private void ClearPlayer() { _lap = null; _telemetry = null; _status = null; }
+    private void ClearPlayer() { _lap = null; _telemetry = null; _status = null; ResetGuidance(); }
     private static bool Fresh(DateTimeOffset at, DateTimeOffset now, int milliseconds) =>
         now >= at && now - at <= TimeSpan.FromMilliseconds(milliseconds);
 }
