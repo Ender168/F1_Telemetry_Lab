@@ -23,7 +23,7 @@ public sealed class TelemetryDatabase : IDisposable
         SQLitePCL.Batteries_V2.Init();
         Path = path;
         Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
-        _connection = new SqliteConnection($"Data Source={path}");
+        _connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ToString());
         _connection.Open();
         CreateSchema();
 
@@ -446,6 +446,26 @@ public sealed class TelemetryDatabase : IDisposable
         if (value is float f && (float.IsNaN(f) || float.IsInfinity(f))) return DBNull.Value;
         if (value is double d && (double.IsNaN(d) || double.IsInfinity(d))) return DBNull.Value;
         return value;
+    }
+
+    // Called only after the recording writer has stopped. Do not commit or checkpoint discarded data.
+    public void Discard()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        try { _batchTransaction?.Rollback(); }
+        finally
+        {
+            try { _batchTransaction?.Dispose(); }
+            finally
+            {
+                _batchTransaction = null;
+                _upsertSegment.Dispose();
+                _insertRaw.Dispose();
+                _insertCar.Dispose();
+                _connection.Dispose();
+            }
+        }
     }
 
     public void Dispose()

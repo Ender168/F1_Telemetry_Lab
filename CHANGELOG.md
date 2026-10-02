@@ -1,3 +1,10 @@
+## 0.10.17 - Stop and discard recording
+
+- Add a separate Stop and discard recording button with confirmation. Cancel leaves the recorder running.
+- Stop ERS input and UDP reception, skip the pending packet queue, roll back the open database batch and remove only the active recording directory.
+- Skip final classification wait, analysis, race-profile learning and archive creation on discard.
+- Keep normal Stop/save behaviour. Report deletion failures with the remaining path; prevent duplicate stop/discard races and give each recording a unique directory.
+
 ## 0.10.15 - ERS recovery and personal track guidance
 
 - Automatically recover from ERS feedback timeouts without restarting telemetry recording, with 3-30 second backoff and fresh-state checks. Keep F12 and hard input failures latched.
