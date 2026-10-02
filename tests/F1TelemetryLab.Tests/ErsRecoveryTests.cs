@@ -91,4 +91,52 @@ public sealed partial class ErsAutopilotTests
         Assert.Equal("Blocked", service.Status.State);
         Assert.DoesNotContain(audit, x => x.Action == "input-recovery-resumed");
     }
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    public void LateConfirmationResetsBackoffForNextIsolatedFailure(int delaySeconds)
+    {
+        var clock = new FlashbackClock(); var sink = new FlashbackSink();
+        using var service = RecoveryService(clock, sink, new());
+        FeedFlashbackState(service, clock, 1, 1000);
+        clock.Now = clock.Now.AddMilliseconds(110); FeedFlashbackState(service, clock, 2, 1005);
+        clock.Now = clock.Now.AddSeconds(delaySeconds);
+        // Confirmation may arrive during the backoff or after it expires.
+        SendFrame(service, clock, SessionPacket(true, 0), 3);
+        SendFrame(service, clock, LapPacket(1100), 3);
+        SendFrame(service, clock, TelemetryPacket(), 3);
+        SendFrame(service, clock, StatusPacket(ErsDeployMode.Hotlap), 3);
+        clock.Now = clock.Now.AddSeconds(3.1); FeedFlashbackState(service, clock, 4, 1200);
+        clock.Now = clock.Now.AddMilliseconds(110); FeedFlashbackState(service, clock, 5, 1205);
+        Assert.Equal("Recovering", service.Status.State);
+        Assert.Contains("3 s", service.Status.Detail);
+        Assert.DoesNotContain("6 s", service.Status.Detail);
+    }
+
+    [Fact]
+    public void SessionChangeClearsRecoveryDelayFailuresAndFailedTransition()
+    {
+        var clock = new FlashbackClock(); var sink = new FlashbackSink();
+        using var service = RecoveryService(clock, sink, new());
+        FeedFlashbackState(service, clock, 1, 1000);
+        clock.Now = clock.Now.AddMilliseconds(110); FeedFlashbackState(service, clock, 2, 1005);
+        foreach (var packet in new[] { SessionPacket(true, 0), LapPacket(1000),
+            TelemetryPacket(), StatusPacket(ErsDeployMode.Medium) })
+        {
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(packet.AsSpan(7), 92);
+            SendFrame(service, clock, packet, 3);
+        }
+        Assert.Equal(2, sink.TapCount);
+        Assert.Equal("", service.Status.FailedTransition);
+        clock.Now = clock.Now.AddMilliseconds(110);
+        foreach (var packet in new[] { SessionPacket(true, 0), LapPacket(1005),
+            TelemetryPacket(), StatusPacket(ErsDeployMode.Medium) })
+        {
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(packet.AsSpan(7), 92);
+            SendFrame(service, clock, packet, 4);
+        }
+        Assert.Contains("3 s", service.Status.Detail);
+    }
+
 }
+

@@ -105,4 +105,62 @@ public sealed partial class ErsAutopilotTests
         CoastFeed(service, 101);
         Assert.Equal(TrackCuePhase.Info, service.GetGuidance(DateTimeOffset.UnixEpoch).Phase);
     }
+    private static byte[] GuidanceControls(float brake, ushort speed = 200)
+    {
+        var packet = TelemetryPacket();
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(packet.AsSpan(F12026Parser.HeaderSize), speed);
+        System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(packet.AsSpan(F12026Parser.HeaderSize + 10), brake);
+        return packet;
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void GuidanceJudgesBrakeOnlyWhenSameFramePairCompletes(bool telemetryFirst)
+    {
+        var profile = ChinaProfile(); profile.TrackGuidance = GuidePlan(TrackCueKind.Brake);
+        var service = new LiftCoastService(new("", new[] { profile }, Array.Empty<string>()));
+        CoastFeed(service, 1, 820);
+        var now = DateTimeOffset.UnixEpoch.AddMilliseconds(100);
+        if (telemetryFirst) CoastPacket(service, GuidanceControls(.5f), 2, now);
+        else CoastPacket(service, LapPacket(900), 2, now);
+        Assert.Equal(TrackCuePhase.Approach, service.GetGuidance(now).Phase);
+        if (telemetryFirst) CoastPacket(service, LapPacket(900), 2, now.AddMilliseconds(10));
+        else CoastPacket(service, GuidanceControls(.5f), 2, now.AddMilliseconds(10));
+        Assert.Equal(TrackCuePhase.Success, service.GetGuidance(now.AddMilliseconds(10)).Phase);
+    }
+
+    [Fact]
+    public void GuidanceDoesNotJudgeMismatchedFramesAndUsesBufferedMatchingControls()
+    {
+        var profile = ChinaProfile(); profile.TrackGuidance = GuidePlan(TrackCueKind.Brake);
+        var service = new LiftCoastService(new("", new[] { profile }, Array.Empty<string>()));
+        CoastFeed(service, 1, 820);
+        var now = DateTimeOffset.UnixEpoch.AddMilliseconds(100);
+        CoastPacket(service, GuidanceControls(.5f), 2, now);
+        CoastPacket(service, GuidanceControls(0), 3, now.AddMilliseconds(10));
+        Assert.Equal(TrackCuePhase.Approach, service.GetGuidance(now.AddMilliseconds(10)).Phase);
+        CoastPacket(service, LapPacket(900), 2, now.AddMilliseconds(20));
+        Assert.Equal(TrackCuePhase.Success, service.GetGuidance(now.AddMilliseconds(20)).Phase);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void GuidanceSpeedUsesMatchingFrameRegardlessOfArrivalOrder(bool telemetryFirst)
+    {
+        var profile = ChinaProfile(); profile.TrackGuidance = GuidePlan();
+        var service = new LiftCoastService(new("", new[] { profile }, Array.Empty<string>()));
+        CoastFeed(service, 1, 890);
+        var now = DateTimeOffset.UnixEpoch.AddMilliseconds(100);
+        CoastPacket(service, GuidanceControls(0, 120), 2, now);
+        CoastPacket(service, LapPacket(895), 2, now);
+        if (telemetryFirst) CoastPacket(service, GuidanceControls(0, 120), 3, now.AddMilliseconds(100));
+        else CoastPacket(service, LapPacket(910), 3, now.AddMilliseconds(100));
+        if (telemetryFirst) CoastPacket(service, LapPacket(910), 3, now.AddMilliseconds(110));
+        else CoastPacket(service, GuidanceControls(0, 120), 3, now.AddMilliseconds(110));
+        Assert.Equal(TrackCuePhase.Success, service.GetGuidance(now.AddMilliseconds(110)).Phase);
+    }
+
 }
+

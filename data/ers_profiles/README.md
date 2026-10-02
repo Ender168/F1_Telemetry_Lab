@@ -107,7 +107,9 @@ Add a top-level configuration like this (initial validation values, not proven s
 ```
 
 A rule can supply its own `traction_gate` object, replacing the target mode's entire gate. Omitted metric limits are not checked; at least one is required. Thresholds are strict absolute upper bounds. Timings are configurable (defaults: stable 250 ms, maximum gap 100 ms, data age 150 ms).
-Checks apply to increases to Hotlap/Boost, including Hotlap to Boost, pit rules and high default modes. Missing/stale/non-finite required values prevent an increase; reductions are unaffected. Profiles without gates retain previous behavior. This is an onset gate, not automatic traction control or an automatic reduction after a slide.
+By default, checks apply only to increases to Hotlap/Boost, including Hotlap to Boost, pit rules and high default modes. Missing/stale/non-finite required values prevent an increase; reductions are unaffected. Profiles without gates retain previous behavior.
+
+A gate can opt into continuous enforcement with `"enforce_while_active": true` (default `false`). It then checks Hotlap/Boost requests even when that mode is already active. A failed gate requests `None`, including during active deployment. Brake above 5% or a non-finite brake value also requests `None` and resets the stability interval; deployment must earn a fresh stable interval after braking. This applies to rule-specific gates, selected and active rules, and high default modes. Input transitions still require telemetry confirmation, so a request for `None` does not mean ERS power disappears immediately. The default onset-only contract is unchanged when the field is omitted.
 Stable time requires fresh sequential MotionEx samples and elapsed session/arrival time; duplicates cannot advance it. Gaps and unsafe readings restart the interval; pauses, lap/session changes and flashbacks clear it.
 A waiting rule is not selected and does not consume once_per_lap or start its deployment timer. After a rule has started, its normal limits still apply while a subsequent increase/retry waits. Already-sent input cannot be recalled.
 The ERS status detail and audit reason report the target and blocking metric or stable-duration progress.
@@ -132,3 +134,4 @@ Selection first filters track/session, weather compatibility (`dry_only`) and ty
 
 Each tyre profile can have independent rules, energy plans, SOC targets and traction gates. The application does not invent wet strategy values or copy Inter calibration to Full Wet.
 The controller reselects using fresh local-player Car Status data, rejects delayed status frames, waits for a fresh status packet after pit exit, resets rule/energy/traction state on compound changes even when the generic profile stays the same, and audits previous/new profile and actual/visual compounds. The ERS status profile ID shows the active strategy. Flashbacks require fresh session and compound data again. The pit-lap flag still cancels at pit entry/flashback; if a compound changes while it remains active, the new profile's pit rules apply.
+

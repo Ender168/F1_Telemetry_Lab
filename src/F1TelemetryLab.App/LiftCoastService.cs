@@ -18,7 +18,9 @@ public sealed class LiftCoastService
     private bool _ended;
     private readonly TrackGuidanceAdvisor _guidance = new();
     private TrackGuidanceAdvice _guidanceAdvice = TrackGuidanceAdvice.Waiting;
-    private DateTimeOffset? _guidanceSampleAt;
+    private readonly Dictionary<uint, LapDataSample> _guidanceLaps = new();
+    private readonly Dictionary<uint, CarTelemetrySample> _guidanceTelemetry = new();
+    private uint? _guidanceFrame;
     private TrackGuidancePlan? _guidancePlan;
 
     public TrackGuidanceAdvice GetGuidance(DateTimeOffset now, bool pitLapBurn = false)
@@ -48,19 +50,45 @@ public sealed class LiftCoastService
 
     private void UpdateGuidance(DateTimeOffset now)
     {
+        TrimGuidanceSamples(_guidanceLaps, now, x => x.ReceivedAt);
+        TrimGuidanceSamples(_guidanceTelemetry, now, x => x.ReceivedAt);
         var plan = GuidancePlan(now);
-        if (plan is null) { ResetGuidance(); return; }
-        if (_guidanceSampleAt == _telemetry!.ReceivedAt && ReferenceEquals(plan, _guidancePlan)) return;
-        _guidanceSampleAt = _telemetry.ReceivedAt;
-        _guidancePlan = plan;
-        _guidanceAdvice = _guidance.Observe(plan, _session!.TrackLengthM, _lap!.LapDistance,
-            _telemetry.Speed, _telemetry.Brake, _telemetry.ReceivedAt);
+        if (plan is null) { ResetGuidance(clearSamples: _status is not null); return; }
+        if (!ReferenceEquals(plan, _guidancePlan))
+        {
+            _guidance.Reset(); _guidanceFrame = null;
+            _guidanceAdvice = TrackGuidanceAdvice.Waiting; _guidancePlan = plan;
+        }
+        // Packet 2 and packet 6 can arrive in either order. Only a complete
+        // same-frame pair may judge brake onset or checkpoint speed.
+        foreach (var frame in _guidanceLaps.Keys.Intersect(_guidanceTelemetry.Keys).OrderBy(x => x).ToArray())
+        {
+            var lap = _guidanceLaps[frame]; var telemetry = _guidanceTelemetry[frame];
+            _guidanceLaps.Remove(frame); _guidanceTelemetry.Remove(frame);
+            if ((_guidanceFrame is uint previous && frame <= previous) ||
+                !Fresh(lap.ReceivedAt, now, 250) || !Fresh(telemetry.ReceivedAt, now, 250)) continue;
+            _guidanceFrame = frame;
+            _guidanceAdvice = _guidance.Observe(plan, _session!.TrackLengthM, lap.LapDistance,
+                telemetry.Speed, telemetry.Brake, telemetry.ReceivedAt);
+        }
+        TrimGuidanceSamples(_guidanceLaps, now, x => x.ReceivedAt);
+        TrimGuidanceSamples(_guidanceTelemetry, now, x => x.ReceivedAt);
     }
 
-    private void ResetGuidance()
+    private void TrimGuidanceSamples<T>(Dictionary<uint, T> samples, DateTimeOffset now, Func<T, DateTimeOffset> time)
     {
-        _guidance.Reset(); _guidanceSampleAt = null; _guidancePlan = null;
+        foreach (var frame in samples.Keys.Where(x =>
+            (_guidanceFrame is uint previous && x <= previous) || !Fresh(time(samples[x]), now, 250)).ToArray())
+            samples.Remove(frame);
+        foreach (var frame in samples.Keys.OrderBy(x => x).Take(Math.Max(0, samples.Count - 32)).ToArray())
+            samples.Remove(frame);
+    }
+
+    private void ResetGuidance(bool clearSamples = true)
+    {
+        _guidance.Reset(); _guidanceFrame = null; _guidancePlan = null;
         _guidanceAdvice = TrackGuidanceAdvice.Waiting;
+        if (clearSamples) { _guidanceLaps.Clear(); _guidanceTelemetry.Clear(); }
     }
 
     public LiftCoastService(ErsProfileLoadResult profiles) => _profiles = profiles;
@@ -97,9 +125,11 @@ public sealed class LiftCoastService
             {
                 case 2:
                     _lap = F12026Parser.ParseLapDataPacket(payload, receivedAt).FirstOrDefault(x => x.IsPlayer);
+                    if (_lap is not null) _guidanceLaps[h.OverallFrameIdentifier] = _lap;
                     break;
                 case 6:
                     _telemetry = F12026Parser.ParseCarTelemetryPacket(payload, receivedAt, onlyCarIndex: _player).FirstOrDefault(x => x.IsPlayer);
+                    if (_telemetry is not null) _guidanceTelemetry[h.OverallFrameIdentifier] = _telemetry;
                     break;
                 case 7:
                     _status = F12026Parser.ParseCarStatusPacket(payload, receivedAt, onlyCarIndex: _player).FirstOrDefault(x => x.IsPlayer);
@@ -152,3 +182,4 @@ public sealed class LiftCoastService
     private static bool Fresh(DateTimeOffset at, DateTimeOffset now, int milliseconds) =>
         now >= at && now - at <= TimeSpan.FromMilliseconds(milliseconds);
 }
+

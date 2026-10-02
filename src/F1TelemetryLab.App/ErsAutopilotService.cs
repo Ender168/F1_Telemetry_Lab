@@ -35,6 +35,7 @@ public sealed class ErsAutopilotService : IDisposable
     private DateTimeOffset? _recoveryAt;
     private int _recoveryFailures;
     private string _failedTransition = "";
+    private ErsDeployMode? _failedExpectedMode;
     private bool _inputFault;
     private string _inputFaultReason = "";
     private string _lastDecisionSignature = "";
@@ -336,6 +337,16 @@ public sealed class ErsAutopilotService : IDisposable
     {
         SelectProfileIfPossible(now);
         if (_profile is null || _engine is null || _session is null) return;
+        // A delayed confirmation can arrive after the pending command timed out.
+        // Keep its expected single-step mode separately from the strategy target.
+        if (_failedExpectedMode is { } expected && _carStatus is { } status &&
+            now >= status.ReceivedAt && now - status.ReceivedAt <= TimeSpan.FromMilliseconds(_options.TelemetryFreshnessMs) &&
+            status.ErsDeployMode == (int)expected)
+        {
+            _recoveryFailures = 0;
+            _failedExpectedMode = null;
+            _failedTransition = "";
+        }
         var state = BuildState(now);
         if (_recoveryAt is not null && state.AutomationAllowed)
         {
@@ -458,6 +469,8 @@ public sealed class ErsAutopilotService : IDisposable
             {
                 _audit.Write(decision, "telemetry-confirmed");
                 _recoveryFailures = 0;
+                _failedExpectedMode = null;
+                _failedTransition = "";
                 ClearPendingCommand();
             }
             else if (_pendingFromMode is not null && decision.CurrentMode != _pendingFromMode)
@@ -478,6 +491,7 @@ public sealed class ErsAutopilotService : IDisposable
             }
             else
             {
+                var timedOutExpectedMode = _pendingExpectedMode;
                 _pendingFromMode = null;
                 _pendingExpectedMode = null;
                 _retryCount++;
@@ -485,6 +499,7 @@ public sealed class ErsAutopilotService : IDisposable
                 {
                     if (!PollInputRelease(now, releaseImmediately: true)) return;
                     ClearPendingCommand();
+                    _failedExpectedMode = timedOutExpectedMode;
                     _recoveryFailures = Math.Min(_recoveryFailures + 1, 5);
                     var delay = Math.Min(30, 3 * (1 << (_recoveryFailures - 1)));
                     _recoveryAt = now.AddSeconds(delay);
@@ -655,6 +670,10 @@ public sealed class ErsAutopilotService : IDisposable
     {
         CancelPitLap(_timeProvider.GetUtcNow(), "Session changed.");
         _pitLap.Reset();
+        _recoveryAt = null;
+        _recoveryFailures = 0;
+        _failedTransition = "";
+        _failedExpectedMode = null;
         _sessionUid = sessionUid;
         _flashbackOverallFrame = null;
         _session = null;
@@ -688,3 +707,4 @@ public sealed class ErsAutopilotService : IDisposable
 
     private static int? ValidGap(int? value) => value is > 0 and < 60_000 ? value : null;
 }
+
