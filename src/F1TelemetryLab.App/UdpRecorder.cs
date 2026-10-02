@@ -24,6 +24,8 @@ public sealed class UdpRecorder : IAsyncDisposable
     private Task? _receiveTask;
     private Task? _writerTask;
     private Task<SessionMetadata?>? _stopTask;
+    private int _discardRequested;
+    private string? _recordingFolder;
     private SessionMetadata? _metadata;
     private DateTimeOffset _startedAt;
     private Exception? _backgroundError;
@@ -95,6 +97,11 @@ public sealed class UdpRecorder : IAsyncDisposable
 
     public void Start(int port, string rootFolder, ErsAutopilotOptions? ersOptions = null, string? winRarPath = null)
     {
+        lock (_lifecycleSync) StartCore(port, rootFolder, ersOptions, winRarPath);
+    }
+
+    private void StartCore(int port, string rootFolder, ErsAutopilotOptions? ersOptions, string? winRarPath)
+    {
         if (IsActive) return;
 
         UdpClient? udp = null;
@@ -106,9 +113,12 @@ public sealed class UdpRecorder : IAsyncDisposable
 
             _startedAt = DateTimeOffset.Now;
             var sessionName = $"Unknown_Track_Unknown_Session_{_startedAt:yyyyMMdd_HHmmss}";
-            var sessionFolder = Path.Combine(rootFolder, "telemetry_packs", sessionName);
-            Directory.CreateDirectory(sessionFolder);
             _rootFolder = Path.GetFullPath(rootFolder);
+            // A recording owns a unique directory, including rapid stop/start in the same second.
+            var sessionFolder = Path.Combine(_rootFolder, "telemetry_packs", sessionName + "_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(sessionFolder);
+            _recordingFolder = sessionFolder;
+            Volatile.Write(ref _discardRequested, 0);
             _winRarPath = winRarPath?.Trim() ?? "";
 
             var dbPath = Path.Combine(sessionFolder, "session.sqlite");
@@ -180,7 +190,8 @@ public sealed class UdpRecorder : IAsyncDisposable
             Status = $"Recording UDP :{port}";
             Log?.Invoke($"Started recording: {sessionFolder}");
             _writerTask = Task.Run(WriterLoop);
-            _receiveTask = Task.Run(() => ReceiveLoop(_cts.Token));
+            var receiveToken = _cts.Token;
+            _receiveTask = Task.Run(() => ReceiveLoop(receiveToken));
         }
         catch
         {
@@ -211,7 +222,22 @@ public sealed class UdpRecorder : IAsyncDisposable
         }
     }
 
-    private async Task<SessionMetadata?> StopCoreAsync(bool createZip)
+    public Task<SessionMetadata?> DiscardAsync()
+    {
+        lock (_lifecycleSync)
+        {
+            if (_stopTask is { IsCompleted: false })
+                return Volatile.Read(ref _discardRequested) != 0 ? _stopTask
+                    : Task.FromException<SessionMetadata?>(new InvalidOperationException("Saving is already in progress; this recording cannot be discarded."));
+            // Never delete the last completed/saved session when no recording is active.
+            if (_cts is null) return Task.FromResult<SessionMetadata?>(null);
+            Volatile.Write(ref _discardRequested, 1);
+            _stopTask = StopCoreAsync(createZip: false, discard: true);
+            return _stopTask;
+        }
+    }
+
+    private async Task<SessionMetadata?> StopCoreAsync(bool createZip, bool discard = false)
     {
         var cts = _cts;
         if (cts is null) return _metadata;
@@ -221,10 +247,10 @@ public sealed class UdpRecorder : IAsyncDisposable
         // Stop input before waiting for final packets or draining the write queue.
         try { _ersAutopilot?.StopInput(); }
         catch (Exception ex) { Log?.Invoke("ERS input stop warning: " + ex.Message); }
-        await WaitForFinalClassificationIfNeededAsync();
+        if (!discard) await WaitForFinalClassificationIfNeededAsync();
 
         _cts = null;
-        Status = "Stopping";
+        Status = discard ? "Discarding recording" : "Stopping";
         Updated?.Invoke();
 
         try { await cts.CancelAsync(); } catch { cts.Cancel(); }
@@ -255,6 +281,37 @@ public sealed class UdpRecorder : IAsyncDisposable
         _raceEngineer = null;
         _liftCoast = null;
         cts.Dispose();
+
+        if (discard)
+        {
+            try
+            {
+                // The writer has finished; no task can recreate files after deletion.
+                _db?.Discard();
+                _db = null;
+                _packetQueue = null;
+                await Task.Run(DeleteRecordingFolder);
+                _metadata = null;
+                _recordingFolder = null;
+                _lastErsDecision = null;
+                _lastErsStatus = ErsAutopilotStatus.Initial(ErsAutopilotOperatingMode.Off);
+                _lastRaceEngineerSnapshot = RaceEngineerSnapshot.Waiting;
+                ResetCounters();
+                Status = "Recording discarded";
+                Log?.Invoke("Current recording deleted. Analysis, profile learning and archive creation were skipped.");
+                Updated?.Invoke();
+                return null;
+            }
+            catch (Exception ex)
+            {
+                _db = null;
+                _packetQueue = null;
+                Status = "Stopped; deletion failed";
+                Log?.Invoke($"Recording stopped, but deletion failed. Remaining files: {_recordingFolder}. {ex.Message}");
+                Updated?.Invoke();
+                throw;
+            }
+        }
 
         if (_metadata is not null)
         {
@@ -321,6 +378,25 @@ public sealed class UdpRecorder : IAsyncDisposable
         }
         Updated?.Invoke();
         return _metadata;
+    }
+
+    private void DeleteRecordingFolder()
+    {
+        var folder = _recordingFolder ?? throw new InvalidOperationException("No owned recording folder.");
+        var parent = Path.GetDirectoryName(Path.GetFullPath(folder));
+        var expectedParent = Path.Combine(_rootFolder, "telemetry_packs");
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        if (!string.Equals(parent, expectedParent, comparison))
+            throw new IOException("Refusing to delete outside the recording directory.");
+        FileAttributes attributes;
+        try { attributes = File.GetAttributes(folder); }
+        catch (DirectoryNotFoundException) { return; }
+        catch (FileNotFoundException) { return; }
+        if ((attributes & FileAttributes.Directory) == 0 || (attributes & FileAttributes.ReparsePoint) != 0)
+            throw new IOException("Refusing to delete a replaced or redirected recording directory.");
+        // Session preview reads can leave idle SQLite handles pooled on Windows.
+        SqliteConnection.ClearAllPools();
+        Directory.Delete(folder, recursive: true);
     }
 
     private async Task WaitForFinalClassificationIfNeededAsync()
@@ -400,6 +476,7 @@ public sealed class UdpRecorder : IAsyncDisposable
             await foreach (var packet in queue.Reader.ReadAllAsync())
             {
                 Interlocked.Decrement(ref _queueDepth);
+                if (Volatile.Read(ref _discardRequested) != 0) continue;
                 _ersAutopilot?.ProcessPacket(packet.Payload, packet.ReceivedAt);
                 _liftCoast?.ProcessPacket(packet.Payload, packet.ReceivedAt);
                 _raceEngineer?.SetAutopilotDecision(_ersAutopilot?.Status, _ersAutopilot?.LastDecision);
@@ -451,7 +528,7 @@ public sealed class UdpRecorder : IAsyncDisposable
                     }
                 }
             }
-            _db?.Flush();
+            if (Volatile.Read(ref _discardRequested) == 0) _db?.Flush();
         }
         catch (Exception ex)
         {
