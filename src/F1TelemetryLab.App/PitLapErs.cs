@@ -21,6 +21,7 @@ public sealed record PitLapErsStatus(
             : Mode == ErsAutopilotOperatingMode.DryRun ? "DRY-RUN"
             : AutomationState is "Blocked" or "Emergency stop" or "Stopped" or "No profile"
                 ? (russian ? "ERS: заблокирован" : "ERS: blocked")
+            : AutomationState == "Recovering" ? (russian ? "ERS: восстановление" : "ERS: recovering")
             : AutomationState == "Waiting for game" ? (russian ? "Ожидание окна игры" : "Waiting for game window")
             : "LIVE";
         return $"{state}\n△ + ○: {buttons} · {control}";

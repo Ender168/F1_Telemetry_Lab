@@ -32,6 +32,10 @@ public sealed class ErsAutopilotService : IDisposable
     private ErsDeployMode? _pendingExpectedMode;
     private DateTimeOffset _pendingSince;
     private int _retryCount;
+    private DateTimeOffset? _recoveryAt;
+    private int _recoveryFailures;
+    private string _failedTransition = "";
+    private ErsDeployMode? _failedExpectedMode;
     private bool _inputFault;
     private string _inputFaultReason = "";
     private string _lastDecisionSignature = "";
@@ -333,7 +337,22 @@ public sealed class ErsAutopilotService : IDisposable
     {
         SelectProfileIfPossible(now);
         if (_profile is null || _engine is null || _session is null) return;
+        // A delayed confirmation can arrive after the pending command timed out.
+        // Keep its expected single-step mode separately from the strategy target.
+        if (_failedExpectedMode is { } expected && _carStatus is { } status &&
+            now >= status.ReceivedAt && now - status.ReceivedAt <= TimeSpan.FromMilliseconds(_options.TelemetryFreshnessMs) &&
+            status.ErsDeployMode == (int)expected)
+        {
+            _recoveryFailures = 0;
+            _failedExpectedMode = null;
+            _failedTransition = "";
+        }
         var state = BuildState(now);
+        if (_recoveryAt is not null && state.AutomationAllowed)
+        {
+            _recoveryAt = null;
+            _audit.Write(InputLifecycleDecision(now) with { Reason = "Resuming from fresh telemetry; strategy budgets retained." }, "input-recovery-resumed");
+        }
         var decision = _engine.Evaluate(state);
         Volatile.Write(ref _lastDecision, decision);
         AuditDecisionTransition(decision);
@@ -341,7 +360,8 @@ public sealed class ErsAutopilotService : IDisposable
         if (decision.Blocked)
         {
             ClearPendingCommand();
-            SetStatus("Blocked", decision.Segment, decision.CurrentMode, decision.TargetMode, decision.BatteryPct, decision.Reason);
+            SetStatus(_recoveryAt is not null && !_inputFault ? "Recovering" : "Blocked",
+                decision.Segment, decision.CurrentMode, decision.TargetMode, decision.BatteryPct, decision.Reason);
             return;
         }
 
@@ -412,6 +432,8 @@ public sealed class ErsAutopilotService : IDisposable
         if (_inputFault) return string.IsNullOrWhiteSpace(_inputFaultReason)
             ? "Live ERS input is blocked until the next recording."
             : _inputFaultReason;
+        if (_recoveryAt is { } retryAt && now < retryAt)
+            return $"ERS recovery in {Math.Ceiling((retryAt - now).TotalSeconds):0} s. Unconfirmed: {_failedTransition}.";
         if (_session is null) return "Waiting for Session packet 1.";
         if (_options.OperatingMode == ErsAutopilotOperatingMode.Live && _session.ErsAssist < 0)
             return "Waiting for the 2026 ERS Assist flag before enabling live input.";
@@ -446,6 +468,9 @@ public sealed class ErsAutopilotService : IDisposable
             if (decision.CurrentMode == _pendingExpectedMode)
             {
                 _audit.Write(decision, "telemetry-confirmed");
+                _recoveryFailures = 0;
+                _failedExpectedMode = null;
+                _failedTransition = "";
                 ClearPendingCommand();
             }
             else if (_pendingFromMode is not null && decision.CurrentMode != _pendingFromMode)
@@ -466,15 +491,22 @@ public sealed class ErsAutopilotService : IDisposable
             }
             else
             {
+                var timedOutExpectedMode = _pendingExpectedMode;
                 _pendingFromMode = null;
                 _pendingExpectedMode = null;
                 _retryCount++;
                 if (_retryCount > _options.MaximumRetries)
                 {
-                    LatchInputFault("F1 did not confirm the ERS mode after repeated held scan-code inputs. Live input is disabled until the next recording.");
-                    _audit.Write(decision, "feedback-timeout-blocked");
-                    SetStatus("Blocked", decision.Segment, decision.CurrentMode, decision.TargetMode, decision.BatteryPct,
-                        _inputFaultReason);
+                    if (!PollInputRelease(now, releaseImmediately: true)) return;
+                    ClearPendingCommand();
+                    _failedExpectedMode = timedOutExpectedMode;
+                    _recoveryFailures = Math.Min(_recoveryFailures + 1, 5);
+                    var delay = Math.Min(30, 3 * (1 << (_recoveryFailures - 1)));
+                    _recoveryAt = now.AddSeconds(delay);
+                    _failedTransition = $"{decision.CurrentMode} -> {decision.TargetMode}";
+                    var detail = $"ERS recovery in {delay} s. Unconfirmed: {_failedTransition}. Recording continues.";
+                    _audit.Write(decision with { Reason = detail }, "feedback-timeout-recovering");
+                    SetStatus("Recovering", decision.Segment, decision.CurrentMode, decision.TargetMode, decision.BatteryPct, detail);
                     return;
                 }
             }
@@ -561,6 +593,7 @@ public sealed class ErsAutopilotService : IDisposable
 
     private void LatchInputFault(string message)
     {
+        _recoveryAt = null;
         _inputFault = true;
         _inputFaultReason = message;
         try { _inputSink.Dispose(); }
@@ -589,7 +622,9 @@ public sealed class ErsAutopilotService : IDisposable
             battery,
             detail)
         {
-            Decision = Volatile.Read(ref _lastDecision)
+            Decision = Volatile.Read(ref _lastDecision),
+            RecoverySeconds = _recoveryAt is { } at ? Math.Max(0, (int)Math.Ceiling((at - _timeProvider.GetUtcNow()).TotalSeconds)) : null,
+            FailedTransition = _failedTransition
         });
     }
 
@@ -627,7 +662,7 @@ public sealed class ErsAutopilotService : IDisposable
         Volatile.Write(ref _lastDecision, null);
         _audit.Write(resetDecision, "flashback-reset");
         _log?.Invoke(resetDecision.Reason);
-        // A rewind never clears a latched F12, input error or feedback failure.
+        // A rewind never clears a latched F12/input error or shortens recovery backoff.
         SetStatus("Blocked", "", null, null, null, _inputFault ? _inputFaultReason : resetDecision.Reason);
     }
 
@@ -635,6 +670,10 @@ public sealed class ErsAutopilotService : IDisposable
     {
         CancelPitLap(_timeProvider.GetUtcNow(), "Session changed.");
         _pitLap.Reset();
+        _recoveryAt = null;
+        _recoveryFailures = 0;
+        _failedTransition = "";
+        _failedExpectedMode = null;
         _sessionUid = sessionUid;
         _flashbackOverallFrame = null;
         _session = null;
@@ -668,3 +707,4 @@ public sealed class ErsAutopilotService : IDisposable
 
     private static int? ValidGap(int? value) => value is > 0 and < 60_000 ? value : null;
 }
+

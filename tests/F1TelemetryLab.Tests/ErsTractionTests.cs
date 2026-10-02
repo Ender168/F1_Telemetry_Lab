@@ -195,6 +195,49 @@ public sealed partial class ErsAutopilotTests
         finally { Directory.Delete(directory, true); }
     }
 
+    [Fact]
+    public void ContinuousGateStopsActiveBoostAndRequiresFreshStableExit()
+    {
+        var profile = TractionProfile();
+        profile.TractionGates!.Boost!.EnforceWhileActive = true;
+        var engine = new ErsDecisionEngine(profile);
+        for (int ms = 0; ms < 250; ms += 50)
+            Assert.Equal(ErsDeployMode.None, engine.Evaluate(TractionState(ms)).TargetMode);
+        Assert.Equal(ErsDeployMode.Boost, engine.Evaluate(TractionState(250)).TargetMode);
+        Assert.Equal(ErsDeployMode.None, engine.Evaluate(TractionState(300, angle: .2) with
+            { CurrentMode = ErsDeployMode.Boost }).TargetMode);
+        for (int ms = 350; ms < 600; ms += 50)
+            Assert.Equal(ErsDeployMode.None, engine.Evaluate(TractionState(ms) with
+                { CurrentMode = ErsDeployMode.None }).TargetMode);
+        Assert.Equal(ErsDeployMode.Boost, engine.Evaluate(TractionState(600) with
+            { CurrentMode = ErsDeployMode.None }).TargetMode);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ContinuousGateStopsForBrakeOrMissingMotion(bool braking)
+    {
+        var profile = TractionProfile();
+        profile.TractionGates!.Boost!.EnforceWhileActive = true;
+        var engine = new ErsDecisionEngine(profile);
+        for (int ms = 0; ms <= 250; ms += 50) engine.Evaluate(TractionState(ms));
+        var unsafeState = TractionState(300) with { CurrentMode = ErsDeployMode.Boost };
+        unsafeState = braking ? unsafeState with { BrakePct = 10 } : unsafeState with { PlayerMotion = null };
+        Assert.Equal(ErsDeployMode.None, engine.Evaluate(unsafeState).TargetMode);
+        for (int ms = 350; ms < 600; ms += 50)
+            Assert.Equal(ErsDeployMode.None, engine.Evaluate(TractionState(ms)).TargetMode);
+        Assert.Equal(ErsDeployMode.Boost, engine.Evaluate(TractionState(600)).TargetMode);
+    }
+
+    [Fact]
+    public void LegacyGateStillHoldsItsCurrentModeWhenAlreadyBoosting()
+    {
+        var engine = new ErsDecisionEngine(TractionProfile());
+        Assert.Equal(ErsDeployMode.Boost, engine.Evaluate(TractionState(0, angle: .2) with
+            { CurrentMode = ErsDeployMode.Boost }).TargetMode);
+    }
+
     private static byte[] MotionPacket(uint frame, float sessionTime)
     {
         var packet = Packet(13, 244, 91, 0);

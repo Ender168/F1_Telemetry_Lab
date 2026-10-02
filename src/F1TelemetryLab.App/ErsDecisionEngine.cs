@@ -67,7 +67,7 @@ public sealed class ErsDecisionEngine
         if (activeRule is not null)
         {
             if (TractionWait(state, activeRule.TargetMode, activeRule.TractionGate) is string wait)
-                return TractionHold(state, tactical, energy, activeRule.Id, wait);
+                return TractionHold(state, tactical, energy, activeRule.Id, wait, activeRule.TargetMode, activeRule.TractionGate);
             return Decision(state, activeRule, tactical, energy, Explain(activeRule, state, tactical, energy));
         }
 
@@ -82,7 +82,7 @@ public sealed class ErsDecisionEngine
         if (selected is not null)
         {
             if (TractionWait(state, selected.TargetMode, selected.TractionGate) is string wait)
-                return TractionHold(state, tactical, energy, selected.Id, wait);
+                return TractionHold(state, tactical, energy, selected.Id, wait, selected.TargetMode, selected.TractionGate);
             _activeRuleId = selected.Id;
             _activeRuleLap = state.LapNumber;
             _activeRuleStartedAt = state.ReceivedAt;
@@ -95,7 +95,7 @@ public sealed class ErsDecisionEngine
             ? _profile.EnergyPlan?.ConserveMode ?? ErsDeployMode.None
             : _profile.DefaultMode;
         if (TractionWait(state, baseline, null) is string baselineWait)
-            return TractionHold(state, tactical, energy, "default", baselineWait);
+            return TractionHold(state, tactical, energy, "default", baselineWait, baseline, null);
         return WithContext(new ErsControlDecision(
             state.ReceivedAt,
             false,
@@ -113,15 +113,23 @@ public sealed class ErsDecisionEngine
 
     private string? TractionWait(ErsControlState state, ErsDeployMode target, ErsTractionGate? ruleGate)
     {
-        if (target <= state.CurrentMode || target < ErsDeployMode.Hotlap) return null;
+        if (target < ErsDeployMode.Hotlap) return null;
         var gate = ruleGate ?? (target == ErsDeployMode.Boost ? _profile.TractionGates?.Boost : _profile.TractionGates?.Hotlap);
+        if (gate?.EnforceWhileActive != true && target <= state.CurrentMode) return null;
+        if (gate?.EnforceWhileActive == true && (!double.IsFinite(state.BrakePct) || state.BrakePct > 5))
+        {
+            _traction.ResetStability();
+            return $"{target} waiting for traction: braking";
+        }
         if (gate is null || _traction.Allows(gate, state.ReceivedAt, out var reason)) return null;
         return $"{target} waiting for traction: {reason}";
     }
 
-    private static ErsControlDecision TractionHold(ErsControlState state, TacticalContext tactical,
-        EnergyContext energy, string ruleId, string reason) =>
-        WithContext(new ErsControlDecision(state.ReceivedAt, false, state.CurrentMode, state.CurrentMode,
+    private ErsControlDecision TractionHold(ErsControlState state, TacticalContext tactical,
+        EnergyContext energy, string ruleId, string reason, ErsDeployMode target, ErsTractionGate? ruleGate) =>
+        WithContext(new ErsControlDecision(state.ReceivedAt, false, state.CurrentMode,
+            (ruleGate ?? (target == ErsDeployMode.Boost ? _profile.TractionGates?.Boost : _profile.TractionGates?.Hotlap))?.EnforceWhileActive == true
+                ? ErsDeployMode.None : state.CurrentMode,
             ruleId, "Traction gate", reason, state.BatteryPct, state.LapNumber, state.LapDistanceM,
             state.GapAheadMs, state.GapBehindMs), tactical, energy);
 

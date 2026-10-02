@@ -134,7 +134,10 @@ public sealed class MainWindow : Window
         liftCoastTimer.Tick += (_, _) =>
         {
             if (_raceOverlayWindow?.IsVisible == true)
+            {
                 _raceOverlayWindow.UpdateLiftCoast(_recorder.LiftCoast);
+                _raceOverlayWindow.UpdateTrackGuidance(_recorder.TrackGuidance);
+            }
         };
         liftCoastTimer.Start();
         Closed += (_, _) => liftCoastTimer.Stop();

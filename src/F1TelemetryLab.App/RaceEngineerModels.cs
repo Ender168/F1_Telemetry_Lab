@@ -100,6 +100,8 @@ public sealed record ErsRaceAdvice(
     public double? RuleBudgetRemainingPct { get; init; }
 
     public string AutomationState { get; init; } = "";
+    public int? RecoverySeconds { get; init; }
+    public string FailedTransition { get; init; } = "";
 
     public int? GapAheadMs { get; init; }
 
@@ -324,6 +326,13 @@ public static class RaceEngineerText
     public static string FormatErsAction(ErsRaceAdvice value, bool russian)
     {
         if (!value.Available) return russian ? "Ожидание решения" : "Waiting for decision";
+        if (value.AutomationState == "Recovering")
+        {
+            var wait = value.RecoverySeconds is > 0
+                ? (russian ? $"Восстановление через {value.RecoverySeconds} с" : $"Recovery in {value.RecoverySeconds} s")
+                : (russian ? "Ожидание условий для восстановления" : "Waiting for recovery conditions");
+            return $"{wait}\n" + (russian ? "Не подтверждено: " : "Unconfirmed: ") + value.FailedTransition;
+        }
         var budget = value.RuleBudgetRemainingPct is null
             ? ""
             : russian

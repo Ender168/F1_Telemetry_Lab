@@ -380,6 +380,8 @@ public sealed class RaceEngineerService
                 ProjectionSource = decision.ProjectionSource,
                 RuleBudgetRemainingPct = decision.RuleBudgetRemainingPct,
                 AutomationState = _autopilotStatus?.State ?? "Decision",
+                RecoverySeconds = _autopilotStatus?.RecoverySeconds,
+                FailedTransition = _autopilotStatus?.FailedTransition ?? "",
                 GapAheadMs = decision.GapAheadMs,
                 GapBehindMs = decision.GapBehindMs
             };

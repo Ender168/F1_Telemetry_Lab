@@ -11,6 +11,8 @@ public sealed record ErsPlayerMotion(DateTimeOffset ReceivedAt, ulong SessionUid
 
 public sealed class ErsTractionGate
 {
+    // Opt-in exit policy: also check an already active deployment and fall back to None.
+    public bool EnforceWhileActive { get; set; }
     public double? MaximumFrontWheelsAngleRad { get; set; }
     public double? MaximumYawRateRadS { get; set; }
     public double? MaximumRearSlipAngleRad { get; set; }
@@ -28,6 +30,7 @@ public sealed class ErsTractionPlan
 
 internal sealed class ErsTractionHistory
 {
+    public void ResetStability() => _samples.Clear();
     private readonly List<ErsPlayerMotion> _samples = new();
     private ulong _session;
     private int _lap;
