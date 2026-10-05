@@ -50,6 +50,8 @@ public sealed class MainWindow : Window
     private RaceEngineerOverlayWindow? _raceOverlayWindow;
     private Button _startButton = null!;
     private Button _stopButton = null!;
+    private Button _discardButton = null!;
+    private bool _discardConfirmationOpen;
     private ListBox _sessionList = null!;
     private TextBlock _selectedSessionText = null!;
     private TextBlock _technicalManifestText = null!;
@@ -355,6 +357,13 @@ public sealed class MainWindow : Window
         _ersModeCombo.SelectedItem = ersChoices.First(choice => choice.Mode == configuredErsMode);
         _startButton = new Button { Content = "Start Recording", Width = 150 };
         _stopButton = new Button { Content = "Stop", Width = 100, IsEnabled = false };
+        _discardButton = new Button
+        {
+            Content = string.Equals(_settings.Language, "ru", StringComparison.OrdinalIgnoreCase)
+                ? "Остановить и удалить запись" : "Stop and discard recording",
+            IsEnabled = false
+        };
+        _discardButton.Click += async (_, _) => await StopRecordingAsync(discard: true);
         _startButton.Click += (_, _) => StartRecording();
         _stopButton.Click += async (_, _) => await StopRecordingAsync();
 
@@ -367,6 +376,7 @@ public sealed class MainWindow : Window
         controls.Children.Add(_ersModeCombo);
         controls.Children.Add(_startButton);
         controls.Children.Add(_stopButton);
+        controls.Children.Add(_discardButton);
         grid.Children.Add(controls);
 
         var raceEngineer = BuildRaceEngineerPanel();
@@ -2093,6 +2103,7 @@ public sealed class MainWindow : Window
             _recorder.Start(port, root, ErsAutopilotOptions.FromSettings(_settings), _settings.WinRarPath);
             _startButton.IsEnabled = false;
             _stopButton.IsEnabled = true;
+            _discardButton.IsEnabled = true;
             _ersModeCombo.IsEnabled = false;
             if (_settings.OpenRaceEngineerOverlayOnStart) ShowRaceEngineerOverlay();
         }
@@ -2102,7 +2113,7 @@ public sealed class MainWindow : Window
         }
     }
 
-    private async Task StopRecordingAsync()
+    private async Task StopRecordingAsync(bool discard = false)
     {
         if (_busy)
         {
@@ -2114,21 +2125,64 @@ public sealed class MainWindow : Window
         try
         {
             _stopButton.IsEnabled = false;
+            _discardButton.IsEnabled = false;
             _startButton.IsEnabled = false;
-            await _recorder.StopAsync(_autoZipCheck.IsChecked == true);
+            if (discard)
+            {
+                if (!_recorder.IsRecording || _recorder.IsStopping) return;
+                _discardConfirmationOpen = true;
+                bool confirmed;
+                try { confirmed = await ConfirmDiscardAsync(); }
+                finally { _discardConfirmationOpen = false; }
+                if (!confirmed) return;
+                await _recorder.DiscardAsync();
+                UpdateLiveUi();
+            }
+            else await _recorder.StopAsync(_autoZipCheck.IsChecked == true);
             RefreshSessions();
         }
         catch (Exception ex)
         {
-            AddLog("Stop failed: " + ex.Message);
+            AddLog((discard ? "Discard failed: " : "Stop failed: ") + ex.Message);
         }
         finally
         {
             _busy = false;
-            _startButton.IsEnabled = true;
-            _stopButton.IsEnabled = _recorder.IsRecording;
+            _startButton.IsEnabled = !_recorder.IsActive;
+            _stopButton.IsEnabled = _recorder.IsRecording && !_recorder.IsStopping;
+            _discardButton.IsEnabled = _stopButton.IsEnabled;
             _ersModeCombo.IsEnabled = !_recorder.IsRecording;
         }
+    }
+
+    private Task<bool> ConfirmDiscardAsync()
+    {
+        var russian = string.Equals(_settings.Language, "ru", StringComparison.OrdinalIgnoreCase);
+        var dialog = new Window
+        {
+            Title = russian ? "Удалить текущую запись?" : "Discard current recording?",
+            Width = 480, SizeToContent = SizeToContent.Height, CanResize = false,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner
+        };
+        var cancel = new Button { Content = russian ? "Отмена" : "Cancel" };
+        var delete = new Button { Content = russian ? "Остановить и удалить" : "Stop and delete" };
+        cancel.Click += (_, _) => dialog.Close(false);
+        delete.Click += (_, _) => dialog.Close(true);
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12,
+            HorizontalAlignment = HorizontalAlignment.Right };
+        buttons.Children.Add(cancel); buttons.Children.Add(delete);
+        var content = new StackPanel { Margin = new Thickness(24), Spacing = 18 };
+        content.Children.Add(new TextBlock
+        {
+            Text = russian
+                ? "Запись остановится. Все данные текущей записи будут удалены без возможности восстановления. Анализ и архив создаваться не будут."
+                : "Recording will stop. All data from the current recording will be permanently deleted. No analysis or archive will be created.",
+            TextWrapping = TextWrapping.Wrap
+        });
+        content.Children.Add(buttons);
+        dialog.Content = content;
+        dialog.Opened += (_, _) => cancel.Focus();
+        return dialog.ShowDialog<bool>(this);
     }
 
     private void UpdateLiveUi()
@@ -2201,6 +2255,12 @@ public sealed class MainWindow : Window
             return;
         }
 
+        if (_discardConfirmationOpen)
+        {
+            e.Cancel = true;
+            return;
+        }
+
         if (_closeStopInProgress)
         {
             e.Cancel = true;
@@ -2217,6 +2277,7 @@ public sealed class MainWindow : Window
         _closeStopInProgress = true;
         _startButton.IsEnabled = false;
         _stopButton.IsEnabled = false;
+        _discardButton.IsEnabled = false;
         AddLog("Window close requested. Finishing the active recording safely...");
         try
         {
@@ -2231,6 +2292,7 @@ public sealed class MainWindow : Window
             _closeStopInProgress = false;
             _startButton.IsEnabled = !_recorder.IsRecording;
             _stopButton.IsEnabled = _recorder.IsRecording;
+            _discardButton.IsEnabled = _recorder.IsRecording && !_recorder.IsStopping;
         }
     }
 
