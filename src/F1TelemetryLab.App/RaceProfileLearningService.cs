@@ -56,7 +56,7 @@ public static class RaceProfileLearningService
                 Compound = x.VisualCompoundEnd,
                 Wear = new[] { x.TyreWearFlDelta, x.TyreWearFrDelta, x.TyreWearRlDelta, x.TyreWearRrDelta }.Max()
             })
-            .Where(x => x.Compound > 0 && x.Wear is > 0.02 and < 10)
+            .Where(x => x.Compound > 0 && x.Wear is > 0.02 and <= 100)
             .GroupBy(x => x.Compound)
             .ToDictionary(x => x.Key, x => x.Select(v => v.Wear).ToList());
 
@@ -72,25 +72,10 @@ public static class RaceProfileLearningService
             model.Tyres[pair.Key] = current;
         }
 
-        var baselinePace = rows
-            .Where(x => x.CleanLap && !x.PitThisLap && x.LapTimeMs > 30_000)
-            .Select(x => x.LapTimeMs)
-            .OrderBy(x => x)
-            .ToList();
-        var baseline = baselinePace.Count == 0 ? 0 : Median(baselinePace);
-        var pitLosses = rows
-            .Where(x => x.PitThisLap && x.LapTimeMs > baseline && baseline > 0)
-            .Select(x => (x.LapTimeMs - baseline) / 1000d)
-            .Where(x => x is > 5 and < 60)
-            .ToList();
-        if (pitLosses.Count > 0)
-        {
-            var observationMean = pitLosses.Average();
-            var combinedSamples = model.PitSamples + pitLosses.Count;
-            model.PitLossMeanSeconds =
-                (model.PitLossMeanSeconds * model.PitSamples + observationMean * pitLosses.Count) / combinedSamples;
-            model.PitSamples = combinedSamples;
-        }
+        // A lap-time delta is not a pit-stop loss: in/out laps can straddle the
+        // timing line and SC/VSC can contaminate it. Keep configured green/SC/VSC
+        // losses until a versioned, event-based estimator is available.
+        var pitLosses = new List<double>();
 
         model.TrackName = trackName;
         model.ProcessedSessionUids.Add(sessionUid);
@@ -163,11 +148,4 @@ public static class RaceProfileLearningService
     private static int ReadMetadataInt(string database, string key) =>
         int.TryParse(ReadMetadata(database, key), NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) ? value : -1;
 
-    private static double Median(IReadOnlyList<double> values)
-    {
-        var sorted = values.OrderBy(x => x).ToArray();
-        return sorted.Length % 2 == 1
-            ? sorted[sorted.Length / 2]
-            : (sorted[sorted.Length / 2 - 1] + sorted[sorted.Length / 2]) / 2d;
-    }
 }

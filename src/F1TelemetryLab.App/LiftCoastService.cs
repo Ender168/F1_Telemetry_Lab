@@ -93,8 +93,12 @@ public sealed class LiftCoastService
 
     public LiftCoastService(ErsProfileLoadResult profiles) => _profiles = profiles;
 
-    public void ProcessPacket(byte[] payload, DateTimeOffset receivedAt)
+    public void ProcessPacket(byte[] payload, DateTimeOffset receivedAt) => ProcessPacket(new LivePacket(payload, receivedAt));
+
+    internal void ProcessPacket(LivePacket packet)
     {
+        var payload = packet.Payload;
+        var receivedAt = packet.ReceivedAt;
         lock (_sync)
         {
             if (!F12026Parser.TryParseHeader(payload, out var h) || h.PacketFormat != AppInfo.SupportedPacketFormat ||
@@ -124,15 +128,15 @@ public sealed class LiftCoastService
             switch (h.PacketId)
             {
                 case 2:
-                    _lap = F12026Parser.ParseLapDataPacket(payload, receivedAt).FirstOrDefault(x => x.IsPlayer);
+                    _lap = packet.Laps.FirstOrDefault(x => x.IsPlayer);
                     if (_lap is not null) _guidanceLaps[h.OverallFrameIdentifier] = _lap;
                     break;
                 case 6:
-                    _telemetry = F12026Parser.ParseCarTelemetryPacket(payload, receivedAt, onlyCarIndex: _player).FirstOrDefault(x => x.IsPlayer);
+                    _telemetry = packet.PlayerTelemetry;
                     if (_telemetry is not null) _guidanceTelemetry[h.OverallFrameIdentifier] = _telemetry;
                     break;
                 case 7:
-                    _status = F12026Parser.ParseCarStatusPacket(payload, receivedAt, onlyCarIndex: _player).FirstOrDefault(x => x.IsPlayer);
+                    _status = packet.PlayerStatus;
                     break;
                 case 3:
                     var offset = F12026Parser.HeaderSize;

@@ -43,18 +43,19 @@ public static class SessionSummaryService
     {
         var folderName = Path.GetFileName(folder);
         var database = Path.Combine(folder, "session.sqlite");
-        var metadata = LoadMetadata(database);
+        using var connection = OpenSummaryDatabase(database);
+        var metadata = LoadMetadata(connection);
         var sessionName = metadata.GetValueOrDefault("session_name") ?? folderName;
         var trackName = metadata.GetValueOrDefault("track_name") ?? "Unknown track";
         var started = ParseDate(metadata.GetValueOrDefault("started_at"));
         var stopped = ParseDate(metadata.GetValueOrDefault("stopped_at"));
         var duration = started is not null && stopped is not null && stopped >= started ? stopped - started : null;
         var totalLaps = int.TryParse(metadata.GetValueOrDefault("total_laps"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var laps) ? laps : 0;
-        var classificationSource = FormatClassificationSource(ReadClassificationSource(database));
-        var setupSnapshots = CountRows(database, "car_setups");
-        var analysisState = File.Exists(database) && HasTable(database, "lap_summary") ? "Analyzed" : "Recording only";
-        var playerName = LoadPlayerName(database) ?? "YOU";
-        var quality = RecordingQualityService.Load(folder);
+        var classificationSource = FormatClassificationSource(ReadClassificationSource(connection));
+        var setupSnapshots = CountRows(connection, "car_setups");
+        var analysisState = connection is not null && HasTable(connection, "lap_summary") ? "Analyzed" : "Recording only";
+        var playerName = LoadPlayerName(connection) ?? "YOU";
+        var quality = connection is null ? null : RecordingQualityService.Load(connection);
         return new SessionListItem(
             folder,
             folderName,
@@ -71,17 +72,24 @@ public static class SessionSummaryService
             analysisState,
             playerName,
             setupSnapshots,
-            BuildTechnicalDetails(database, metadata));
+            BuildTechnicalDetails(connection, metadata));
     }
 
-    private static Dictionary<string, string> LoadMetadata(string database)
+    private static SqliteConnection? OpenSummaryDatabase(string database)
+    {
+        if (!File.Exists(database)) return null;
+        var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        { DataSource = database, Mode = SqliteOpenMode.ReadOnly, Cache = SqliteCacheMode.Private, Pooling = false }.ToString());
+        try { connection.Open(); return connection; }
+        catch (SqliteException) { connection.Dispose(); return null; }
+    }
+
+    private static Dictionary<string, string> LoadMetadata(SqliteConnection? connection)
     {
         var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        if (!File.Exists(database)) return result;
+        if (connection is null) return result;
         try
         {
-            using var connection = new SqliteConnection($"Data Source={database};Mode=ReadOnly;Cache=Shared");
-            connection.Open();
             if (!TableExists(connection, "session_metadata")) return result;
             using var command = connection.CreateCommand();
             command.CommandText = "SELECT key,value FROM session_metadata ORDER BY key";
@@ -92,9 +100,9 @@ public static class SessionSummaryService
         return result;
     }
 
-    private static string BuildTechnicalDetails(string database, IReadOnlyDictionary<string, string> metadata)
+    private static string BuildTechnicalDetails(SqliteConnection? connection, IReadOnlyDictionary<string, string> metadata)
     {
-        if (!File.Exists(database)) return "session.sqlite not found";
+        if (connection is null) return "session.sqlite not found";
         var lines = new List<string>
         {
             $"Database: session.sqlite",
@@ -107,8 +115,6 @@ public static class SessionSummaryService
         };
         try
         {
-            using var connection = new SqliteConnection($"Data Source={database};Mode=ReadOnly;Cache=Shared");
-            connection.Open();
             using var command = connection.CreateCommand();
             command.CommandText = "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name";
             using var reader = command.ExecuteReader();
@@ -120,13 +126,11 @@ public static class SessionSummaryService
         return string.Join(Environment.NewLine, lines);
     }
 
-    private static string? ReadClassificationSource(string database)
+    private static string? ReadClassificationSource(SqliteConnection? connection)
     {
-        if (!File.Exists(database)) return null;
+        if (connection is null) return null;
         try
         {
-            using var connection = new SqliteConnection($"Data Source={database};Mode=ReadOnly;Cache=Shared");
-            connection.Open();
             if (!TableExists(connection, "final_classification") || !ColumnExists(connection, "final_classification", "classification_source")) return "not_analyzed";
             using var command = connection.CreateCommand();
             command.CommandText = "SELECT classification_source FROM final_classification LIMIT 1";
@@ -135,13 +139,11 @@ public static class SessionSummaryService
         catch (SqliteException) { return null; }
     }
 
-    private static long CountRows(string database, string table)
+    private static long CountRows(SqliteConnection? connection, string table)
     {
-        if (!File.Exists(database)) return 0;
+        if (connection is null) return 0;
         try
         {
-            using var connection = new SqliteConnection($"Data Source={database};Mode=ReadOnly;Cache=Shared");
-            connection.Open();
             if (!TableExists(connection, table)) return 0;
             using var command = connection.CreateCommand();
             command.CommandText = $"SELECT COUNT(*) FROM {table}";
@@ -161,12 +163,11 @@ public static class SessionSummaryService
     private static DateTimeOffset? ParseDate(string? value) =>
         DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsed) ? parsed : null;
 
-    private static bool HasTable(string database, string table)
+    private static bool HasTable(SqliteConnection? connection, string table)
     {
+        if (connection is null) return false;
         try
         {
-            using var connection = new SqliteConnection($"Data Source={database};Mode=ReadOnly;Cache=Shared");
-            connection.Open();
             using var command = connection.CreateCommand();
             command.CommandText = "SELECT 1 FROM sqlite_master WHERE type='table' AND name=$name LIMIT 1";
             command.Parameters.AddWithValue("$name", table);
@@ -175,13 +176,11 @@ public static class SessionSummaryService
         catch (SqliteException) { return false; }
     }
 
-    private static string? LoadPlayerName(string database)
+    private static string? LoadPlayerName(SqliteConnection? connection)
     {
-        if (!File.Exists(database)) return null;
+        if (connection is null) return null;
         try
         {
-            using var connection = new SqliteConnection($"Data Source={database};Mode=ReadOnly;Cache=Shared");
-            connection.Open();
             if (!TableExists(connection, "final_classification")) return null;
             var nameColumn = ColumnExists(connection, "final_classification", "display_name") ? "display_name" : "name";
             using var command = connection.CreateCommand();

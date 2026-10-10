@@ -5,6 +5,7 @@ public sealed class RaceEngineerService
     private sealed class LapAccumulator
     {
         public required int LapNumber { get; init; }
+        public bool WearBaselineValid { get; init; }
         public bool InvalidSeen { get; set; }
         public bool PitSeen { get; set; }
         public bool SafetyCarSeen { get; set; }
@@ -18,6 +19,8 @@ public sealed class RaceEngineerService
     private readonly Action<CompletedLiveLap>? _completedLapSink;
     private readonly Action<RaceEngineerProfile>? _profileSink;
     private readonly Action<string>? _log;
+    private readonly Action<ulong, int>? _lapInvalidationSink;
+    private readonly Dictionary<int, float> _completedLapEndTimes = new();
     private readonly Dictionary<int, LapDataSample> _lapRows = new();
     private readonly List<CompletedLiveLap> _completedLaps = new();
     private readonly NearbyCarTracker _nearbyCars = new();
@@ -35,19 +38,26 @@ public sealed class RaceEngineerService
     private LapAccumulator? _currentLap;
     private ulong _sessionUid;
     private string _lastError = "";
+    private uint? _flashbackFrame;
+    private bool _awaitingFlashbackLap;
+    private int _stintStartLap;
+    private readonly Dictionary<byte, uint> _stateFrames = new();
+    private readonly HashSet<ulong> _retiredSessions = new();
 
     public RaceEngineerService(
         RaceEngineerProfileLoadResult profiles,
         ErsProfileLoadResult ersProfiles,
         Action<CompletedLiveLap>? completedLapSink = null,
         Action<RaceEngineerProfile>? profileSink = null,
-        Action<string>? log = null)
+        Action<string>? log = null,
+        Action<ulong, int>? lapInvalidationSink = null)
     {
         _profiles = profiles;
         _ersProfiles = ersProfiles;
         _completedLapSink = completedLapSink;
         _profileSink = profileSink;
         _log = log;
+        _lapInvalidationSink = lapInvalidationSink;
         foreach (var warning in profiles.Warnings) _log?.Invoke("Race engineer profile warning: " + warning);
     }
 
@@ -59,13 +69,31 @@ public sealed class RaceEngineerService
         _autopilotDecision = decision;
     }
 
-    public void ProcessPacket(byte[] payload, DateTimeOffset receivedAt)
+    public void ProcessPacket(byte[] payload, DateTimeOffset receivedAt) => ProcessPacket(new LivePacket(payload, receivedAt));
+
+    internal void ProcessPacket(LivePacket packet)
     {
+        var payload = packet.Payload;
+        var receivedAt = packet.ReceivedAt;
         try
         {
             if (!F12026Parser.TryParseHeader(payload, out var header) || header.PacketFormat != AppInfo.SupportedPacketFormat) return;
-            if (_sessionUid != 0 && _sessionUid != header.SessionUid) Reset(header.SessionUid);
+            if (_retiredSessions.Contains(header.SessionUid)) return;
+            if (_sessionUid != 0 && _sessionUid != header.SessionUid)
+            {
+                if (header.PacketId != 1) return;
+                _retiredSessions.Add(_sessionUid);
+                Reset(header.SessionUid);
+            }
             _sessionUid = header.SessionUid;
+            if (_flashbackFrame is uint cutoff && header.OverallFrameIdentifier <= cutoff) return;
+            // History and tyre-set packets are per-car; they may share an overall frame.
+            if (header.PacketId is 1 or 2 or 6 or 7 or 10)
+            {
+                if (_stateFrames.TryGetValue(header.PacketId, out var last) &&
+                    (last != 0 || header.OverallFrameIdentifier != 0) && header.OverallFrameIdentifier <= last) return;
+                _stateFrames[header.PacketId] = header.OverallFrameIdentifier;
+            }
             switch (header.PacketId)
             {
                 case 1:
@@ -73,7 +101,7 @@ public sealed class RaceEngineerService
                     SelectProfile();
                     break;
                 case 2:
-                    foreach (var row in F12026Parser.ParseLapDataPacket(payload, receivedAt))
+                    foreach (var row in packet.Laps)
                     {
                         _nearbyCars.ObserveLap(row, _session is { SafetyCarStatus: > 0 });
                         _lapRows[row.CarIndex] = row;
@@ -81,9 +109,30 @@ public sealed class RaceEngineerService
                     }
                     break;
                 case 3:
-                    if (payload.Length >= F12026Parser.HeaderSize + 4 &&
-                        payload.AsSpan(F12026Parser.HeaderSize, 4).SequenceEqual("FLBK"u8))
+                    if (payload.Length >= F12026Parser.HeaderSize + 12 &&
+                        payload.AsSpan(F12026Parser.HeaderSize, 4).SequenceEqual("FLBK"u8) &&
+                        System.Buffers.Binary.BinaryPrimitives.ReadSingleLittleEndian(payload.AsSpan(F12026Parser.HeaderSize + 8)) is var target &&
+                        float.IsFinite(target) && target >= 0)
+                    {
+                        _flashbackFrame = header.OverallFrameIdentifier;
+                        _stateFrames.Clear();
                         _nearbyCars.ClearAfterFlashback(header.OverallFrameIdentifier);
+                        _awaitingFlashbackLap = true;
+                        var firstCancelledLap = _completedLaps
+                            .Where(x => !_completedLapEndTimes.TryGetValue(x.LapNumber, out var time) || time > target)
+                            .Select(x => x.LapNumber).Append(_currentLap?.LapNumber ?? int.MaxValue).Min();
+                        if (firstCancelledLap != int.MaxValue)
+                            _lapInvalidationSink?.Invoke(_sessionUid, firstCancelledLap);
+                        _currentLap = null;
+                        _playerLap = null;
+                        _status = null;
+                        _damage = null;
+                        _telemetry = null;
+                        _tyreSets = null;
+                        _lapRows.Clear();
+                        // Keep laps completed before the target, hide the abandoned branch.
+                        _completedLaps.RemoveAll(x => !_completedLapEndTimes.TryGetValue(x.LapNumber, out var time) || time > target);
+                    }
                     else return;
                     break;
                 case 4:
@@ -93,11 +142,17 @@ public sealed class RaceEngineerService
                     _nearbyCars.ObserveHistory(payload, header);
                     break;
                 case 6:
-                    _telemetry = F12026Parser.ParseCarTelemetryPacket(payload, receivedAt, onlyCarIndex: header.PlayerCarIndex).FirstOrDefault(x => x.IsPlayer);
+                    _telemetry = packet.PlayerTelemetry;
                     break;
                 case 7:
                     _nearbyCars.ObserveStatus(payload, header, receivedAt);
-                    _status = F12026Parser.ParseCarStatusPacket(payload, receivedAt, onlyCarIndex: header.PlayerCarIndex).FirstOrDefault(x => x.IsPlayer);
+                    var nextStatus = packet.PlayerStatus;
+                    if (nextStatus is not null && _status is not null &&
+                        (nextStatus.TyresAgeLaps < _status.TyresAgeLaps ||
+                         nextStatus.VisualTyreCompound != _status.VisualTyreCompound ||
+                         nextStatus.ActualTyreCompound != _status.ActualTyreCompound))
+                        _stintStartLap = _playerLap?.LapNum ?? 0;
+                    _status = nextStatus;
                     break;
                 case 10:
                     _damage = F12026Parser.ParseCarDamagePacket(payload, receivedAt, onlyCarIndex: header.PlayerCarIndex).FirstOrDefault(x => x.IsPlayer);
@@ -132,9 +187,17 @@ public sealed class RaceEngineerService
     {
         _playerLap = row;
         if (row.LapNum <= 0) return;
+        if (_awaitingFlashbackLap)
+        {
+            _completedLaps.RemoveAll(x => x.LapNumber >= row.LapNum);
+            _lapInvalidationSink?.Invoke(_sessionUid, row.LapNum);
+            _stintStartLap = row.LapNum;
+        }
+        if (row.PitStatus > 0) _stintStartLap = row.LapNum + 1;
         if (_currentLap is null)
         {
             _currentLap = StartLap(row);
+            _awaitingFlashbackLap = false;
             return;
         }
 
@@ -161,6 +224,7 @@ public sealed class RaceEngineerService
     private LapAccumulator StartLap(LapDataSample row) => new()
     {
         LapNumber = row.LapNum,
+        WearBaselineValid = !_awaitingFlashbackLap,
         InvalidSeen = row.LapInvalid,
         PitSeen = row.PitStatus > 0,
         SafetyCarSeen = _session?.SafetyCarStatus != 0,
@@ -174,7 +238,10 @@ public sealed class RaceEngineerService
         if (lapTimeMs is < 30_000 or > 900_000) return;
         var startWear = MaxWear(accumulator.StartDamage);
         var endWear = MaxWear(_damage);
-        var deltaWear = endWear >= startWear ? endWear - startWear : 0;
+        var deltaWear = accumulator.WearBaselineValid && accumulator.StartDamage is { } start && _damage is { } end
+            ? new[] { end.TyreWearFl - start.TyreWearFl, end.TyreWearFr - start.TyreWearFr,
+                      end.TyreWearRl - start.TyreWearRl, end.TyreWearRr - start.TyreWearRr }.Max()
+            : double.NaN;
         var capacity = _profile?.ErsBatteryCapacityJ ?? _ersProfile?.BatteryCapacityJ ?? 4_000_000;
         var startErs = EnergyPct(accumulator.StartStatus?.ErsStoreEnergy, capacity);
         var endErs = EnergyPct(_status?.ErsStoreEnergy, capacity);
@@ -201,7 +268,10 @@ public sealed class RaceEngineerService
             "last_lap_time_ms + lap transition");
         _completedLaps.RemoveAll(x => x.LapNumber == row.LapNumber);
         _completedLaps.Add(row);
+        _completedLapEndTimes[row.LapNumber] = _playerLap?.SessionTime ?? 0;
         if (_completedLaps.Count > 30) _completedLaps.RemoveRange(0, _completedLaps.Count - 30);
+        foreach (var lap in _completedLapEndTimes.Keys.Where(x => !_completedLaps.Any(y => y.LapNumber == x)).ToArray())
+            _completedLapEndTimes.Remove(lap);
         _completedLapSink?.Invoke(row);
     }
 
@@ -250,7 +320,7 @@ public sealed class RaceEngineerService
         };
         var worst = values.OrderByDescending(x => x.Value).First();
         var observations = _completedLaps
-            .Where(x => x.Clean && x.VisualCompound == status.VisualTyreCompound && x.TyreWearDeltaPct is > 0.02 and < 10)
+            .Where(x => x.Clean && x.LapNumber >= _stintStartLap && x.VisualCompound == status.VisualTyreCompound && x.TyreWearDeltaPct is > 0.02 and <= 100)
             .TakeLast(7)
             .Select(x => x.TyreWearDeltaPct)
             .ToList();
@@ -486,6 +556,10 @@ public sealed class RaceEngineerService
     private void Reset(ulong sessionUid)
     {
         _sessionUid = sessionUid;
+        _flashbackFrame = null;
+        _awaitingFlashbackLap = false;
+        _stintStartLap = 0;
+        _stateFrames.Clear();
         _session = null;
         _playerLap = null;
         _telemetry = null;
@@ -500,6 +574,7 @@ public sealed class RaceEngineerService
         _nearbyCars.Clear();
         _lapRows.Clear();
         _completedLaps.Clear();
+        _completedLapEndTimes.Clear();
         Volatile.Write(ref _snapshot, RaceEngineerSnapshot.Waiting);
     }
 

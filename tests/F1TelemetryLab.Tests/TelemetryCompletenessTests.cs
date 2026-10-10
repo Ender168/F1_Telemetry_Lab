@@ -7,6 +7,36 @@ namespace F1TelemetryLab.Tests;
 public sealed class TelemetryCompletenessTests
 {
     [Fact]
+    public void ReanalysisRetainsThermalValuesFromSinglePassPlayerEnrichment()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "f1_thermal_pass_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var path = Path.Combine(root, "session.sqlite");
+        try
+        {
+            using (var db = new TelemetryDatabase(path))
+            {
+                var packet = BuildTelemetryPacket();
+                Assert.True(F12026Parser.TryParseHeader(packet, out var header));
+                db.InsertRaw(DateTimeOffset.UnixEpoch, header, packet);
+            }
+            for (var i = 0; i < 2; i++)
+            {
+                AnalysisEngine.AnalyzeSession(root);
+                using var con = new SqliteConnection($"Data Source={path};Pooling=False");
+                con.Open();
+                using var command = con.CreateCommand();
+                command.CommandText = "SELECT tyre_inner_temp_fl,tyre_pressure_fl FROM car_telemetry WHERE car_idx=2";
+                using var reader = command.ExecuteReader();
+                Assert.True(reader.Read());
+                Assert.Equal(99, reader.GetInt32(0));
+                Assert.Equal(23.3, reader.GetDouble(1), 2);
+            }
+        }
+        finally { SqliteConnection.ClearAllPools(); Directory.Delete(root, true); }
+    }
+
+    [Fact]
     public void Enrich_recovers_thermal_motion_and_lap_position_data_from_raw_packets()
     {
         SQLitePCL.Batteries_V2.Init();

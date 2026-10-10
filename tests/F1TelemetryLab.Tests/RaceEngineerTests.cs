@@ -3,7 +3,7 @@ using System.Buffers.Binary;
 
 namespace F1TelemetryLab.Tests;
 
-public sealed class RaceEngineerTests
+public sealed partial class RaceEngineerTests
 {
     [Fact]
     public void OverlayLayoutProvidesIndependentMovableWidgets()

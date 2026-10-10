@@ -1,3 +1,14 @@
+## 0.10.18 - Reliability and live performance
+
+- Reject stale Lap/Telemetry/Session frames and packets from retired sessions in ERS; keep Flashback and input-fault protections.
+- Reset the race overlay timeline on confirmed Flashback, remove cancelled live lap records and exclude partial rewind laps from tyre-wear estimation.
+- Estimate wear from the current stint, retain valid wear above 10% per lap, and stop applying legacy learned pit-loss estimates. Configured green/SC/VSC losses remain authoritative.
+- Run live control before the SQLite queue, reuse parsed live packets, and queue audit writes separately with bounded capacity and loss reporting.
+- Show the window before scanning sessions, read summaries in the background using one connection, and load only visible session tabs. Serialize background previews with analysis/finalization.
+- Enrich player temperatures/pressures during the first analysis pass, removing a second raw packet-6 scan. Preserve raw packets, all-car summaries, atomic replacement and integrity checks.
+- Remove unused private CSV exporters and redundant table deletes. Prefer a published executable in run_windows.bat; source fallback uses Release.
+- Add regressions for stale frames, session transitions, same-lap Flashback, high tyre wear, tyre changes, blocked SQLite and thermal reanalysis.
+
 ## 0.10.17 - Stop and discard recording
 
 - Add a separate Stop and discard recording button with confirmation. Cancel leaves the recorder running.

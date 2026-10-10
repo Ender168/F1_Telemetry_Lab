@@ -21,6 +21,8 @@ public sealed class ErsAutopilotService : IDisposable
     private ErsPlayerMotion? _playerMotion;
     private int? _sessionPlayerCarIndex;
     private uint? _statusFrame;
+    private readonly Dictionary<byte, uint> _stateFrames = new();
+    private readonly HashSet<ulong> _retiredSessions = new();
     private uint? _awaitPostPitStatusFrame;
     private int? _selectedActual;
     private int? _selectedVisual;
@@ -88,26 +90,36 @@ public sealed class ErsAutopilotService : IDisposable
     }
 
 
-    public void ProcessPacket(byte[] payload, DateTimeOffset receivedAt)
+    public void ProcessPacket(byte[] payload, DateTimeOffset receivedAt) => ProcessPacket(new LivePacket(payload, receivedAt));
+
+    internal void ProcessPacket(LivePacket packet)
     {
         lock (_sync)
         {
             if (_stopped || _disposed) return;
-            ProcessPacketCore(payload, receivedAt);
+            ProcessPacketCore(packet);
         }
     }
 
-    private void ProcessPacketCore(byte[] payload, DateTimeOffset receivedAt)
+    private void ProcessPacketCore(LivePacket packet)
     {
+        var payload = packet.Payload;
+        var receivedAt = packet.ReceivedAt;
         if (_options.OperatingMode == ErsAutopilotOperatingMode.Off) return;
         var now = _options.OperatingMode == ErsAutopilotOperatingMode.Live ? _timeProvider.GetUtcNow() : receivedAt;
         try
         {
             if (!F12026Parser.TryParseHeader(payload, out var header) || header.PacketFormat != AppInfo.SupportedPacketFormat) return;
             if (_options.OperatingMode == ErsAutopilotOperatingMode.Live && !PollInputRelease(now)) return;
-            // MotionEx must belong to the session/player established by Session data.
-            if (header.PacketId is 7 or 13 && _sessionUid != 0 && header.SessionUid != _sessionUid) return;
-            if (_sessionUid != 0 && header.SessionUid != _sessionUid) ResetForSession(header.SessionUid);
+            // Only Session data may establish a new session. Delayed packets must not
+            // switch the controller back to the previous race or sprint.
+            if (_retiredSessions.Contains(header.SessionUid)) return;
+            if (_sessionUid != 0 && header.SessionUid != _sessionUid)
+            {
+                if (header.PacketId != 1) return;
+                _retiredSessions.Add(_sessionUid);
+                ResetForSession(header.SessionUid);
+            }
             _sessionUid = header.SessionUid;
             if (_options.OperatingMode == ErsAutopilotOperatingMode.Live && _inputSink.EmergencyStopRequested(_options))
             {
@@ -143,8 +155,15 @@ public sealed class ErsAutopilotService : IDisposable
                 return;
             }
 
-            if (header.PacketId is 7 or 13 &&
+            if (header.PacketId is 2 or 6 or 7 or 13 &&
                 (_sessionPlayerCarIndex is null || header.PlayerCarIndex != _sessionPlayerCarIndex)) return;
+
+            if (header.PacketId is 1 or 2 or 6)
+            {
+                if (_stateFrames.TryGetValue(header.PacketId, out var previousFrame) &&
+                    (previousFrame != 0 || header.OverallFrameIdentifier != 0) && header.OverallFrameIdentifier <= previousFrame) return;
+                _stateFrames[header.PacketId] = header.OverallFrameIdentifier;
+            }
 
             switch (header.PacketId)
             {
@@ -159,6 +178,9 @@ public sealed class ErsAutopilotService : IDisposable
                     if (_sessionPlayerCarIndex != header.PlayerCarIndex)
                     {
                         _playerMotion = null;
+                        _playerLap = null;
+                        _telemetry = null;
+                        _lapRows.Clear();
                         _carStatus = null;
                         _statusFrame = null;
                     }
@@ -168,7 +190,7 @@ public sealed class ErsAutopilotService : IDisposable
                     break;
                 case 2:
                     var previousPit = _playerLap?.PitStatus;
-                    UpdateLapRows(payload, receivedAt);
+                    UpdateLapRows(packet);
                     if (previousPit is > 0 && _playerLap?.PitStatus == 0)
                     {
                         _awaitPostPitStatusFrame = header.OverallFrameIdentifier;
@@ -177,14 +199,12 @@ public sealed class ErsAutopilotService : IDisposable
                     }
                     break;
                 case 6:
-                    _telemetry = F12026Parser.ParseCarTelemetryPacket(payload, receivedAt, onlyCarIndex: header.PlayerCarIndex)
-                        .FirstOrDefault(sample => sample.IsPlayer);
+                    _telemetry = packet.PlayerTelemetry;
                     break;
                 case 7:
                     if (_statusFrame is uint last && (last != 0 || header.OverallFrameIdentifier != 0) &&
                         header.OverallFrameIdentifier <= last) return;
-                    var status = F12026Parser.ParseCarStatusPacket(payload, receivedAt, onlyCarIndex: header.PlayerCarIndex)
-                        .FirstOrDefault(sample => sample.IsPlayer);
+                    var status = packet.PlayerStatus;
                     if (status is null || receivedAt > now ||
                         now - receivedAt > TimeSpan.FromMilliseconds(_options.TelemetryFreshnessMs)) return;
                     _carStatus = status;
@@ -276,9 +296,9 @@ public sealed class ErsAutopilotService : IDisposable
     private void WritePitLapAudit(DateTimeOffset now, string action, string reason) =>
         _audit.Write(InputLifecycleDecision(now) with { RuleId = "pit-lap", Reason = reason }, action);
 
-    private void UpdateLapRows(byte[] payload, DateTimeOffset receivedAt)
+    private void UpdateLapRows(LivePacket packet)
     {
-        foreach (var row in F12026Parser.ParseLapDataPacket(payload, receivedAt))
+        foreach (var row in packet.Laps)
         {
             _lapRows[row.CarIndex] = row;
             if (row.IsPlayer) _playerLap = row;
@@ -642,6 +662,7 @@ public sealed class ErsAutopilotService : IDisposable
         if (_options.OperatingMode == ErsAutopilotOperatingMode.Live)
             PollInputRelease(now, releaseImmediately: true);
         _flashbackOverallFrame = overallFrame;
+        _stateFrames.Clear();
         _engine = _profile is null ? null : new ErsDecisionEngine(_profile);
         _session = null;
         _telemetry = null;
@@ -676,6 +697,7 @@ public sealed class ErsAutopilotService : IDisposable
         _failedExpectedMode = null;
         _sessionUid = sessionUid;
         _flashbackOverallFrame = null;
+        _stateFrames.Clear();
         _session = null;
         _telemetry = null;
         _carStatus = null;

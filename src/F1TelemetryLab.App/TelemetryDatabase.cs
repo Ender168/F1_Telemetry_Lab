@@ -312,6 +312,18 @@ public sealed class TelemetryDatabase : IDisposable
         CountOperation();
     }
 
+    public void InvalidateRaceEngineerLaps(ulong sessionUid, int fromLap)
+    {
+        EnsureBatch();
+        using var cmd = _connection.CreateCommand();
+        cmd.Transaction = _batchTransaction;
+        cmd.CommandText = "DELETE FROM race_engineer_laps WHERE session_uid=$uid AND lap_num >= $lap";
+        cmd.Parameters.AddWithValue("$uid", sessionUid.ToString());
+        cmd.Parameters.AddWithValue("$lap", fromLap);
+        cmd.ExecuteNonQuery();
+        CountOperation();
+    }
+
     public void InsertRaceEngineerLap(CompletedLiveLap row)
     {
         EnsureBatch();
@@ -335,7 +347,7 @@ public sealed class TelemetryDatabase : IDisposable
         cmd.Parameters.AddWithValue("$age", row.TyreAgeLaps);
         cmd.Parameters.AddWithValue("$wearStart", row.TyreWearStartPct);
         cmd.Parameters.AddWithValue("$wearEnd", row.TyreWearEndPct);
-        cmd.Parameters.AddWithValue("$wearDelta", row.TyreWearDeltaPct);
+        cmd.Parameters.AddWithValue("$wearDelta", double.IsFinite(row.TyreWearDeltaPct) ? (object)row.TyreWearDeltaPct : DBNull.Value);
         cmd.Parameters.AddWithValue("$ersStart", row.ErsStartPct);
         cmd.Parameters.AddWithValue("$ersEnd", row.ErsEndPct);
         cmd.Parameters.AddWithValue("$ersDelta", row.ErsDeltaPct);

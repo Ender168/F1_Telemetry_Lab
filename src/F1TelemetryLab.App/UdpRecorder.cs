@@ -21,6 +21,7 @@ public sealed class UdpRecorder : IAsyncDisposable
     private UdpClient? _udp;
     private TelemetryDatabase? _db;
     private Channel<QueuedPacket>? _packetQueue;
+    private Channel<Action<TelemetryDatabase>>? _liveWrites;
     private Task? _receiveTask;
     private Task? _writerTask;
     private Task<SessionMetadata?>? _stopTask;
@@ -130,6 +131,8 @@ public sealed class UdpRecorder : IAsyncDisposable
                 DatabasePath = dbPath
             };
 
+            _liveWrites = Channel.CreateBounded<Action<TelemetryDatabase>>(new BoundedChannelOptions(8192)
+            { SingleReader = true, SingleWriter = false, FullMode = BoundedChannelFullMode.Wait });
             database = new TelemetryDatabase(dbPath);
             database.SaveMetadata(_metadata);
 
@@ -142,9 +145,10 @@ public sealed class UdpRecorder : IAsyncDisposable
             _raceEngineer = new RaceEngineerService(
                 raceProfiles,
                 ersProfiles,
-                database.InsertRaceEngineerLap,
-                database.SaveRaceProfileSnapshot,
-                message => Log?.Invoke(message));
+                row => QueueLiveWrite(db => db.InsertRaceEngineerLap(row)),
+                profile => QueueLiveWrite(db => db.SaveRaceProfileSnapshot(profile)),
+                message => Log?.Invoke(message),
+                (uid, lap) => QueueLiveWrite(db => db.InvalidateRaceEngineerLaps(uid, lap)));
             _lastRaceEngineerSnapshot = RaceEngineerSnapshot.Waiting;
             if (_ersOptions.OperatingMode == ErsAutopilotOperatingMode.Off)
             {
@@ -158,8 +162,8 @@ public sealed class UdpRecorder : IAsyncDisposable
                         _ersOptions,
                         ersProfiles,
                         new WindowsKeyboardErsInputSink(),
-                        database.InsertErsControlEvent,
-                        database.SaveErsProfileSnapshot,
+                        row => QueueLiveWrite(db => db.InsertErsControlEvent(row)),
+                        (profile, options) => QueueLiveWrite(db => db.SaveErsProfileSnapshot(profile, options)),
                         message => Log?.Invoke(message));
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or ArgumentException)
@@ -272,6 +276,7 @@ public sealed class UdpRecorder : IAsyncDisposable
             catch (Exception ex) { RegisterBackgroundError("Database writer", ex); }
             _writerTask = null;
         }
+        _liveWrites = null;
         _lastErsStatus = _ersAutopilot?.Status ?? _lastErsStatus;
         _lastErsDecision = _ersAutopilot?.LastDecision ?? _lastErsDecision;
         _lastRaceEngineerSnapshot = _raceEngineer?.Snapshot ?? _lastRaceEngineerSnapshot;
@@ -443,6 +448,25 @@ public sealed class UdpRecorder : IAsyncDisposable
                 }
 
                 Interlocked.Increment(ref _packetsSeen);
+                // Live control never waits for SQLite commits or the storage backlog.
+                if (Volatile.Read(ref _discardRequested) == 0)
+                {
+                    var live = new LivePacket(result.Buffer, now);
+                    _ersAutopilot?.ProcessPacket(live);
+                    _liftCoast?.ProcessPacket(live);
+                    _raceEngineer?.SetAutopilotDecision(_ersAutopilot?.Status, _ersAutopilot?.LastDecision);
+                    _raceEngineer?.ProcessPacket(live);
+                    if (header is { PacketFormat: AppInfo.SupportedPacketFormat, PacketId: 6 })
+                    {
+                        _activeCarsBySession.TryGetValue(header.SessionUid, out var count);
+                        foreach (var sample in live.Telemetry)
+                        {
+                            if (count > 0 && sample.CarIndex >= count) continue;
+                            Interlocked.Increment(ref _carSamplesSeen);
+                            UpdateLiveCar(sample);
+                        }
+                    }
+                }
                 var queued = new QueuedPacket(now, header, result.Buffer);
                 var depth = Interlocked.Increment(ref _queueDepth);
                 if (_packetQueue is null || !_packetQueue.Writer.TryWrite(queued))
@@ -468,6 +492,22 @@ public sealed class UdpRecorder : IAsyncDisposable
         }
     }
 
+    private void QueueLiveWrite(Action<TelemetryDatabase> write)
+    {
+        if (_liveWrites?.Writer.TryWrite(write) != true)
+        {
+            Interlocked.Increment(ref _queueDrops);
+            RegisterBackgroundError("Live audit queue", new IOException("Live audit queue is full; storage is not keeping up."));
+        }
+    }
+
+    private void DrainLiveWrites()
+    {
+        if (_liveWrites is null || _db is null) return;
+        // Bound each drain so a continuously busy producer cannot starve raw storage.
+        for (var i = 0; i < 8192 && _liveWrites.Reader.TryRead(out var write); i++) write(_db);
+    }
+
     private async Task WriterLoop()
     {
         var queue = _packetQueue ?? throw new InvalidOperationException("Packet queue is not initialized.");
@@ -477,10 +517,7 @@ public sealed class UdpRecorder : IAsyncDisposable
             {
                 Interlocked.Decrement(ref _queueDepth);
                 if (Volatile.Read(ref _discardRequested) != 0) continue;
-                _ersAutopilot?.ProcessPacket(packet.Payload, packet.ReceivedAt);
-                _liftCoast?.ProcessPacket(packet.Payload, packet.ReceivedAt);
-                _raceEngineer?.SetAutopilotDecision(_ersAutopilot?.Status, _ersAutopilot?.LastDecision);
-                _raceEngineer?.ProcessPacket(packet.Payload, packet.ReceivedAt);
+                DrainLiveWrites();
 
                 var storageDecision = _rawStoragePolicy.Evaluate(packet.Header, packet.Payload, _metadata?.SessionType ?? -1);
                 if (storageDecision == RawPacketStorageDecision.Store)
@@ -516,19 +553,13 @@ public sealed class UdpRecorder : IAsyncDisposable
                     }
                 }
 
-                if (packet.Header is { PacketFormat: AppInfo.SupportedPacketFormat, PacketId: 6 } telemetryHeader)
-                {
-                    _activeCarsBySession.TryGetValue(telemetryHeader.SessionUid, out var activeCars);
-                    foreach (var sample in F12026Parser.ParseCarTelemetryPacket(packet.Payload, packet.ReceivedAt, activeCars > 0 ? activeCars : null))
-                    {
-                        // Live telemetry is RAM-only. The authoritative packet 6 remains in raw_packets,
-                        // and car_telemetry is rebuilt by AnalysisEngine after the session stops.
-                        Interlocked.Increment(ref _carSamplesSeen);
-                        UpdateLiveCar(sample);
-                    }
-                }
+
             }
-            if (Volatile.Read(ref _discardRequested) == 0) _db?.Flush();
+            if (Volatile.Read(ref _discardRequested) == 0)
+            {
+                DrainLiveWrites();
+                _db?.Flush();
+            }
         }
         catch (Exception ex)
         {

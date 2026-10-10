@@ -7,8 +7,6 @@ namespace F1TelemetryLab;
 
 public static class AnalysisEngine
 {
-    private sealed record BestLapRow(int CarIndex, int LapNum, bool IsPlayer, uint LapTimeMs);
-    private sealed record TelemetryBin(int Bin, double TimeMs, double Speed, double Throttle, double Brake, double Steer, double Gear);
 
     public static Task<AnalysisResult> AnalyzeSessionAsync(string sessionFolder, Action<string>? log = null)
     {
@@ -27,9 +25,9 @@ public static class AnalysisEngine
         {
             log?.Invoke("Creating an atomic analysis snapshot...");
             CreateWorkingCopy(dbPath, stagingDb);
-            var result = AnalyzeWorkingCopy(stagingDb, sessionFolder, log);
+            var result = AnalyzeWorkingCopy(stagingDb, sessionFolder, log, out var thermalRows);
 
-            SessionManifestService.FinalizeDatabase(stagingDb, log);
+            SessionManifestService.FinalizeDatabase(stagingDb, log, thermalRows);
             WriteAnalysisRun(stagingDb, result);
             using (var verify = new SqliteConnection($"Data Source={stagingDb};Pooling=False"))
             {
@@ -55,12 +53,14 @@ public static class AnalysisEngine
     private static AnalysisResult AnalyzeWorkingCopy(
         string dbPath,
         string sessionFolder,
-        Action<string>? log)
+        Action<string>? log,
+        out long thermalRows)
     {
         using var con = new SqliteConnection($"Data Source={dbPath};Default Timeout=60;Pooling=False");
         con.Open();
         CreateAnalysisSchema(con);
-        ClearAnalysisTables(con);
+        TelemetryCompletenessService.EnsureTelemetryColumns(con);
+        DropDerivedTables(con);
         DatabaseSchemaMigrator.Apply(con);
 
         using var readCon = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly;Cache=Private;Default Timeout=60;Pooling=False");
@@ -72,6 +72,7 @@ public static class AnalysisEngine
         var flashbacks = new List<FlashbackSignal>();
         var eventCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var stats = ProcessRawPackets(readCon, con, flashbacks, eventCodes, activeCars, log);
+        thermalRows = stats.PlayerThermalRows;
         CreateAnalysisIndexes(con);
 
         log?.Invoke("Building lap quality...");
@@ -218,23 +219,10 @@ public static class AnalysisEngine
         cmd.ExecuteNonQuery();
     }
 
-    private static void ClearAnalysisTables(SqliteConnection con)
+    private static void DropDerivedTables(SqliteConnection con)
     {
         using var cmd = con.CreateCommand();
         cmd.CommandText = """
-        DELETE FROM car_telemetry;
-        DELETE FROM lap_data;
-        DELETE FROM motion_data;
-        DELETE FROM car_status;
-        DELETE FROM car_damage;
-        DELETE FROM car_setups;
-        DELETE FROM events;
-        DELETE FROM participants;
-        DELETE FROM participants_debug;
-        DELETE FROM final_classification_packet;
-        DELETE FROM lap_quality;
-        DELETE FROM rewind_events;
-        DELETE FROM suspected_state_reset_events;
         DROP TABLE IF EXISTS analysis_samples;
         DROP TABLE IF EXISTS analysis_trace_10m;
         DROP TABLE IF EXISTS lap_summary;
@@ -309,7 +297,7 @@ public static class AnalysisEngine
         return result;
     }
 
-    private sealed record ParseStats(int TelemetryRows, int LapRows, int MotionRows, int StatusRows, int DamageRows, int SetupRows, int EventsRows, int ParticipantsRows, int FinalClassificationRows);
+    private sealed record ParseStats(int TelemetryRows, int LapRows, int MotionRows, int StatusRows, int DamageRows, int SetupRows, int EventsRows, int ParticipantsRows, int FinalClassificationRows, long PlayerThermalRows);
 
     private static ParseStats ProcessRawPackets(
         SqliteConnection readCon,
@@ -320,6 +308,7 @@ public static class AnalysisEngine
         Action<string>? log)
     {
         var telemetryRows = 0;
+        var thermalRows = 0L;
         var lapRows = 0;
         var motionRows = 0;
         var statusRows = 0;
@@ -331,6 +320,7 @@ public static class AnalysisEngine
 
         using var tx = writeCon.BeginTransaction();
         using var telemetryCmd = PrepareTelemetryInsert(writeCon, tx);
+        using var thermalCmd = TelemetryCompletenessService.PrepareTelemetryUpdate(writeCon, tx);
         using var lapCmd = PrepareLapInsert(writeCon, tx);
         using var motionCmd = PrepareMotionInsert(writeCon, tx);
         using var statusCmd = PrepareStatusInsert(writeCon, tx);
@@ -367,6 +357,10 @@ public static class AnalysisEngine
                     foreach (var s in F12026Parser.ParseCarTelemetryPacket(payload, receivedAt, activeCars))
                     {
                         InsertTelemetry(telemetryCmd, s);
+                        // Enrich the just-inserted player row while its raw packet is
+                        // already in memory. A second scan of packet 6 is unnecessary.
+                        if (s.IsPlayer && header is not null)
+                            thermalRows += TelemetryCompletenessService.EnrichCarTelemetryPacket(thermalCmd, payload, header, playerOnly: true);
                         telemetryRows++;
                     }
                     break;
@@ -441,7 +435,7 @@ public static class AnalysisEngine
 
         tx.Commit();
         log?.Invoke($"Parsed rows: telemetry {telemetryRows:N0}, lap {lapRows:N0}, motion {motionRows:N0}, status {statusRows:N0}, damage {damageRows:N0}, setup changes {setupRows:N0}, events {eventRows:N0}, participants {participantRows:N0}, final {finalRows:N0}");
-        return new ParseStats(telemetryRows, lapRows, motionRows, statusRows, damageRows, setupRows, eventRows, participantRows, finalRows);
+        return new ParseStats(telemetryRows, lapRows, motionRows, statusRows, damageRows, setupRows, eventRows, participantRows, finalRows, thermalRows);
     }
 
     private static bool TryCreateFlashbackSignal(EventSample sample, out FlashbackSignal signal)
@@ -545,135 +539,6 @@ public static class AnalysisEngine
 
     private static void BuildSqlDerivedTables(SqliteConnection con) => AnalysisDerivedTableBuilder.Build(con);
 
-    private static void ExportBestLaps(SqliteConnection con, string path)
-    {
-        using var cmd = con.CreateCommand();
-        cmd.CommandText = """
-        SELECT s.*
-        FROM lap_summary s
-        JOIN (
-            SELECT summary.session_uid, summary.car_idx, MIN(summary.lap_time_ms) AS best_time
-            FROM lap_summary summary
-            JOIN lap_state_summary state
-              ON state.session_uid = summary.session_uid
-             AND state.car_idx = summary.car_idx
-             AND state.lap_num = summary.lap_num
-            WHERE summary.clean_lap = 1 AND state.pit_this_lap = 0 AND summary.lap_time_ms > 0
-            GROUP BY summary.session_uid, summary.car_idx
-        ) b ON b.session_uid = s.session_uid AND b.car_idx = s.car_idx AND b.best_time = s.lap_time_ms
-        JOIN lap_state_summary state
-          ON state.session_uid = s.session_uid AND state.car_idx = s.car_idx AND state.lap_num = s.lap_num
-        WHERE s.clean_lap = 1 AND state.pit_this_lap = 0
-        ORDER BY s.lap_time_ms ASC, s.car_idx ASC
-        """;
-        ExportReaderToCsv(cmd, path);
-    }
-
-    private static void ExportPlayerVsFastest(SqliteConnection con, string path)
-    {
-        var player = GetBestLap(con, "s.is_player = 1");
-        var reference = GetBestLap(con, "s.is_player = 0");
-        if (player is null || reference is null)
-        {
-            File.WriteAllText(path, "message\nNo clean player/reference lap found\n", Encoding.UTF8);
-            return;
-        }
-
-        var playerBins = LoadBins(con, player.CarIndex, player.LapNum);
-        var referenceBins = LoadBins(con, reference.CarIndex, reference.LapNum);
-        using var writer = new StreamWriter(path, false, Encoding.UTF8);
-        writer.WriteLine("distance_bin_m,player_car,player_lap,ref_car,ref_lap,player_time_ms,ref_time_ms,delta_ms,player_speed,ref_speed,speed_delta,player_throttle,ref_throttle,player_brake,ref_brake,player_steer,ref_steer");
-        foreach (var referenceBin in referenceBins)
-        {
-            var playerTime = InterpolateBin(playerBins, referenceBin.Bin, x => x.TimeMs);
-            var playerSpeed = InterpolateBin(playerBins, referenceBin.Bin, x => x.Speed);
-            var playerThrottle = InterpolateBin(playerBins, referenceBin.Bin, x => x.Throttle);
-            var playerBrake = InterpolateBin(playerBins, referenceBin.Bin, x => x.Brake);
-            var playerSteer = InterpolateBin(playerBins, referenceBin.Bin, x => x.Steer);
-            writer.WriteLine(string.Join(',', new[]
-            {
-                referenceBin.Bin.ToString(CultureInfo.InvariantCulture),
-                player.CarIndex.ToString(CultureInfo.InvariantCulture), player.LapNum.ToString(CultureInfo.InvariantCulture),
-                reference.CarIndex.ToString(CultureInfo.InvariantCulture), reference.LapNum.ToString(CultureInfo.InvariantCulture),
-                Num(playerTime), Num(referenceBin.TimeMs), Num(playerTime - referenceBin.TimeMs),
-                Num(playerSpeed), Num(referenceBin.Speed), Num(playerSpeed - referenceBin.Speed),
-                Num(playerThrottle), Num(referenceBin.Throttle), Num(playerBrake), Num(referenceBin.Brake), Num(playerSteer), Num(referenceBin.Steer)
-            }));
-        }
-    }
-
-    private static BestLapRow? GetBestLap(SqliteConnection con, string where)
-    {
-        using var cmd = con.CreateCommand();
-        cmd.CommandText = $"""
-        SELECT s.car_idx, s.lap_num, s.is_player, s.lap_time_ms
-        FROM lap_summary s
-        JOIN lap_state_summary state
-          ON state.session_uid = s.session_uid AND state.car_idx = s.car_idx AND state.lap_num = s.lap_num
-        WHERE s.clean_lap = 1 AND state.pit_this_lap = 0 AND s.lap_time_ms > 0 AND {where}
-        ORDER BY s.lap_time_ms ASC
-        LIMIT 1
-        """;
-        using var reader = cmd.ExecuteReader();
-        if (!reader.Read()) return null;
-        return new BestLapRow(reader.GetInt32(0), reader.GetInt32(1), reader.GetInt32(2) == 1, Convert.ToUInt32(reader.GetValue(3), CultureInfo.InvariantCulture));
-    }
-
-    private static List<TelemetryBin> LoadBins(SqliteConnection con, int carIdx, int lapNum)
-    {
-        var result = new List<TelemetryBin>();
-        using var cmd = con.CreateCommand();
-        cmd.CommandText = """
-        SELECT distance_bin_m, time_ms, speed, throttle, brake, steer, gear
-        FROM analysis_trace_10m
-        WHERE car_idx = $car AND lap_num = $lap AND clean_lap = 1
-        ORDER BY distance_bin_m
-        """;
-        cmd.Parameters.AddWithValue("$car", carIdx);
-        cmd.Parameters.AddWithValue("$lap", lapNum);
-        using var reader = cmd.ExecuteReader();
-        while (reader.Read())
-        {
-            result.Add(new TelemetryBin(reader.GetInt32(0), D(reader, 1), D(reader, 2), D(reader, 3), D(reader, 4), D(reader, 5), D(reader, 6)));
-        }
-        return result;
-    }
-
-    private static double? InterpolateBin(IReadOnlyList<TelemetryBin> bins, int distanceM, Func<TelemetryBin, double> valueSelector) =>
-        DistanceSeriesInterpolator.Linear(bins, distanceM, x => x.Bin, valueSelector);
-
-    private static double D(SqliteDataReader reader, int idx) => reader.IsDBNull(idx) ? double.NaN : Convert.ToDouble(reader.GetValue(idx), CultureInfo.InvariantCulture);
-    private static string Num(double? value) => value is null || !double.IsFinite(value.Value) ? "" : value.Value.ToString("0.###", CultureInfo.InvariantCulture);
-
-    private static void ExportCsv(SqliteConnection con, string path, string sql)
-    {
-        using var cmd = con.CreateCommand();
-        cmd.CommandText = sql;
-        ExportReaderToCsv(cmd, path);
-    }
-
-    private static void ExportReaderToCsv(SqliteCommand cmd, string path)
-    {
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        using var reader = cmd.ExecuteReader();
-        using var writer = new StreamWriter(path, false, Encoding.UTF8);
-        for (var i = 0; i < reader.FieldCount; i++)
-        {
-            if (i > 0) writer.Write(',');
-            writer.Write(Escape(reader.GetName(i)));
-        }
-        writer.WriteLine();
-        while (reader.Read())
-        {
-            for (var i = 0; i < reader.FieldCount; i++)
-            {
-                if (i > 0) writer.Write(',');
-                writer.Write(Escape(reader.IsDBNull(i) ? "" : Convert.ToString(reader.GetValue(i), CultureInfo.InvariantCulture) ?? ""));
-            }
-            writer.WriteLine();
-        }
-    }
-
     private static void CreateWorkingCopy(string sourcePath, string destinationPath)
     {
         TryDelete(destinationPath);
@@ -771,13 +636,6 @@ public static class AnalysisEngine
         }
     }
 
-    private static string Escape(string value)
-    {
-        if (value.Contains('"') || value.Contains(',') || value.Contains('\n') || value.Contains('\r'))
-            return '"' + value.Replace("\"", "\"\"") + '"';
-        return value;
-    }
-
     private static void WriteAnalysisRun(string databasePath, AnalysisResult result)
     {
         using var connection = new SqliteConnection($"Data Source={databasePath};Mode=ReadWrite;Cache=Private;Default Timeout=30;Pooling=False");
@@ -814,7 +672,7 @@ public static class AnalysisEngine
     private static SqliteCommand PrepareTelemetryInsert(SqliteConnection con, SqliteTransaction tx)
     {
         var cmd = con.CreateCommand(); cmd.Transaction = tx;
-        cmd.CommandText = "INSERT OR REPLACE INTO car_telemetry VALUES ($received,$uid,$session,$frame,$overall,$player,$car,$me,$speed,$throttle,$brake,$steer,$gear,$rpm,$drs)";
+        cmd.CommandText = "INSERT OR REPLACE INTO car_telemetry(received_at,session_uid,session_time,frame_identifier,overall_frame_identifier,player_car_index,car_idx,is_player,speed,throttle,brake,steer,gear,engine_rpm,drs) VALUES ($received,$uid,$session,$frame,$overall,$player,$car,$me,$speed,$throttle,$brake,$steer,$gear,$rpm,$drs)";
         AddParams(cmd, "$received", "$uid", "$session", "$frame", "$overall", "$player", "$car", "$me", "$speed", "$throttle", "$brake", "$steer", "$gear", "$rpm", "$drs");
         return cmd;
     }
