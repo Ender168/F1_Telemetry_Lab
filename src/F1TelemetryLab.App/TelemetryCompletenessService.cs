@@ -28,8 +28,10 @@ public static class TelemetryCompletenessService
         int Position,
         int PlayerCarIndex);
 
-    public static void Enrich(string databasePath, Action<string>? log = null, bool playerOnly = false)
+    public static void Enrich(string databasePath, Action<string>? log = null, bool playerOnly = false, long? prebuiltPlayerTelemetryRows = null)
     {
+        if (prebuiltPlayerTelemetryRows.HasValue && !playerOnly)
+            throw new ArgumentException("Prebuilt player telemetry requires playerOnly enrichment.", nameof(prebuiltPlayerTelemetryRows));
         if (!File.Exists(databasePath)) return;
         SQLitePCL.Batteries_V2.Init();
 
@@ -56,7 +58,7 @@ public static class TelemetryCompletenessService
                               (!TableExists(write, "car_telemetry") || ColumnExists(write, "car_telemetry", "tyre_inner_temp_fl")) &&
                               TableExists(write, "motion_ex_player") &&
                               TableExists(write, "lap_positions");
-        if (alreadyComplete) return;
+        if (alreadyComplete && prebuiltPlayerTelemetryRows is null) return;
 
         EnsureSchema(write);
 
@@ -74,7 +76,7 @@ public static class TelemetryCompletenessService
         var lapPositions = new Dictionary<(string SessionUid, int LapIndex, int CarIndex), LapPositionValue>();
         var eventCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var packet8Seen = false;
-        var telemetryRows = 0L;
+        var telemetryRows = prebuiltPlayerTelemetryRows ?? 0L;
         var motionExRows = 0L;
 
         using var tx = write.BeginTransaction();
@@ -87,8 +89,10 @@ public static class TelemetryCompletenessService
                 SELECT received_at, packet_id, payload
                 FROM raw_packets
                 WHERE packet_format = 2026 AND packet_id IN (3,6,8,13,15)
+                AND ($prebuilt = 0 OR packet_id <> 6)
                 ORDER BY id
                 """;
+            raw.Parameters.AddWithValue("$prebuilt", prebuiltPlayerTelemetryRows.HasValue ? 1 : 0);
             using var reader = raw.ExecuteReader();
             while (reader.Read())
             {
@@ -166,13 +170,18 @@ public static class TelemetryCompletenessService
         return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture);
     }
 
-    private static void EnsureSchema(SqliteConnection connection)
+    internal static void EnsureTelemetryColumns(SqliteConnection connection)
     {
         if (TableExists(connection, "car_telemetry"))
         {
             foreach (var (name, type) in TelemetryColumns)
                 EnsureColumn(connection, "car_telemetry", name, type);
         }
+    }
+
+    private static void EnsureSchema(SqliteConnection connection)
+    {
+        EnsureTelemetryColumns(connection);
 
         Execute(connection, """
             CREATE TABLE IF NOT EXISTS motion_ex_player(
@@ -228,7 +237,7 @@ public static class TelemetryCompletenessService
             EnsureColumn(connection, "final_classification", "provisional", "INTEGER");
     }
 
-    private static long EnrichCarTelemetryPacket(SqliteCommand command, byte[] payload, PacketHeader header, bool playerOnly)
+    internal static long EnrichCarTelemetryPacket(SqliteCommand command, byte[] payload, PacketHeader header, bool playerOnly)
     {
         if (payload.Length < HeaderSize + CarTelemetrySize) return 0;
         var count = Math.Min(MaxCars, (payload.Length - HeaderSize) / CarTelemetrySize);
@@ -270,7 +279,7 @@ public static class TelemetryCompletenessService
         return updated;
     }
 
-    private static SqliteCommand PrepareTelemetryUpdate(SqliteConnection connection, SqliteTransaction transaction)
+    internal static SqliteCommand PrepareTelemetryUpdate(SqliteConnection connection, SqliteTransaction transaction)
     {
         var command = connection.CreateCommand();
         command.Transaction = transaction;

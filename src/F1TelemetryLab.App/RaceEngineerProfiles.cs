@@ -181,14 +181,11 @@ public static class RaceEngineerProfileStore
     {
         var model = ReadLearnedModel(folder, profile.TrackId);
         if (model is null) return;
-        if (model.PitSamples > 0 && model.PitLossMeanSeconds is > 5 and < 60)
-        {
-            profile.PitLossGreenSeconds = model.PitLossMeanSeconds;
-            profile.LearnedPitSamples = model.PitSamples;
-        }
+        if (model.PitSamples > 0)
+            warnings.Add("Legacy learned pit loss ignored; configured green/SC/VSC losses are retained.");
         foreach (var pair in model.Tyres)
         {
-            if (pair.Value.Samples <= 0 || pair.Value.WearMeanPctPerLap is <= 0 or > 10) continue;
+            if (pair.Value.Samples <= 0 || !double.IsFinite(pair.Value.WearMeanPctPerLap) || pair.Value.WearMeanPctPerLap is <= 0 or > 100) continue;
             var prior = profile.TyreWearPriors.FirstOrDefault(x => x.VisualCompound == pair.Key);
             if (prior is null)
             {

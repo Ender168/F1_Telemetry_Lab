@@ -31,10 +31,10 @@ public static class SessionManifestService
         }
     }
 
-    public static void FinalizeDatabase(string databasePath, Action<string>? log = null)
+    public static void FinalizeDatabase(string databasePath, Action<string>? log = null, long? prebuiltPlayerTelemetryRows = null)
     {
         log?.Invoke("Finalizing player thermal and extended telemetry...");
-        TelemetryCompletenessService.Enrich(databasePath, log, playerOnly: true);
+        TelemetryCompletenessService.Enrich(databasePath, log, playerOnly: true, prebuiltPlayerTelemetryRows: prebuiltPlayerTelemetryRows);
         AdditionalTelemetry2026Service.Enrich(databasePath, log);
         SessionStorageOptimizer.Optimize(databasePath, log);
         using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");

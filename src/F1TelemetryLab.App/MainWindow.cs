@@ -6,6 +6,7 @@ using Avalonia.Input.Platform;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using Microsoft.Data.Sqlite;
@@ -26,7 +27,17 @@ public sealed class MainWindow : Window
     private readonly ObservableCollection<string> _raceReportRows = new();
     private readonly Dictionary<int, TextBox> _aliasBoxes = new();
     private readonly Dictionary<int, TextBox> _shortAliasBoxes = new();
-    private readonly List<Action> _sessionContextLoaders = new();
+    private sealed class SessionLoader(Control control, Action load)
+    {
+        public Control Control { get; } = control;
+        public Action Load { get; } = load;
+        public int Revision { get; set; } = -1;
+    }
+    private readonly List<SessionLoader> _sessionContextLoaders = new();
+    private int _sessionRevision;
+    private int _refreshRequest;
+    private int _selectionRequest;
+    private readonly SemaphoreSlim _sessionReads = new(1, 1);
     private readonly List<Border> _compareSlotContainers = new();
     private readonly DispatcherTimer _timer;
 
@@ -125,7 +136,7 @@ public sealed class MainWindow : Window
         _recorder.Log += message => Dispatcher.UIThread.Post(() => AddLog(message));
 
         Content = BuildRoot();
-        RefreshSessions();
+        Opened += (_, _) => RefreshSessions();
         UpdateLiveUi();
 
         _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
@@ -272,6 +283,8 @@ public sealed class MainWindow : Window
                 new TabItem { Header = "Settings", Content = BuildSettingsWorkspace() }
             }
         };
+        tabs.AddHandler(TabControl.SelectionChangedEvent, (_, _) =>
+            Dispatcher.UIThread.Post(LoadVisibleSessionContexts));
         Grid.SetRow(tabs, 1);
         root.Children.Add(tabs);
         if (string.Equals(_settings.Language, "ru", StringComparison.OrdinalIgnoreCase)) LocalizeControlTree(root);
@@ -746,6 +759,10 @@ public sealed class MainWindow : Window
         Grid.SetColumn(details, 1);
         grid.Children.Add(details);
 
+        RegisterSessionLoader(grid, () =>
+        {
+            if (GetSelectedSessionFolder() is { } selected) LoadFinalClassification(selected);
+        });
         return grid;
     }
 
@@ -826,7 +843,7 @@ public sealed class MainWindow : Window
         };
         Grid.SetRow(scroller, 2);
         grid.Children.Add(scroller);
-        _sessionContextLoaders.Add(LoadDriverAliasEditor);
+        RegisterSessionLoader(grid, LoadDriverAliasEditor);
         return grid;
     }
 
@@ -1049,7 +1066,7 @@ public sealed class MainWindow : Window
         grid.Children.Add(tableBorder);
 
         BuildRaceReportTable(Array.Empty<RaceLapReportRow>(), "Overview");
-        _sessionContextLoaders.Add(LoadRaceReportDrivers);
+        RegisterSessionLoader(grid, LoadRaceReportDrivers);
         return grid;
     }
 
@@ -1271,7 +1288,7 @@ public sealed class MainWindow : Window
         group.SelectionChanged += (_, _) => { if (driverA.SelectedItem is not null && driverB.SelectedItem is not null) RunCompare(); };
         mode.SelectionChanged += (_, _) => { if (driverA.SelectedItem is not null && driverB.SelectedItem is not null) RunCompare(); };
         BuildAnalysisTable(panel, new AnalysisTableResult(Array.Empty<AnalysisTableColumn>(), Array.Empty<AnalysisTableRow>(), "No compare yet.", ""));
-        _sessionContextLoaders.Add(() =>
+        RegisterSessionLoader(grid, () =>
         {
             LoadDrivers();
             if (driverA.SelectedItem is not null && driverB.SelectedItem is not null) RunCompare();
@@ -1331,7 +1348,7 @@ public sealed class MainWindow : Window
         load.Click += (_, _) => LoadDrivers();
         build.Click += (_, _) => Build();
         BuildAnalysisTable(panel, new AnalysisTableResult(Array.Empty<AnalysisTableColumn>(), Array.Empty<AnalysisTableRow>(), "No stint report yet.", ""));
-        _sessionContextLoaders.Add(() => { LoadDrivers(); if (driver.SelectedItem is not null) Build(); });
+        RegisterSessionLoader(grid, () => { LoadDrivers(); if (driver.SelectedItem is not null) Build(); });
         return grid;
     }
 
@@ -1387,7 +1404,7 @@ public sealed class MainWindow : Window
         load.Click += (_, _) => LoadDrivers();
         build.Click += (_, _) => Build();
         BuildAnalysisTable(panel, new AnalysisTableResult(Array.Empty<AnalysisTableColumn>(), Array.Empty<AnalysisTableRow>(), "No pit report yet.", ""));
-        _sessionContextLoaders.Add(() => { LoadDrivers(); if (driver.SelectedItem is not null) Build(); });
+        RegisterSessionLoader(grid, () => { LoadDrivers(); if (driver.SelectedItem is not null) Build(); });
         return grid;
     }
 
@@ -1512,7 +1529,7 @@ public sealed class MainWindow : Window
         driver.SelectionChanged += (_, _) => LoadSetups();
         changes.SelectionChanged += (_, _) => detail.Text = (changes.SelectedItem as CarSetupViewRow)?.Detail ?? "Select a setup snapshot.";
         refresh.Click += (_, _) => LoadDrivers();
-        _sessionContextLoaders.Add(LoadDrivers);
+        RegisterSessionLoader(grid, LoadDrivers);
         return grid;
     }
 
@@ -1757,7 +1774,7 @@ public sealed class MainWindow : Window
         right.Children.Add(legend);
         grid.Children.Add(right);
 
-        _sessionContextLoaders.Add(LoadCompareLaps);
+        RegisterSessionLoader(grid, LoadCompareLaps);
         return grid;
     }
 
@@ -1998,7 +2015,14 @@ public sealed class MainWindow : Window
             if (confirmDelete.IsChecked != true || _retentionPreview.Count == 0) return;
             try
             {
-                var removed = SessionRetentionService.Delete(root.Text ?? _settings.RootFolder, _retentionPreview);
+                if (_busy || _recorder.IsActive)
+                {
+                    _settingsStatus.Text = "Wait for recording, analysis or export to finish before cleanup.";
+                    return;
+                }
+                var selected = GetSelectedSessionFolder();
+                var candidates = _retentionPreview.Where(x => !string.Equals(x.FolderPath, selected, StringComparison.OrdinalIgnoreCase)).ToArray();
+                var removed = SessionRetentionService.Delete(root.Text ?? _settings.RootFolder, candidates);
                 _retentionPreview = Array.Empty<SessionRetentionCandidate>();
                 confirmDelete.IsChecked = false;
                 deleteRetention.IsEnabled = false;
@@ -2122,6 +2146,7 @@ public sealed class MainWindow : Window
         }
 
         _busy = true;
+        await _sessionReads.WaitAsync();
         try
         {
             _stopButton.IsEnabled = false;
@@ -2147,7 +2172,9 @@ public sealed class MainWindow : Window
         }
         finally
         {
+            _sessionReads.Release();
             _busy = false;
+            Dispatcher.UIThread.Post(LoadVisibleSessionContexts);
             _startButton.IsEnabled = !_recorder.IsActive;
             _stopButton.IsEnabled = _recorder.IsRecording && !_recorder.IsStopping;
             _discardButton.IsEnabled = _stopButton.IsEnabled;
@@ -2267,6 +2294,13 @@ public sealed class MainWindow : Window
             return;
         }
 
+        if (_busy && !_recorder.IsStopping)
+        {
+            e.Cancel = true;
+            AddLog("Wait for the current operation to finish before closing.");
+            return;
+        }
+
         if (!_recorder.IsActive)
         {
             _timer.Stop();
@@ -2279,6 +2313,8 @@ public sealed class MainWindow : Window
         _stopButton.IsEnabled = false;
         _discardButton.IsEnabled = false;
         AddLog("Window close requested. Finishing the active recording safely...");
+        var ownsReadGate = !_recorder.IsStopping;
+        if (ownsReadGate) await _sessionReads.WaitAsync();
         try
         {
             await _recorder.StopAsync(_autoZipCheck.IsChecked == true);
@@ -2294,6 +2330,7 @@ public sealed class MainWindow : Window
             _stopButton.IsEnabled = _recorder.IsRecording;
             _discardButton.IsEnabled = _recorder.IsRecording && !_recorder.IsStopping;
         }
+        finally { if (ownsReadGate) _sessionReads.Release(); }
     }
 
     private void AddLog(string message)
@@ -2351,7 +2388,14 @@ public sealed class MainWindow : Window
         }
     }
 
-    private void RefreshSessions()
+    private Task<T> ReadSessionInBackground<T>(Func<T> read) => Task.Run(() =>
+    {
+        _sessionReads.Wait();
+        try { return read(); }
+        finally { _sessionReads.Release(); }
+    });
+
+    private async void RefreshSessions()
     {
         if (_sessionList is null) return;
         var selectedFolder = (_sessionList.SelectedItem as SessionListItem)?.FolderPath;
@@ -2359,11 +2403,15 @@ public sealed class MainWindow : Window
         {
             var root = string.IsNullOrWhiteSpace(_rootText?.Text) ? DefaultRootFolder() : _rootText.Text.Trim();
             var packs = Path.Combine(root, "telemetry_packs");
-            Directory.CreateDirectory(packs);
-            var sessions = Directory.GetDirectories(packs)
-                .OrderByDescending(Directory.GetLastWriteTimeUtc)
-                .Select(SessionSummaryService.Load)
-                .ToList();
+            var request = ++_refreshRequest;
+            var sessions = await ReadSessionInBackground(() =>
+            {
+                Directory.CreateDirectory(packs);
+                return Directory.GetDirectories(packs)
+                    .OrderByDescending(Directory.GetLastWriteTimeUtc)
+                    .Select(SessionSummaryService.Load).ToList();
+            });
+            if (request != _refreshRequest) return;
             _sessionList.ItemsSource = sessions;
             _sessionList.SelectedItem = sessions.FirstOrDefault(x => string.Equals(x.FolderPath, selectedFolder, StringComparison.OrdinalIgnoreCase))
                                         ?? sessions.FirstOrDefault();
@@ -2380,14 +2428,27 @@ public sealed class MainWindow : Window
         }
     }
 
-    private void UpdateSelectedSession()
+    private async void UpdateSelectedSession()
     {
         if (_sessionList.SelectedItem is not SessionListItem session) return;
         var folder = session.FolderPath;
-        var rar = Directory.Exists(folder)
-            ? Directory.GetFiles(folder, "*.rar").OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault()
-            : null;
-        var quality = RecordingQualityService.Load(folder);
+        var request = ++_selectionRequest;
+        _sessionRevision++;
+        (string? Rar, RecordingQualityReport? Quality) details;
+        try
+        {
+            details = await ReadSessionInBackground(() => (
+                Rar: Directory.Exists(folder) ? Directory.GetFiles(folder, "*.rar").OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault() : null,
+                Quality: RecordingQualityService.Load(folder)));
+        }
+        catch (Exception ex)
+        {
+            if (request == _selectionRequest) AddLog("Session details failed: " + ex.Message);
+            return;
+        }
+        if (request != _selectionRequest || (_sessionList.SelectedItem as SessionListItem)?.FolderPath != folder) return;
+        var rar = details.Rar;
+        var quality = details.Quality;
         _selectedSessionText.Text =
             $"{session.SessionName}\n" +
             $"Track: {session.TrackName} | Started: {session.DateLabel} | Duration: {session.DurationLabel}\n" +
@@ -2403,10 +2464,24 @@ public sealed class MainWindow : Window
             _measuredRateText.Text = quality?.MeasuredTelemetryRateHz is double rate
                 ? $"Measured telemetry packet rate: {rate:0.0} Hz. Recommended game setting: 60 Hz."
                 : "Measured telemetry packet rate: not available for this session. Recommended game setting: 60 Hz.";
-        LoadFinalClassification(folder);
+        LoadVisibleSessionContexts();
+    }
+
+    private void RegisterSessionLoader(Control control, Action load)
+    {
+        _sessionContextLoaders.Add(new SessionLoader(control, load));
+        control.AttachedToVisualTree += (_, _) => Dispatcher.UIThread.Post(LoadVisibleSessionContexts);
+    }
+
+    private void LoadVisibleSessionContexts()
+    {
+        if (_busy || _sessionList?.SelectedItem is not SessionListItem) return;
         foreach (var loader in _sessionContextLoaders)
         {
-            try { loader(); }
+            if (loader.Revision == _sessionRevision || !loader.Control.IsEffectivelyVisible ||
+                !loader.Control.IsAttachedToVisualTree()) continue;
+            loader.Revision = _sessionRevision;
+            try { loader.Load(); }
             catch (Exception ex) { AddLog("Session context refresh failed: " + ex.Message); }
         }
     }
@@ -2807,6 +2882,7 @@ public sealed class MainWindow : Window
             return;
         }
         _busy = true;
+        await _sessionReads.WaitAsync();
         try
         {
             AddLog("Analyzing selected session...");
@@ -2836,7 +2912,6 @@ public sealed class MainWindow : Window
             }
             InvalidateCompareAfterAnalysis();
             RefreshSessions();
-            if (_raceReportDriver is not null) LoadRaceReportDrivers();
         }
         catch (Exception ex)
         {
@@ -2844,13 +2919,15 @@ public sealed class MainWindow : Window
         }
         finally
         {
+            _sessionReads.Release();
             _busy = false;
+            Dispatcher.UIThread.Post(LoadVisibleSessionContexts);
         }
     }
 
     private async Task ExportSelectedRaceSummaryAsync()
     {
-        if (_recorder.IsRecording)
+        if (_busy || _recorder.IsActive)
         {
             AddLog("Stop recording before exporting the workbook.");
             return;
@@ -2861,6 +2938,8 @@ public sealed class MainWindow : Window
             AddLog("Select a session first.");
             return;
         }
+        _busy = true;
+        await _sessionReads.WaitAsync();
         try
         {
             var path = await Task.Run(() => RaceSummaryWorkbookExporter.Export(folder));
@@ -2871,6 +2950,7 @@ public sealed class MainWindow : Window
         {
             AddLog("Race summary Excel failed: " + ex.Message);
         }
+        finally { _sessionReads.Release(); _busy = false; Dispatcher.UIThread.Post(LoadVisibleSessionContexts); }
     }
 
 

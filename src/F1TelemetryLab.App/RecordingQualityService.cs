@@ -59,6 +59,18 @@ public static class RecordingQualityService
     {
         using var con = new SqliteConnection($"Data Source={database};Mode=ReadOnly;Cache=Shared");
         con.Open();
+        return Load(con);
+    }
+
+    internal static RecordingQualityReport? Load(SqliteConnection con)
+    {
+        try { return LoadReport(con); }
+        catch (SqliteException) { return null; }
+        catch (InvalidOperationException) { return null; }
+    }
+
+    private static RecordingQualityReport? LoadReport(SqliteConnection con)
+    {
         using (var exists = con.CreateCommand())
         {
             exists.CommandText = "SELECT 1 FROM sqlite_master WHERE type='table' AND name='recording_quality' LIMIT 1";
