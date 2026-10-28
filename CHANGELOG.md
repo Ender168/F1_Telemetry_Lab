@@ -1,3 +1,11 @@
+## 0.10.19 - Overlay comparison and layout editor
+
+- Combine ahead/player/behind lap histories into one movable card with three completed laps per driver. Compare only matching lap numbers with confirmed clean validity; mark pit, SC and unknown laps.
+- Add editor-only demonstration data, a grid with snapping, group scaling and three independent saved layouts. Restore live data when leaving edit mode; demo values never enter telemetry or ERS control.
+- Migrate the first layout from v1 while preserving the original file. Keep JSON autopilot profiles and the main application screen unchanged.
+- Force the dark overlay theme so editor controls remain readable with a light system theme.
+- Add regressions for comparison validity, stale neighbours, layout migration, isolated slots and coordinate snapping.
+
 ## 0.10.18 - Reliability and live performance
 
 - Reject stale Lap/Telemetry/Session frames and packets from retired sessions in ERS; keep Flashback and input-fault protections.

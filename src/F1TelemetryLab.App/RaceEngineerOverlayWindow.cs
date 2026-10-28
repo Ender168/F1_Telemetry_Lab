@@ -24,6 +24,16 @@ public sealed class RaceEngineerOverlayWindow : Window
 
     private readonly bool _russian;
     private readonly Canvas _canvas = new();
+    private readonly Grid _comparisonTable = new() { ColumnDefinitions = new("155,*,*,*"), RowDefinitions = new("Auto,Auto,Auto") };
+    private readonly List<TextBlock[]> _comparisonCells = new();
+    private readonly OverlayGrid _gridGuide = new() { IsHitTestVisible = false, IsVisible = false };
+    private bool _demoEnabled = true;
+    private bool _snapEnabled = true;
+    private int _layoutSlot = 1;
+    private RaceEngineerSnapshot _latestSnapshot = RaceEngineerSnapshot.Waiting;
+    private LiftCoastAdvice _latestLift = LiftCoastAdvice.Waiting;
+    private TrackGuidanceAdvice _latestGuidance = TrackGuidanceAdvice.Waiting;
+    private bool DemoActive => _editMode && _demoEnabled;
     private readonly Grid _nearbyTable = new() { ColumnDefinitions = new ColumnDefinitions("36,*,28,64"), RowDefinitions = new RowDefinitions("Auto,Auto,Auto,Auto,Auto") };
     private readonly List<TextBlock[]> _nearbyCells = new();
     private readonly Dictionary<string, WidgetView> _widgets = new(StringComparer.OrdinalIgnoreCase);
@@ -40,6 +50,7 @@ public sealed class RaceEngineerOverlayWindow : Window
     public RaceEngineerOverlayWindow(bool russian)
     {
         _russian = russian;
+        RequestedThemeVariant = Avalonia.Styling.ThemeVariant.Dark;
         Title = "F1 Telemetry Lab Race Engineer";
         Width = _screenWidth;
         Height = _screenHeight;
@@ -51,7 +62,26 @@ public sealed class RaceEngineerOverlayWindow : Window
         Background = Brushes.Transparent;
         TransparencyLevelHint = new[] { WindowTransparencyLevel.Transparent };
 
-        AddWidget("laps", russian ? "ПОСЛЕДНИЕ КРУГИ" : "LAST LAPS", 390);
+        _canvas.Children.Add(_gridGuide);
+        AddWidget("lap-comparison", russian ? "ПОСЛЕДНИЕ 3 КРУГА · Δ К ТВОЕМУ КРУГУ" : "LAST 3 LAPS · Δ VS YOUR LAP", 690, 14);
+        ((StackPanel)_widgets["lap-comparison"].Border.Child!).Children.Add(_comparisonTable);
+        _widgets["lap-comparison"].Value.IsVisible = false;
+        for (var row = 0; row < 3; row++)
+        {
+            var cells = new TextBlock[4];
+            for (var column = 0; column < 4; column++)
+            {
+                var cell = new TextBlock { FontSize = 14, Foreground = Brushes.White,
+                    FontWeight = row == 1 ? FontWeight.Bold : FontWeight.Normal,
+                    TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 6, 8, 6) };
+                Grid.SetRow(cell, row); Grid.SetColumn(cell, column);
+                _comparisonTable.Children.Add(cell); cells[column] = cell;
+            }
+            _comparisonCells.Add(cells);
+        }
+        ToolTip.SetTip(_widgets["lap-comparison"].Border, russian
+            ? "Каждая строка: три последних завершённых круга, слева старый. Δ только для одинакового номера чистого круга. + соперник медленнее; − быстрее. ? качество неизвестно."
+            : "Each row: last three completed laps, oldest first. Delta only for the same clean lap number. + opponent slower; − faster. ? unknown validity.");
         AddWidget("nearby-tyres", russian ? "ШИНЫ · ВОЗРАСТ" : "TYRES · AGE", 335, 14);
         var nearbyPanel = (StackPanel)_widgets["nearby-tyres"].Border.Child!;
         nearbyPanel.Children.Add(_nearbyTable);
@@ -69,8 +99,6 @@ public sealed class RaceEngineerOverlayWindow : Window
             }
             _nearbyCells.Add(cells);
         }
-        AddWidget("laps-ahead", russian ? "ВПЕРЕДИ · ПОСЛЕДНИЕ КРУГИ" : "AHEAD · LAST LAPS", 390);
-        AddWidget("laps-behind", russian ? "СЗАДИ · ПОСЛЕДНИЕ КРУГИ" : "BEHIND · LAST LAPS", 390);
         AddWidget("tyres", russian ? "ШИНЫ" : "TYRES", 390);
         AddWidget("ers-pit-lap", russian ? "ERS · ПИТ НА ЭТОМ КРУГУ" : "ERS · PIT THIS LAP", 320, 15);
         AddWidget("pit", russian ? "ПИТ-СТОП" : "PIT STOP", 420);
@@ -115,6 +143,7 @@ public sealed class RaceEngineerOverlayWindow : Window
     {
         _editMode = value;
         _editorBar.IsVisible = value;
+        _gridGuide.IsVisible = value && _snapEnabled;
         foreach (var widget in _widgets.Values) widget.Editor.IsVisible = value;
         WindowsOverlayInterop.SetClickThrough(this, !value);
         ShowActivated = value;
@@ -129,6 +158,7 @@ public sealed class RaceEngineerOverlayWindow : Window
             WindowsOverlayInterop.EnsureTopmost(this);
             SaveLayout();
         }
+        RefreshPreview();
     }
 
     private void InstallWin32ClickThroughHook()
@@ -158,12 +188,23 @@ public sealed class RaceEngineerOverlayWindow : Window
 
     public void UpdateSnapshot(RaceEngineerSnapshot snapshot)
     {
+        _latestSnapshot = snapshot;
+        if (DemoActive) snapshot = LapComparison.Demo(DateTimeOffset.UtcNow);
         var display = RaceEngineerText.Format(snapshot, _russian);
-        SetWidget("laps", display.Laps.Replace("  |  ", "\n"), LapsColour(snapshot));
         var now = DateTimeOffset.UtcNow;
         UpdateNearbyTable(snapshot, now);
-        UpdateNeighbour("laps-ahead", RaceEngineerText.Neighbour(snapshot, -1, now), _russian ? "ВПЕРЕДИ" : "AHEAD");
-        UpdateNeighbour("laps-behind", RaceEngineerText.Neighbour(snapshot, 1, now), _russian ? "СЗАДИ" : "BEHIND");
+        var comparison = LapComparison.Build(snapshot, _russian, now);
+        for (var row = 0; row < 3; row++)
+        {
+            _comparisonCells[row][0].Text = comparison[row].Driver;
+            for (var column = 0; column < 3; column++)
+            {
+                var lap = comparison[row].Laps[column];
+                var cell = _comparisonCells[row][column + 1];
+                cell.Text = lap.Text;
+                cell.Foreground = lap.DeltaSeconds is > 0 ? Green : lap.DeltaSeconds is < 0 ? Amber : Brushes.White;
+            }
+        }
         SetWidget("tyres", display.Tyres, TyresColour(snapshot.Tyres));
         SetWidget("pit", display.Pit, PitColour(snapshot.Pit));
         var pitErs = snapshot.PitLapErs;
@@ -186,6 +227,8 @@ public sealed class RaceEngineerOverlayWindow : Window
 
     public void UpdateTrackGuidance(TrackGuidanceAdvice advice)
     {
+        _latestGuidance = advice;
+        if (DemoActive) advice = new(TrackCuePhase.Success, _russian ? "DEMO · держи 145–155 км/ч" : "DEMO · hold 145–155 km/h", 35, 150);
         SetWidget("track-guidance", advice.Format(_russian), advice.Phase switch
         {
             TrackCuePhase.Success => Green,
@@ -198,6 +241,8 @@ public sealed class RaceEngineerOverlayWindow : Window
 
     public void UpdateLiftCoast(LiftCoastAdvice advice)
     {
+        _latestLift = advice;
+        if (DemoActive) advice = new(LiftCoastPhase.Approach, "DEMO · T4", 75, 180, 105);
         SetWidget("lift-coast", advice.Format(_russian), advice.Phase switch
         {
             LiftCoastPhase.Lift => Orange,
@@ -233,13 +278,6 @@ public sealed class RaceEngineerOverlayWindow : Window
         }
     }
 
-    private void UpdateNeighbour(string id, NearbyCarSnapshot? car, string label)
-    {
-        SetWidget(id, RaceEngineerText.FormatOpponentLaps(car, _russian).Replace("  |  ", "\n"), Cyan);
-        _widgets[id].Title.Text = car is null ? label : $"{label} · P{car.Position} {RaceEngineerText.DriverName(car, _russian)}";
-        _widgets[id].Title.TextTrimming = TextTrimming.CharacterEllipsis;
-    }
-
     private void ConfigureForPrimaryScreen()
     {
         var screen = Screens.Primary;
@@ -255,7 +293,9 @@ public sealed class RaceEngineerOverlayWindow : Window
         }
         _canvas.Width = _screenWidth;
         _canvas.Height = _screenHeight;
-        _layout = OverlayLayoutService.Load(_screenWidth, _screenHeight);
+        _gridGuide.Width = _screenWidth; _gridGuide.Height = _screenHeight;
+        _editorBar.MaxWidth = Math.Max(300, _screenWidth - 40);
+        _layout = OverlayLayoutService.Load(_screenWidth, _screenHeight, _layoutSlot);
         ApplyLayout();
     }
 
@@ -310,6 +350,7 @@ public sealed class RaceEngineerOverlayWindow : Window
             Editor = editor
         };
         _widgets.Add(id, widget);
+        border.SizeChanged += (_, _) => ConstrainWidget(widget);
         _canvas.Children.Add(border);
 
         smaller.Click += (_, _) => ChangeScale(id, -0.1);
@@ -344,6 +385,22 @@ public sealed class RaceEngineerOverlayWindow : Window
             SaveLayout();
         };
         lockLayout.Click += (_, _) => SetEditMode(false);
+        var demo = new CheckBox { Content = _russian ? "ДЕМО-данные" : "DEMO data", IsChecked = true };
+        demo.IsCheckedChanged += (_, _) => { _demoEnabled = demo.IsChecked == true; RefreshPreview(); };
+        var snap = new CheckBox { Content = _russian ? "Сетка / привязка" : "Grid / snap", IsChecked = true };
+        snap.IsCheckedChanged += (_, _) => { _snapEnabled = snap.IsChecked == true; _gridGuide.IsVisible = _editMode && _snapEnabled; };
+        var slots = new ComboBox { ItemsSource = new[] { "Layout 1", "Layout 2", "Layout 3" }, SelectedIndex = 0, MinWidth = 110 };
+        slots.SelectionChanged += (_, _) =>
+        {
+            if (slots.SelectedIndex < 0 || slots.SelectedIndex + 1 == _layoutSlot) return;
+            SaveLayout(); _layoutSlot = slots.SelectedIndex + 1;
+            _layout = OverlayLayoutService.Load(_screenWidth, _screenHeight, _layoutSlot);
+            ApplyLayout(); RefreshPreview();
+        };
+        var smallerAll = new Button { Content = _russian ? "Все −" : "All −" };
+        var largerAll = new Button { Content = _russian ? "Все +" : "All +" };
+        smallerAll.Click += (_, _) => ScaleAll(-0.1);
+        largerAll.Click += (_, _) => ScaleAll(0.1);
         return new Border
         {
             Background = Brush(0xF21A202A),
@@ -351,10 +408,11 @@ public sealed class RaceEngineerOverlayWindow : Window
             BorderThickness = new Thickness(2),
             CornerRadius = new CornerRadius(8),
             Padding = new Thickness(10, 7),
-            Child = new StackPanel
+            Child = new WrapPanel
             {
                 Orientation = Orientation.Horizontal,
-                Spacing = 8,
+                ItemSpacing = 8,
+                LineSpacing = 6,
                 Children =
                 {
                     new TextBlock
@@ -365,9 +423,8 @@ public sealed class RaceEngineerOverlayWindow : Window
                         VerticalAlignment = VerticalAlignment.Center,
                         Margin = new Thickness(0, 0, 8, 0)
                     },
-                    reset,
-                    showAll,
-                    lockLayout
+                    demo, snap, slots, smallerAll, largerAll,
+                    reset, showAll, lockLayout
                 }
             }
         };
@@ -386,12 +443,42 @@ public sealed class RaceEngineerOverlayWindow : Window
         }
     }
 
+    private void RefreshPreview()
+    {
+        UpdateSnapshot(_latestSnapshot);
+        UpdateLiftCoast(_latestLift);
+        UpdateTrackGuidance(_latestGuidance);
+    }
+
+    private void ScaleAll(double delta)
+    {
+        foreach (var widget in _widgets.Values)
+        {
+            widget.Scale = Math.Clamp(widget.Scale + delta, 0.75, 1.75);
+            LayoutFor(widget.Id).Scale = widget.Scale;
+            ApplyScale(widget);
+        }
+        SaveLayout();
+    }
+
+    private void ConstrainWidget(WidgetView widget)
+    {
+        var x = Canvas.GetLeft(widget.Border);
+        var y = Canvas.GetTop(widget.Border);
+        x = Math.Clamp(double.IsFinite(x) ? x : 0, 0, Math.Max(0, _screenWidth - widget.Border.Width));
+        y = Math.Clamp(double.IsFinite(y) ? y : 0, 0, Math.Max(0, _screenHeight - widget.Border.Bounds.Height));
+        Canvas.SetLeft(widget.Border, x); Canvas.SetTop(widget.Border, y);
+        var layout = _layout.Widgets.FirstOrDefault(w => w.Id == widget.Id);
+        if (layout is not null) { layout.X = x; layout.Y = y; }
+    }
+
     private void ChangeScale(string id, double delta)
     {
         if (!_widgets.TryGetValue(id, out var widget)) return;
         widget.Scale = Math.Clamp(widget.Scale + delta, 0.75, 1.75);
         LayoutFor(id).Scale = widget.Scale;
         ApplyScale(widget);
+        ConstrainWidget(widget);
         SaveLayout();
     }
 
@@ -400,6 +487,11 @@ public sealed class RaceEngineerOverlayWindow : Window
         widget.Border.Width = widget.BaseWidth * widget.Scale;
         widget.Title.FontSize = 12 * widget.Scale;
         widget.Value.FontSize = widget.BaseFontSize * widget.Scale;
+        if (widget.Id == "lap-comparison")
+        {
+            _comparisonTable.ColumnDefinitions[0].Width = new GridLength(155 * widget.Scale);
+            foreach (var cells in _comparisonCells) foreach (var cell in cells) cell.FontSize = 14 * widget.Scale;
+        }
         if (widget.Id == "nearby-tyres")
         {
             _nearbyTable.ColumnDefinitions[0].Width = new GridLength(36 * widget.Scale);
@@ -420,6 +512,8 @@ public sealed class RaceEngineerOverlayWindow : Window
     private void StartDrag(string id, PointerPressedEventArgs args)
     {
         if (!_editMode || !args.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return;
+        if (args.Source is Button || args.Source is Control control &&
+            Avalonia.VisualTree.VisualExtensions.GetVisualAncestors(control).Any(x => x is Button)) return;
         _dragWidgetId = id;
         _dragPointerStart = args.GetPosition(_canvas);
         var widget = _widgets[id];
@@ -435,6 +529,16 @@ public sealed class RaceEngineerOverlayWindow : Window
         var x = Math.Clamp(_dragWidgetStart.X + point.X - _dragPointerStart.X, 0, Math.Max(0, _screenWidth - 120));
         var y = Math.Clamp(_dragWidgetStart.Y + point.Y - _dragPointerStart.Y, 0, Math.Max(0, _screenHeight - 60));
         var widget = _widgets[id];
+        if (_snapEnabled)
+        {
+            x = OverlayLayoutService.Snap(x, _screenWidth - widget.Border.Width);
+            y = OverlayLayoutService.Snap(y, _screenHeight - Math.Max(60, widget.Border.Bounds.Height));
+            foreach (var other in _widgets.Values.Where(w => w.Id != id && w.Border.IsVisible))
+            {
+                if (Math.Abs(x - Canvas.GetLeft(other.Border)) <= 6) x = Canvas.GetLeft(other.Border);
+                if (Math.Abs(y - Canvas.GetTop(other.Border)) <= 6) y = Canvas.GetTop(other.Border);
+            }
+        }
         Canvas.SetLeft(widget.Border, x);
         Canvas.SetTop(widget.Border, y);
         var layout = LayoutFor(id);
@@ -467,7 +571,7 @@ public sealed class RaceEngineerOverlayWindow : Window
         {
             _layout.ScreenWidth = _screenWidth;
             _layout.ScreenHeight = _screenHeight;
-            OverlayLayoutService.Save(_layout);
+            OverlayLayoutService.Save(_layout, _layoutSlot);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -481,14 +585,6 @@ public sealed class RaceEngineerOverlayWindow : Window
         widget.Value.Text = text;
         widget.Border.BorderBrush = colour;
         widget.Title.Foreground = colour;
-    }
-
-    private static IBrush LapsColour(RaceEngineerSnapshot snapshot)
-    {
-        var laps = snapshot.LastLaps.TakeLast(2).ToArray();
-        if (laps.Length == 0) return Cyan;
-        if (!laps[^1].Clean) return Red;
-        return laps.Length == 2 && laps[^1].LapTimeMs <= laps[^2].LapTimeMs ? Green : Amber;
     }
 
     private static IBrush TyresColour(TyreLifeAdvice value)
