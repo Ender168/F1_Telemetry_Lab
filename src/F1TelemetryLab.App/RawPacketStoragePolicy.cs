@@ -22,6 +22,8 @@ public sealed class RawPacketStoragePolicy
         if (header is not { PacketFormat: AppInfo.SupportedPacketFormat } h)
             return RawPacketStorageDecision.Store;
 
+        if (h.SessionUid == 0) return RawPacketStorageDecision.Store;
+
         if (h.PacketId == 9)
             return RawPacketStorageDecision.SkipLobbyInfo;
 

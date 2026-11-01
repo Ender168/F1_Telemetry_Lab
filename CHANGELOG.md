@@ -1,3 +1,12 @@
+## 0.10.20 - Terminal classification and MotionEx clock recovery
+
+- Fix #29: reject MotionEx timestamps inconsistent with fresh racing clocks without advancing the accepted watermark. Recover an inconsistent retained sample through corroborating Lap/Telemetry clocks and three coherent samples, followed by the full existing traction dwell.
+- Preserve frozen startup clocks, late-packet rejection, Flashback/session/player resets and all Hotlap/Boost traction thresholds. Report missing packets, rejected packets and retained stale samples with source frame, session time and age.
+- Fix #28: preserve all UID-zero raw packets and index their terminal/menu segment separately. Exclude UID-zero samples from racing summaries, live state, metadata and rewind detection.
+- Associate UID-zero packet 8 only after SEND, within three minutes, with matching participant slots/count, available grid positions, lap/stop evidence, player best lap and finish time. Keep original headers, raw packet IDs and explicit contextual provenance; conflicting packets revoke association.
+- Prefer ordinary matching-UID classification. Report unmatched/conflicting association reasons; exclude laps beyond confirmed result distance from race summaries, including a lapped driver's cooldown lap.
+- Regression coverage includes the reported 112.962753-second anomaly, safe dwell, frozen clocks, lifecycle resets, duplicate/conflicting/unrelated terminal packets, adjacent sessions, lapped finish, start/end fuel and ERS, raw byte preservation and repeat analysis.
+
 ## 0.10.19 - Overlay comparison and layout editor
 
 - Combine ahead/player/behind lap histories into one movable card with three completed laps per driver. Compare only matching lap numbers with confirmed clean validity; mark pit, SC and unknown laps.

@@ -100,6 +100,7 @@ public static class TelemetryCompletenessService
                 var packetId = reader.GetInt32(1);
                 var payload = (byte[])reader[2];
                 if (!F12026Parser.TryParseHeader(payload, out var header)) continue;
+                if (header.SessionUid == 0 && packetId != 8) continue;
 
                 switch (packetId)
                 {

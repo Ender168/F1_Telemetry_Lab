@@ -22,6 +22,9 @@ public sealed class PacketSequenceTracker
         if (header.PacketFormat != AppInfo.SupportedPacketFormat)
             return new PacketSequenceObservation(true, false, false, false, false);
 
+        if (header.SessionUid == 0)
+            return new PacketSequenceObservation(false, false, false, false, true);
+
         var sessionChanged = false;
         if (header.SessionUid != 0 && _activeSessionUid == 0)
             _activeSessionUid = header.SessionUid;

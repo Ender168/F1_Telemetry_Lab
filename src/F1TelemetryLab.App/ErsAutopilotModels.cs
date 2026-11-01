@@ -244,6 +244,7 @@ public sealed record ErsControlState(
     public int? ActualTyreCompound { get; init; }
     public int? VisualTyreCompound { get; init; }
     public ErsPlayerMotion? PlayerMotion { get; init; }
+    public string MotionDiagnostic { get; init; } = "";
 
     public bool PitLapBurn { get; init; }
 

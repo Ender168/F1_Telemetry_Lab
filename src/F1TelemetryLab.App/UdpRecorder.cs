@@ -456,7 +456,7 @@ public sealed class UdpRecorder : IAsyncDisposable
                     _liftCoast?.ProcessPacket(live);
                     _raceEngineer?.SetAutopilotDecision(_ersAutopilot?.Status, _ersAutopilot?.LastDecision);
                     _raceEngineer?.ProcessPacket(live);
-                    if (header is { PacketFormat: AppInfo.SupportedPacketFormat, PacketId: 6 })
+                    if (header is { PacketFormat: AppInfo.SupportedPacketFormat, PacketId: 6, SessionUid: not 0 })
                     {
                         _activeCarsBySession.TryGetValue(header.SessionUid, out var count);
                         foreach (var sample in live.Telemetry)
@@ -574,7 +574,7 @@ public sealed class UdpRecorder : IAsyncDisposable
     private void UpdateSessionMetadata(QueuedPacket packet)
     {
         var sessionMeta = F12026Parser.TryParseSessionMetadata(packet.Payload, _startedAt);
-        if (sessionMeta is null || _metadata is null || packet.Header is null) return;
+        if (sessionMeta is null || _metadata is null || packet.Header is null || packet.Header.SessionUid == 0) return;
 
         var firstMetadata = _metadata.TrackName == "Unknown Track";
         var sessionChanged = _metadata.SessionUid != 0 && _metadata.SessionUid != packet.Header.SessionUid;
