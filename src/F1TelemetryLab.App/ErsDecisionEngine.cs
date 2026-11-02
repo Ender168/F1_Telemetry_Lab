@@ -122,7 +122,8 @@ public sealed class ErsDecisionEngine
             return $"{target} waiting for traction: braking";
         }
         if (gate is null || _traction.Allows(gate, state.ReceivedAt, out var reason)) return null;
-        return $"{target} waiting for traction: {reason}";
+        return $"{target} waiting for traction: {reason}" +
+            (reason.Contains("MotionEx", StringComparison.Ordinal) && state.MotionDiagnostic.Length > 0 ? "; " + state.MotionDiagnostic : "");
     }
 
     private ErsControlDecision TractionHold(ErsControlState state, TacticalContext tactical,

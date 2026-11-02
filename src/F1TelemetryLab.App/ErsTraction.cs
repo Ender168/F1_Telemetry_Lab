@@ -70,11 +70,14 @@ internal sealed class ErsTractionHistory
 
     public bool Allows(ErsTractionGate gate, DateTimeOffset now, out string reason)
     {
-        reason = "MotionEx missing or stale";
+        reason = "MotionEx missing";
         if (_samples.Count == 0) return false;
         var last = _samples[^1];
         if (now < last.ReceivedAt || (now - last.ReceivedAt).TotalMilliseconds > gate.MaximumDataAgeMs)
+        {
+            reason = FormattableString.Invariant($"MotionEx retained sample stale: frame={last.Frame} time={last.SessionTime:0.000}s age={(now - last.ReceivedAt).TotalMilliseconds:0}ms");
             return false;
+        }
         if (!Safe(last, gate, out reason)) return false;
         var first = last;
         for (int i = _samples.Count - 2; i >= 0; i--)

@@ -191,7 +191,7 @@ public static class AnalysisEngine
             received_at TEXT, session_uid TEXT, session_time REAL, frame_identifier INTEGER, overall_frame_identifier INTEGER,
             car_idx INTEGER, is_player INTEGER, position INTEGER, num_laps INTEGER, grid_position INTEGER, points INTEGER,
             num_pit_stops INTEGER, result_status INTEGER, best_lap_time_ms INTEGER, total_race_time_seconds REAL,
-            penalties_time_seconds INTEGER, num_penalties INTEGER, num_tyre_stints INTEGER, result_reason INTEGER
+            penalties_time_seconds INTEGER, num_penalties INTEGER, num_tyre_stints INTEGER, result_reason INTEGER, raw_packet_id INTEGER
         );
         CREATE TABLE IF NOT EXISTS driver_aliases(
             car_idx INTEGER PRIMARY KEY,
@@ -330,13 +330,14 @@ public static class AnalysisEngine
         using var partCmd = PrepareParticipantInsert(writeCon, tx);
         using var partDebugCmd = PrepareParticipantDebugInsert(writeCon, tx);
         using var finalCmd = PrepareFinalClassificationInsert(writeCon, tx);
+        using var terminal = new TerminalClassificationResolver(writeCon, tx);
         var previousSetups = new Dictionary<(ulong SessionUid, int CarIndex), CarSetupSample>();
 
         using var raw = readCon.CreateCommand();
         raw.CommandText = """
-            SELECT received_at, packet_id, payload
+            SELECT received_at, packet_id, payload, id
             FROM raw_packets
-            WHERE packet_format = 2026 AND packet_id IN (0,2,3,4,5,6,7,8,10)
+            WHERE packet_format = 2026 AND (packet_id IN (0,1,2,3,4,5,6,7,8,10) OR CAST(session_uid AS TEXT)='0')
             ORDER BY id
             """;
         using var reader = raw.ExecuteReader();
@@ -351,6 +352,14 @@ public static class AnalysisEngine
             if (F12026Parser.TryParseHeader(payload, out var header) && activeCarsBySession.TryGetValue(header.SessionUid, out var count))
                 activeCars = count;
 
+            if (header is null) continue;
+            var parsedLaps = packetId == 2 && header.SessionUid != 0
+                ? F12026Parser.ParseLapDataPacket(payload, receivedAt, activeCars) : null;
+            terminal.Observe(reader.GetInt64(3), header, payload, receivedAt, parsedLaps);
+            // UID-zero terminal/menu samples have their own receipt-ordered segment.
+            // Never let their reset frames enter racing joins or rewind detection.
+            if (header.SessionUid == 0 && packetId != 8) continue;
+            finalCmd.Parameters["$rawId"].Value = reader.GetInt64(3);
             switch (packetId)
             {
                 case 6:
@@ -365,7 +374,7 @@ public static class AnalysisEngine
                     }
                     break;
                 case 2:
-                    foreach (var s in F12026Parser.ParseLapDataPacket(payload, receivedAt, activeCars))
+                    foreach (var s in parsedLaps!)
                     {
                         InsertLap(lapCmd, s);
                         lapRows++;
@@ -593,6 +602,23 @@ public static class AnalysisEngine
                 ? "A terminal event was recorded, but no official packet 8 classification matched the selected session; classification is derived from the latest lap data."
                 : "No official classification or terminal event was recorded.";
 
+        using (var contextual = connection.CreateCommand())
+        {
+            contextual.CommandText = "SELECT COUNT(*) FROM final_classification WHERE classification_source='contextual_uid_zero_udp'";
+            var count = Convert.ToInt32(contextual.ExecuteScalar());
+            if (count > 0)
+            {
+                completenessRating = "Contextual";
+                completenessSummary = $"UID-zero packet 8 supplies {count} result rows through guarded contextual association. Identity is inferred; see classification_note and terminal_classification_association.";
+            }
+            else if (finalClassificationRows == 0)
+            {
+                contextual.CommandText = "SELECT GROUP_CONCAT(DISTINCT a.note) FROM terminal_classification_association a JOIN analysis_context c ON c.active_session_uid=a.candidate_session_uid WHERE a.status != 'associated'";
+                var reason = Convert.ToString(contextual.ExecuteScalar());
+                if (!string.IsNullOrEmpty(reason)) completenessSummary += " UID-zero association: " + reason;
+            }
+        }
+
         var confidenceRating = completePlayerLaps == 0
             ? "Low"
             : playerLaps.Any(x => x.State is LapState.PartialStart or LapState.PartialEnd)
@@ -804,8 +830,8 @@ public static class AnalysisEngine
     private static SqliteCommand PrepareFinalClassificationInsert(SqliteConnection con, SqliteTransaction tx)
     {
         var cmd = con.CreateCommand(); cmd.Transaction = tx;
-        cmd.CommandText = "INSERT INTO final_classification_packet VALUES ($received,$uid,$session,$frame,$overall,$car,$me,$position,$laps,$grid,$points,$pits,$status,$best,$total,$penaltySeconds,$penalties,$stints,$reason)";
-        AddParams(cmd, "$received", "$uid", "$session", "$frame", "$overall", "$car", "$me", "$position", "$laps", "$grid", "$points", "$pits", "$status", "$best", "$total", "$penaltySeconds", "$penalties", "$stints", "$reason");
+        cmd.CommandText = "INSERT INTO final_classification_packet VALUES ($received,$uid,$session,$frame,$overall,$car,$me,$position,$laps,$grid,$points,$pits,$status,$best,$total,$penaltySeconds,$penalties,$stints,$reason,$rawId)";
+        AddParams(cmd, "$received", "$uid", "$session", "$frame", "$overall", "$car", "$me", "$position", "$laps", "$grid", "$points", "$pits", "$status", "$best", "$total", "$penaltySeconds", "$penalties", "$stints", "$reason", "$rawId");
         return cmd;
     }
 

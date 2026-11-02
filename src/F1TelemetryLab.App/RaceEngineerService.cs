@@ -77,7 +77,7 @@ public sealed class RaceEngineerService
         var receivedAt = packet.ReceivedAt;
         try
         {
-            if (!F12026Parser.TryParseHeader(payload, out var header) || header.PacketFormat != AppInfo.SupportedPacketFormat) return;
+            if (!F12026Parser.TryParseHeader(payload, out var header) || header.PacketFormat != AppInfo.SupportedPacketFormat || header.SessionUid == 0) return;
             if (_retiredSessions.Contains(header.SessionUid)) return;
             if (_sessionUid != 0 && _sessionUid != header.SessionUid)
             {

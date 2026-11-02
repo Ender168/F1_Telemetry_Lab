@@ -19,6 +19,9 @@ internal static class AnalysisDerivedTableBuilder
         BuildLapStateSummary(con);
         BuildTrace(con);
         BuildClassification(con);
+        // Results may confirm a lapped finish before a partial cooldown lap.
+        foreach (var table in new[] { "lap_summary", "lap_state_summary", "analysis_trace_10m" })
+            Execute(con, $"DELETE FROM {table} WHERE lap_num > (SELECT f.lap_num FROM final_classification f WHERE f.car_idx={table}.car_idx AND f.classification_source IN ('official_udp','contextual_uid_zero_udp'));");
         BuildIndexes(con);
     }
 
@@ -478,14 +481,16 @@ internal static class AnalysisDerivedTableBuilder
             SELECT * FROM lap_ranked WHERE rn = 1
         ),
         final_ranked AS (
-            SELECT f.*,
-                   DENSE_RANK() OVER (ORDER BY f.overall_frame_identifier DESC, f.received_at DESC) AS packet_rank,
+            SELECT f.*, COALESCE(a.associated_session_uid, f.session_uid) AS effective_uid,
+                   a.note AS association_note,
+                   DENSE_RANK() OVER (ORDER BY CASE WHEN f.session_uid='0' THEN 1 ELSE 0 END, f.raw_packet_id DESC) AS packet_rank,
                    ROW_NUMBER() OVER (
-                       PARTITION BY f.session_uid, f.overall_frame_identifier, f.car_idx
+                       PARTITION BY f.raw_packet_id, f.car_idx
                        ORDER BY f.received_at DESC
                    ) AS car_rank
             FROM final_classification_packet f
-            JOIN analysis_context c ON c.active_session_uid = f.session_uid
+            LEFT JOIN terminal_classification_association a ON a.raw_packet_id=f.raw_packet_id AND a.status='associated'
+            JOIN analysis_context c ON c.active_session_uid = COALESCE(a.associated_session_uid, f.session_uid)
         ),
         official AS (
             SELECT * FROM final_ranked WHERE packet_rank = 1 AND car_rank = 1
@@ -520,7 +525,7 @@ internal static class AnalysisDerivedTableBuilder
                 COALESCE(l.warnings, 0) AS warnings,
                 f.result_status,
                 COALESCE(l.driver_status, 0) AS driver_status,
-                'official_udp' AS classification_source,
+                CASE WHEN f.session_uid='0' THEN 'contextual_uid_zero_udp' ELSE 'official_udp' END AS classification_source,
                 f.grid_position,
                 f.points,
                 f.num_pit_stops,
@@ -528,13 +533,14 @@ internal static class AnalysisDerivedTableBuilder
                 f.num_penalties,
                 f.num_tyre_stints,
                 f.result_reason,
-                1 AS classification_is_official,
-                'Official final classification from UDP packet 8.' AS classification_note
+                CASE WHEN f.session_uid='0' THEN 0 ELSE 1 END AS classification_is_official,
+                COALESCE(f.association_note, 'Official final classification from UDP packet 8.') AS classification_note,
+                f.raw_packet_id AS source_raw_packet_id, f.session_uid AS header_session_uid, f.effective_uid AS associated_session_uid
             FROM official f
-            LEFT JOIN latest_names n ON n.session_uid = f.session_uid AND n.car_idx = f.car_idx
-            LEFT JOIN latest_lap l ON l.session_uid = f.session_uid AND l.car_idx = f.car_idx
+            LEFT JOIN latest_names n ON n.session_uid = f.effective_uid AND n.car_idx = f.car_idx
+            LEFT JOIN latest_lap l ON l.session_uid = f.effective_uid AND l.car_idx = f.car_idx
             LEFT JOIN driver_aliases a ON a.car_idx = f.car_idx
-            LEFT JOIN best_laps b ON b.session_uid = f.session_uid AND b.car_idx = f.car_idx
+            LEFT JOIN best_laps b ON b.session_uid = f.effective_uid AND b.car_idx = f.car_idx
         ),
         provisional_rows AS (
             SELECT
@@ -565,7 +571,8 @@ internal static class AnalysisDerivedTableBuilder
                 NULL AS num_tyre_stints,
                 NULL AS result_reason,
                 0 AS classification_is_official,
-                'No official packet 8 classification matched the selected session. Positions are reconstructed from the latest Lap Data and may be incomplete; official points, result reasons, total race time and tyre stints are unavailable.' AS classification_note
+                'No official packet 8 classification matched the selected session. Positions are reconstructed from the latest Lap Data and may be incomplete; official points, result reasons, total race time and tyre stints are unavailable.' || COALESCE((SELECT ' UID-zero association: ' || GROUP_CONCAT(DISTINCT note) FROM terminal_classification_association a JOIN analysis_context c ON c.active_session_uid=a.candidate_session_uid WHERE a.status != 'associated'), '') AS classification_note,
+                NULL AS source_raw_packet_id, NULL AS header_session_uid, l.session_uid AS associated_session_uid
             FROM latest_lap l
             LEFT JOIN latest_names n ON n.session_uid = l.session_uid AND n.car_idx = l.car_idx
             LEFT JOIN driver_aliases a ON a.car_idx = l.car_idx

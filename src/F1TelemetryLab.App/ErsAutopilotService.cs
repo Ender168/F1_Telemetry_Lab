@@ -18,7 +18,8 @@ public sealed class ErsAutopilotService : IDisposable
     private SessionControlSample? _session;
     private CarTelemetrySample? _telemetry;
     private CarStatusSample? _carStatus;
-    private ErsPlayerMotion? _playerMotion;
+    private readonly ErsMotionStream _motionStream = new();
+    private ErsPlayerMotion? _playerMotion => _motionStream.Sample;
     private int? _sessionPlayerCarIndex;
     private uint? _statusFrame;
     private readonly Dictionary<byte, uint> _stateFrames = new();
@@ -111,6 +112,7 @@ public sealed class ErsAutopilotService : IDisposable
         {
             if (!F12026Parser.TryParseHeader(payload, out var header) || header.PacketFormat != AppInfo.SupportedPacketFormat) return;
             if (_options.OperatingMode == ErsAutopilotOperatingMode.Live && !PollInputRelease(now)) return;
+            if (header.SessionUid == 0) return; // Terminal/menu evidence is not a new racing timeline.
             // Only Session data may establish a new session. Delayed packets must not
             // switch the controller back to the previous race or sprint.
             if (_retiredSessions.Contains(header.SessionUid)) return;
@@ -168,16 +170,12 @@ public sealed class ErsAutopilotService : IDisposable
             switch (header.PacketId)
             {
                 case 13:
-                    var motion = F12026Parser.ParsePlayerMotionEx(payload, receivedAt);
-                    if (motion is not null && _playerMotion is not null &&
-                        (motion.Frame <= _playerMotion.Frame || motion.SessionTime <= _playerMotion.SessionTime ||
-                         motion.ReceivedAt <= _playerMotion.ReceivedAt)) return;
-                    _playerMotion = motion;
+                    _motionStream.Observe(F12026Parser.ParsePlayerMotionEx(payload, receivedAt));
                     break;
                 case 1:
                     if (_sessionPlayerCarIndex != header.PlayerCarIndex)
                     {
-                        _playerMotion = null;
+                        _motionStream.Reset();
                         _playerLap = null;
                         _telemetry = null;
                         _lapRows.Clear();
@@ -220,6 +218,8 @@ public sealed class ErsAutopilotService : IDisposable
             if (_pitLap.Active && _playerLap is { } lap &&
                 (lap.PitStatus != 0 || lap.LapNum != _pitLap.Lap || lap.ResultStatus != 2))
                 CancelPitLap(now, "Pit entry, lap change or inactive race lap.");
+            if (header.PacketId is 1 or 2 or 6)
+                _motionStream.ObserveClock(header.PacketId, header.SessionTime, receivedAt, header.OverallFrameIdentifier);
             Evaluate(now);
         }
         catch (Exception ex)
@@ -439,6 +439,7 @@ public sealed class ErsAutopilotService : IDisposable
             ActualTyreCompound = _selectedActual,
             VisualTyreCompound = _selectedVisual,
             PlayerMotion = _playerMotion,
+            MotionDiagnostic = _motionStream.Diagnostic(now),
             TotalLaps = _session.TotalLaps,
             DrsActive = _telemetry?.Drs == 1,
             PitLapBurn = _pitLap.Active,
@@ -667,7 +668,7 @@ public sealed class ErsAutopilotService : IDisposable
         _session = null;
         _telemetry = null;
         _carStatus = null;
-        _playerMotion = null;
+        _motionStream.Reset();
         _sessionPlayerCarIndex = null;
         _statusFrame = null;
         _awaitPostPitStatusFrame = null;
@@ -701,7 +702,7 @@ public sealed class ErsAutopilotService : IDisposable
         _session = null;
         _telemetry = null;
         _carStatus = null;
-        _playerMotion = null;
+        _motionStream.Reset();
         _sessionPlayerCarIndex = null;
         _statusFrame = null;
         _awaitPostPitStatusFrame = null;

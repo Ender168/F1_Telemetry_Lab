@@ -102,7 +102,7 @@ public sealed class LiftCoastService
         lock (_sync)
         {
             if (!F12026Parser.TryParseHeader(payload, out var h) || h.PacketFormat != AppInfo.SupportedPacketFormat ||
-                h.PlayerCarIndex >= F12026Parser.MaxCars2026 || _retiredSessions.Contains(h.SessionUid)) return;
+                h.SessionUid == 0 || h.PlayerCarIndex >= F12026Parser.MaxCars2026 || _retiredSessions.Contains(h.SessionUid)) return;
             if (h.PacketId == 1)
             {
                 var session = F12026Parser.TryParseSessionControl(payload, receivedAt);
